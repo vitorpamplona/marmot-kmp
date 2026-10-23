@@ -11,9 +11,9 @@ kotlinxSerialization = "1.11.0"
 mavenPublish = "0.37.0"
 # RFC 9420 MLS engine (vitorpamplona/mls-kmp). Keep it at the version Quartz was built against.
 mlsKmp = "1.0.0"
-# The Nostr protocol library (vitorpamplona/quartz). 3.0.0 is the first release without Marmot in it;
+# The Nostr protocol library (vitorpamplona/quartz). 2.3.0 is the first release without the Marmot engine;
 # until it is on Maven Central, build against a checkout with -PquartzDir=../quartz.
-quartzKmp = "3.0.0"
+quartzKmp = "2.3.0"
 # The JNI bindings tests load must match the secp256k1-kmp version Quartz is built against.
 secp256k1Kmp = "0.24.0"
 spotless = "8.10.3"
