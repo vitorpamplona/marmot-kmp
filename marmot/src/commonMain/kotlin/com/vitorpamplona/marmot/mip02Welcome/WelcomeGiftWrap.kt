@@ -21,6 +21,7 @@
 package com.vitorpamplona.marmot.mip02Welcome
 
 import com.vitorpamplona.marmot.mip02Welcome.WelcomeGiftWrap.wrapForRecipient
+import com.vitorpamplona.quartz.marmot.mip02Welcome.WelcomeEvent
 import com.vitorpamplona.quartz.nip01Core.core.HexKey
 import com.vitorpamplona.quartz.nip01Core.relay.normalizer.NormalizedRelayUrl
 import com.vitorpamplona.quartz.nip01Core.signers.NostrSigner

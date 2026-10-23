@@ -20,7 +20,7 @@
  */
 package com.vitorpamplona.marmot
 
-import com.vitorpamplona.marmot.mip00KeyPackages.KeyPackageRelayListEvent
+import com.vitorpamplona.quartz.marmot.mip00KeyPackages.KeyPackageRelayListEvent
 import com.vitorpamplona.quartz.nip01Core.core.HexKey
 import com.vitorpamplona.quartz.nip01Core.relay.client.INostrClient
 import com.vitorpamplona.quartz.nip01Core.relay.client.accessories.fetchAll
@@ -46,11 +46,6 @@ import com.vitorpamplona.quartz.nip65RelayList.AdvertisedRelayListEvent
  *  - kind:10002 — fallback for both, plus a generic outbox/inbox advertisement.
  */
 object RecipientRelayFetcher {
-    init {
-        // Typed parsing of the Marmot kinds needs Quartz's EventFactory to know them.
-        MarmotEvents.register()
-    }
-
     data class Lists(
         /** kind:10050 relays — where the user's NIP-17 / NIP-59 inbox lives. */
         val dmInbox: List<NormalizedRelayUrl>,

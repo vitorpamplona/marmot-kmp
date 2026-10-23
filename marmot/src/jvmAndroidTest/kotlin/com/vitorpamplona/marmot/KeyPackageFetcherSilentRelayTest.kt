@@ -20,9 +20,9 @@
  */
 package com.vitorpamplona.marmot
 
-import com.vitorpamplona.marmot.mip00KeyPackages.KeyPackageEvent
 import com.vitorpamplona.marmot.mip00KeyPackages.KeyPackageFetcher
 import com.vitorpamplona.marmot.testing.InProcessRelays
+import com.vitorpamplona.quartz.marmot.mip00KeyPackages.KeyPackageEvent
 import com.vitorpamplona.quartz.nip01Core.crypto.KeyPair
 import com.vitorpamplona.quartz.nip01Core.relay.client.NostrClient
 import com.vitorpamplona.quartz.nip01Core.relay.client.accessories.publishAndConfirm

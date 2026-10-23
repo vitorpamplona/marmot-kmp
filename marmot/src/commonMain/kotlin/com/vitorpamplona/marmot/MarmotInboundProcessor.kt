@@ -24,8 +24,6 @@ import com.vitorpamplona.crypto.sha2.sha256
 import com.vitorpamplona.marmot.foundation.appEvents.MarmotAppEvent
 import com.vitorpamplona.marmot.groups.MlsGroupManager
 import com.vitorpamplona.marmot.mip00KeyPackages.KeyPackageRotationManager
-import com.vitorpamplona.marmot.mip02Welcome.WelcomeEvent
-import com.vitorpamplona.marmot.mip03GroupMessages.GroupEvent
 import com.vitorpamplona.marmot.mip03GroupMessages.GroupEventEncryption
 import com.vitorpamplona.marmot.protocolCore.ConvergenceAdmission
 import com.vitorpamplona.marmot.protocolCore.ConvergenceResolution
@@ -41,6 +39,8 @@ import com.vitorpamplona.mls.framing.WireFormat
 import com.vitorpamplona.mls.group.MlsGroupState
 import com.vitorpamplona.mls.messages.KeyPackageBundle
 import com.vitorpamplona.mls.messages.Welcome
+import com.vitorpamplona.quartz.marmot.mip02Welcome.WelcomeEvent
+import com.vitorpamplona.quartz.marmot.mip03GroupMessages.GroupEvent
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.core.HexKey
 import com.vitorpamplona.quartz.nip01Core.core.toHexKey
@@ -225,11 +225,6 @@ class MarmotInboundProcessor(
     private val keyPackageRotationManager: KeyPackageRotationManager,
     private val convergence: MarmotConvergenceEngine = MarmotConvergenceEngine(groupManager),
 ) {
-    init {
-        // Typed parsing of the Marmot kinds needs Quartz's EventFactory to know them.
-        MarmotEvents.register()
-    }
-
     private val processedIdsMutex = Mutex()
 
     /**

@@ -22,7 +22,6 @@ package com.vitorpamplona.marmot.client
 
 import com.vitorpamplona.crypto.sha2.sha256
 import com.vitorpamplona.marmot.GroupEventResult
-import com.vitorpamplona.marmot.MarmotEvents
 import com.vitorpamplona.marmot.MarmotInboundProcessor
 import com.vitorpamplona.marmot.MarmotIngestDedupStore
 import com.vitorpamplona.marmot.MarmotOutboundProcessor
@@ -61,13 +60,10 @@ import com.vitorpamplona.marmot.groups.agentTextStreamSecret
 import com.vitorpamplona.marmot.groups.currentGroupState
 import com.vitorpamplona.marmot.groups.currentMarmotData
 import com.vitorpamplona.marmot.mip00KeyPackages.KeyPackageBundleStore
-import com.vitorpamplona.marmot.mip00KeyPackages.KeyPackageEvent
 import com.vitorpamplona.marmot.mip00KeyPackages.KeyPackageRotationManager
 import com.vitorpamplona.marmot.mip00KeyPackages.KeyPackageUtils
-import com.vitorpamplona.marmot.mip00KeyPackages.PublishedKeyPackage
+import com.vitorpamplona.marmot.mip00KeyPackages.buildCurrentProfileFrom
 import com.vitorpamplona.marmot.mip01Groups.MarmotGroupData
-import com.vitorpamplona.marmot.mip02Welcome.WelcomeEvent
-import com.vitorpamplona.marmot.mip03GroupMessages.GroupEvent
 import com.vitorpamplona.marmot.mip03GroupMessages.GroupEventEncryption
 import com.vitorpamplona.marmot.protocolCore.GroupLifecycleState
 import com.vitorpamplona.marmot.protocolCore.LocalOutboundGate
@@ -78,6 +74,10 @@ import com.vitorpamplona.marmot.protocolCore.PublishOutcome
 import com.vitorpamplona.mls.group.MlsGroup
 import com.vitorpamplona.mls.messages.CommitResult
 import com.vitorpamplona.mls.tree.Credential
+import com.vitorpamplona.quartz.marmot.mip00KeyPackages.KeyPackageEvent
+import com.vitorpamplona.quartz.marmot.mip00KeyPackages.PublishedKeyPackage
+import com.vitorpamplona.quartz.marmot.mip02Welcome.WelcomeEvent
+import com.vitorpamplona.quartz.marmot.mip03GroupMessages.GroupEvent
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.core.HexKey
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
@@ -156,11 +156,6 @@ class MarmotManager(
      */
     private val scope: CoroutineScope? = null,
 ) {
-    init {
-        // Typed parsing of the Marmot kinds needs Quartz's EventFactory to know them.
-        MarmotEvents.register()
-    }
-
     val groupManager = MlsGroupManager(store)
     val keyPackageRotationManager = KeyPackageRotationManager(keyPackageStore)
     val subscriptionManager = MarmotSubscriptionManager(signer.pubKey)

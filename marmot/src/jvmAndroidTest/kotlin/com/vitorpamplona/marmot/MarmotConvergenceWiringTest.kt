@@ -24,12 +24,12 @@ import com.vitorpamplona.crypto.sha2.sha256
 import com.vitorpamplona.marmot.groups.MlsGroupManager
 import com.vitorpamplona.marmot.mip00KeyPackages.KeyPackageRotationManager
 import com.vitorpamplona.marmot.mip01Groups.MarmotGroupData
-import com.vitorpamplona.marmot.mip03GroupMessages.GroupEvent
 import com.vitorpamplona.marmot.mip03GroupMessages.GroupEventEncryption
 import com.vitorpamplona.marmot.protocolCore.ConvergencePolicy
 import com.vitorpamplona.marmot.protocolCore.ConvergenceStatus
 import com.vitorpamplona.marmot.protocolCore.GroupLifecycleState
 import com.vitorpamplona.marmot.protocolCore.MarmotConvergenceEngine
+import com.vitorpamplona.quartz.marmot.mip03GroupMessages.GroupEvent
 import com.vitorpamplona.quartz.nip01Core.core.toHexKey
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test

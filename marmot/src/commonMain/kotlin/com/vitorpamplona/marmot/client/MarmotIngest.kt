@@ -23,8 +23,8 @@ package com.vitorpamplona.marmot.client
 import com.vitorpamplona.marmot.GroupEventResult
 import com.vitorpamplona.marmot.MarmotInboundProcessor
 import com.vitorpamplona.marmot.WelcomeResult
-import com.vitorpamplona.marmot.mip02Welcome.WelcomeEvent
-import com.vitorpamplona.marmot.mip03GroupMessages.GroupEvent
+import com.vitorpamplona.quartz.marmot.mip02Welcome.WelcomeEvent
+import com.vitorpamplona.quartz.marmot.mip03GroupMessages.GroupEvent
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.core.HexKey
 import com.vitorpamplona.quartz.nip59Giftwrap.wraps.GiftWrapEvent

@@ -21,15 +21,15 @@
 package com.vitorpamplona.marmot
 
 import com.vitorpamplona.crypto.chacha.ChaCha20Poly1305
-import com.vitorpamplona.marmot.mip00KeyPackages.KeyPackageEvent
 import com.vitorpamplona.marmot.mip00KeyPackages.KeyPackageUtils
 import com.vitorpamplona.marmot.mip01Groups.MarmotGroupData
 import com.vitorpamplona.marmot.mip01Groups.Mip01ImageCrypto
-import com.vitorpamplona.marmot.mip03GroupMessages.GroupEvent
 import com.vitorpamplona.marmot.mip03GroupMessages.GroupEventEncryption
 import com.vitorpamplona.marmot.mip04EncryptedMedia.Mip04MediaEncryption
 import com.vitorpamplona.marmot.mip04EncryptedMedia.Mip04ParseResult
 import com.vitorpamplona.marmot.mip04EncryptedMedia.parseMip04
+import com.vitorpamplona.quartz.marmot.mip00KeyPackages.KeyPackageEvent
+import com.vitorpamplona.quartz.marmot.mip03GroupMessages.GroupEvent
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
 import com.vitorpamplona.quartz.nip92IMeta.IMetaTagBuilder
 import kotlin.io.encoding.Base64

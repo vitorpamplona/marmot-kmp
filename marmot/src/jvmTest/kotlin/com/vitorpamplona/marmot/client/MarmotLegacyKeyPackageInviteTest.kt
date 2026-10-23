@@ -20,8 +20,8 @@
  */
 package com.vitorpamplona.marmot.client
 
-import com.vitorpamplona.marmot.mip00KeyPackages.LegacyKeyPackageEvent
 import com.vitorpamplona.marmot.mip01Groups.MarmotGroupData
+import com.vitorpamplona.quartz.marmot.mip00KeyPackages.LegacyKeyPackageEvent
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.crypto.KeyPair
 import com.vitorpamplona.quartz.nip01Core.relay.normalizer.RelayUrlNormalizer

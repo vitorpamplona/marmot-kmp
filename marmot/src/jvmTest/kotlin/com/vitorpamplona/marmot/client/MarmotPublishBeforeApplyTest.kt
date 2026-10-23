@@ -22,9 +22,9 @@ package com.vitorpamplona.marmot.client
 
 import com.vitorpamplona.marmot.GroupEventResult
 import com.vitorpamplona.marmot.mip01Groups.MarmotGroupData
-import com.vitorpamplona.marmot.mip03GroupMessages.GroupEvent
 import com.vitorpamplona.marmot.protocolCore.GroupLifecycleState
 import com.vitorpamplona.marmot.protocolCore.LocalOutboundGate
+import com.vitorpamplona.quartz.marmot.mip03GroupMessages.GroupEvent
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.core.toHexKey
 import com.vitorpamplona.quartz.nip01Core.crypto.KeyPair

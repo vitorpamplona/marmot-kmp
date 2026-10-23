@@ -21,7 +21,7 @@
 package com.vitorpamplona.marmot.client
 
 import com.vitorpamplona.marmot.MarmotFilters
-import com.vitorpamplona.marmot.mip03GroupMessages.GroupEvent
+import com.vitorpamplona.quartz.marmot.mip03GroupMessages.GroupEvent
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.core.HexKey
 import com.vitorpamplona.quartz.nip01Core.relay.filters.Filter

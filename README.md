@@ -17,11 +17,10 @@ dependencies {
 }
 ```
 
-```kotlin
-// Once at startup, before parsing relay events into your own cache. The library's own entry
-// points call it too.
-MarmotEvents.register()
+The Marmot event classes (`KeyPackageEvent`, `WelcomeEvent`, `GroupEvent`, the push events) are
+part of Quartz, under `com.vitorpamplona.quartz.marmot`, so they parse typed with no setup.
 
+```kotlin
 val marmot =
     MarmotManager(
         signer = signer,                       // a Quartz NostrSigner

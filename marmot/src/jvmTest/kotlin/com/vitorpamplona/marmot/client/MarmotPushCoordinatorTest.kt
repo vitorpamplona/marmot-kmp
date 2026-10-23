@@ -22,17 +22,18 @@ package com.vitorpamplona.marmot.client
 
 import com.vitorpamplona.marmot.mip01Groups.MarmotGroupData
 import com.vitorpamplona.marmot.mip05PushNotifications.InMemoryPushStateStore
-import com.vitorpamplona.marmot.mip05PushNotifications.PushBase64
-import com.vitorpamplona.marmot.mip05PushNotifications.PushGossip
-import com.vitorpamplona.marmot.mip05PushNotifications.PushOwnerProof
-import com.vitorpamplona.marmot.mip05PushNotifications.PushPlatform
-import com.vitorpamplona.marmot.mip05PushNotifications.PushRecordKind
-import com.vitorpamplona.marmot.mip05PushNotifications.PushSignedRecord
-import com.vitorpamplona.marmot.mip05PushNotifications.PushTokenEntry
 import com.vitorpamplona.marmot.mip05PushNotifications.TokenEncryption
-import com.vitorpamplona.marmot.mip05PushNotifications.TokenListEvent
-import com.vitorpamplona.marmot.mip05PushNotifications.TokenRemovalEvent
-import com.vitorpamplona.marmot.mip05PushNotifications.TokenRequestEvent
+import com.vitorpamplona.quartz.marmot.mip05PushNotifications.NotificationRequestEvent
+import com.vitorpamplona.quartz.marmot.mip05PushNotifications.PushBase64
+import com.vitorpamplona.quartz.marmot.mip05PushNotifications.PushGossip
+import com.vitorpamplona.quartz.marmot.mip05PushNotifications.PushOwnerProof
+import com.vitorpamplona.quartz.marmot.mip05PushNotifications.PushPlatform
+import com.vitorpamplona.quartz.marmot.mip05PushNotifications.PushRecordKind
+import com.vitorpamplona.quartz.marmot.mip05PushNotifications.PushSignedRecord
+import com.vitorpamplona.quartz.marmot.mip05PushNotifications.PushTokenEntry
+import com.vitorpamplona.quartz.marmot.mip05PushNotifications.TokenListEvent
+import com.vitorpamplona.quartz.marmot.mip05PushNotifications.TokenRemovalEvent
+import com.vitorpamplona.quartz.marmot.mip05PushNotifications.TokenRequestEvent
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
 import com.vitorpamplona.quartz.nip01Core.core.toHexKey
@@ -306,13 +307,12 @@ class MarmotPushCoordinatorTest {
         }
 
     private fun Fixture.chunksOf(trigger: Event): List<ByteArray>? =
-        com.vitorpamplona.marmot.mip05PushNotifications
-            .NotificationRequestEvent(
-                trigger.id,
-                trigger.pubKey,
-                trigger.createdAt,
-                trigger.tags,
-                trigger.content,
-                trigger.sig,
-            ).chunks()
+        NotificationRequestEvent(
+            trigger.id,
+            trigger.pubKey,
+            trigger.createdAt,
+            trigger.tags,
+            trigger.content,
+            trigger.sig,
+        ).chunks()
 }

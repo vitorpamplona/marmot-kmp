@@ -23,10 +23,10 @@ package com.vitorpamplona.marmot
 import com.vitorpamplona.marmot.groups.MlsGroupManager
 import com.vitorpamplona.marmot.groups.MlsGroupStateStore
 import com.vitorpamplona.marmot.mip00KeyPackages.KeyPackageRotationManager
-import com.vitorpamplona.marmot.mip03GroupMessages.GroupEvent
 import com.vitorpamplona.marmot.mip03GroupMessages.GroupEventEncryption
 import com.vitorpamplona.marmot.protocolCore.ConvergenceStatus
 import com.vitorpamplona.marmot.protocolCore.GroupLifecycleState
+import com.vitorpamplona.quartz.marmot.mip03GroupMessages.GroupEvent
 import com.vitorpamplona.quartz.nip01Core.core.toHexKey
 import com.vitorpamplona.quartz.nip01Core.crypto.KeyPair
 import com.vitorpamplona.quartz.nip01Core.signers.NostrSignerInternal

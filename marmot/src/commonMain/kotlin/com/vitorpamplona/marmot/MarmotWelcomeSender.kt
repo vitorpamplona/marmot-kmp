@@ -56,11 +56,6 @@ data class WelcomeDelivery(
 class MarmotWelcomeSender(
     private val signer: NostrSigner,
 ) {
-    init {
-        // Typed parsing of the Marmot kinds needs Quartz's EventFactory to know them.
-        MarmotEvents.register()
-    }
-
     /**
      * Wrap Welcome bytes from a CommitResult for delivery to a new member.
      *

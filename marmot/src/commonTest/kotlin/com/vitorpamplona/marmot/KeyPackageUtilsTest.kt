@@ -20,8 +20,8 @@
  */
 package com.vitorpamplona.marmot
 
-import com.vitorpamplona.marmot.mip00KeyPackages.KeyPackageEvent
 import com.vitorpamplona.marmot.mip00KeyPackages.KeyPackageUtils
+import com.vitorpamplona.quartz.marmot.mip00KeyPackages.KeyPackageEvent
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import kotlin.test.Test
 import kotlin.test.assertEquals

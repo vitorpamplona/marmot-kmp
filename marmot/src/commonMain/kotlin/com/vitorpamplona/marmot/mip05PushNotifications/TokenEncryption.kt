@@ -23,6 +23,8 @@ package com.vitorpamplona.marmot.mip05PushNotifications
 import com.vitorpamplona.crypto.chacha.ChaCha20Poly1305
 import com.vitorpamplona.crypto.mac.MacInstance
 import com.vitorpamplona.crypto.random.RandomInstance
+import com.vitorpamplona.quartz.marmot.mip05PushNotifications.PushPlatform
+import com.vitorpamplona.quartz.marmot.mip05PushNotifications.PushSignedRecord
 import com.vitorpamplona.quartz.utils.Secp256k1Instance
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi

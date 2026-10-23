@@ -20,7 +20,7 @@
  */
 package com.vitorpamplona.marmot
 
-import com.vitorpamplona.marmot.mip03GroupMessages.GroupEvent
+import com.vitorpamplona.quartz.marmot.mip03GroupMessages.GroupEvent
 import com.vitorpamplona.quartz.nip59Giftwrap.wraps.GiftWrapEvent
 import kotlinx.coroutines.test.runTest
 import kotlin.test.Test

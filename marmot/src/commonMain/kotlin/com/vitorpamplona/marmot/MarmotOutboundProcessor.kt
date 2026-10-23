@@ -25,8 +25,8 @@ import com.vitorpamplona.marmot.foundation.appEvents.MarmotAppEvent
 import com.vitorpamplona.marmot.groups.MlsGroupManager
 import com.vitorpamplona.marmot.groups.currentGroupState
 import com.vitorpamplona.marmot.mip01Groups.MarmotGroupData
-import com.vitorpamplona.marmot.mip03GroupMessages.GroupEvent
 import com.vitorpamplona.marmot.mip03GroupMessages.GroupEventEncryption
+import com.vitorpamplona.quartz.marmot.mip03GroupMessages.GroupEvent
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.core.HexKey
 import com.vitorpamplona.quartz.nip01Core.core.toHexKey
@@ -68,11 +68,6 @@ data class OutboundGroupEvent(
 class MarmotOutboundProcessor(
     private val groupManager: MlsGroupManager,
 ) {
-    init {
-        // Typed parsing of the Marmot kinds needs Quartz's EventFactory to know them.
-        MarmotEvents.register()
-    }
-
     /**
      * Encrypt an inner Nostr event and build a GroupEvent for publishing.
      *

@@ -26,12 +26,12 @@ import com.vitorpamplona.marmot.groups.MarmotGroupPolicy
 import com.vitorpamplona.marmot.groups.MlsGroupManager
 import com.vitorpamplona.marmot.groups.isLocalAdmin
 import com.vitorpamplona.marmot.mip01Groups.MarmotGroupData
-import com.vitorpamplona.marmot.mip02Welcome.WelcomeEvent
-import com.vitorpamplona.marmot.mip03GroupMessages.GroupEvent
 import com.vitorpamplona.mls.InternalMlsApi
 import com.vitorpamplona.mls.codec.TlsReader
 import com.vitorpamplona.mls.group.MlsGroup
 import com.vitorpamplona.mls.messages.KeyPackageBundle
+import com.vitorpamplona.quartz.marmot.mip02Welcome.WelcomeEvent
+import com.vitorpamplona.quartz.marmot.mip03GroupMessages.GroupEvent
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
 import com.vitorpamplona.quartz.nip01Core.core.toHexKey
 import com.vitorpamplona.quartz.nip01Core.crypto.KeyPair

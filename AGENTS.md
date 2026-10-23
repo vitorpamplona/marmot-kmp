@@ -7,10 +7,13 @@ library for JVM, Android, iOS, macOS and Linux, published to Maven Central as
 [mls-kmp](https://github.com/vitorpamplona/mls-kmp), and is used by
 [Amethyst](https://github.com/vitorpamplona/amethyst), its desktop app and the `amy` CLI.
 
-The code was the `com.vitorpamplona.quartz.marmot` package of Quartz, plus the headless group
-pipeline from Amethyst's `commons` (`MarmotManager` and friends). It moved here so clients that do
-not speak Marmot don't carry an MLS engine. cordn, the other MLS binding, is
-[cordn-kmp](https://github.com/vitorpamplona/cordn-kmp); the two never import each other.
+The code was the engine half of Quartz's `com.vitorpamplona.quartz.marmot` package, plus the headless
+group pipeline from Amethyst's `commons` (`MarmotManager` and friends). It moved here so clients that
+do not speak Marmot don't carry an MLS engine. The Marmot **event classes, tags and push content
+codecs stay in Quartz** (`com.vitorpamplona.quartz.marmot.mip00KeyPackages` … `mip05PushNotifications`),
+so every Nostr client and relay parses and stores the kinds typed; this library imports them from
+there. cordn, the other MLS binding, is [cordn-kmp](https://github.com/vitorpamplona/cordn-kmp);
+the two never import each other.
 
 The specs are the Marmot protocol's MIPs (the `marmot-protocol` organization on GitHub). Interop is
 checked against MDK, the reference implementation (<https://github.com/marmot-protocol/mdk>), through
@@ -19,12 +22,14 @@ checked against MDK, the reference implementation (<https://github.com/marmot-pr
 ## Layout
 
 - `marmot/`: the library module, `marmot/src/<sourceSet>/kotlin/com/vitorpamplona/marmot/…`.
-  - `mip00KeyPackages/` … `mip05PushNotifications/`: one package per MIP (events, tags, codecs).
+  - `mip00KeyPackages/` … `mip05PushNotifications/`: one package per MIP, for what needs MLS or
+    group state (KeyPackage building and rotation, Welcome delivery, group-event encryption, push
+    stores); the events and tags they use are Quartz's.
   - `foundation/`, `appComponents/`, `protocolCore/`: the current-profile foundation, the app
     components (`0x8001`…), and convergence, branch selection and the publish gate.
   - `groups/`: `MlsGroupManager`, the group policy and the store interfaces.
   - The package root: `MarmotInboundProcessor`/`MarmotOutboundProcessor`, subscriptions, filters,
-    `MarmotEvents` (event-kind registration), `RecipientRelayFetcher`.
+    `RecipientRelayFetcher`.
   - `client/`: the headless client a front end drives: `MarmotManager` (group lifecycle, send,
     ingest, restore), `MarmotSyncPolicy`, `MarmotPushCoordinator`, `MarmotAgentStreamWatcher`.
   - Tests: `commonTest`, `jvmAndroidTest` (JUnit, the in-process test relay in `testing/`),
@@ -40,9 +45,10 @@ checked against MDK, the reference implementation (<https://github.com/marmot-pr
   `@Stable` are the only Compose dependency. Platform storage, keystores and UI state belong to
   the app; the library defines the store interfaces (`MlsGroupStateStore`, `MarmotMessageStore`,
   `KeyPackageBundleStore`, …) and in-memory implementations, and an app's must encrypt at rest.
-- **Quartz does not know Marmot.** The event classes register with Quartz's `EventFactory` through
-  `MarmotEvents.register()`; every entry point (managers, processors, fetchers, the event
-  companions) calls it. A new Marmot kind adds its builder there and its own `init` call.
+- **Event classes belong to Quartz.** A new Marmot kind, tag or content codec is a Quartz change
+  (`quartz/…/marmot/`, with its `EventFactory` branch); only code that needs MLS, crypto state or
+  storage lives here. Quartz must not import MLS, so anything reading MLS bytes off an event is an
+  extension here (`KeyPackageEvent.buildCurrentProfileFrom`).
 - **Never depend on cordn-kmp**, and never let Quartz depend on this library.
 - **Reuse Quartz's relay operations** (`fetchAll`, `fetchFirst`, `publishAndConfirm`, …, the
   `INostrClient` extensions in Quartz's `nip01Core/relay/client/accessories/`) instead of writing

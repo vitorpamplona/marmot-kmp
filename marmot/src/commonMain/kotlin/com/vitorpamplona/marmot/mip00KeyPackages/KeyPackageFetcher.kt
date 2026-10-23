@@ -20,8 +20,9 @@
  */
 package com.vitorpamplona.marmot.mip00KeyPackages
 
-import com.vitorpamplona.marmot.MarmotEvents
 import com.vitorpamplona.marmot.MarmotFilters
+import com.vitorpamplona.quartz.marmot.mip00KeyPackages.KeyPackageEvent
+import com.vitorpamplona.quartz.marmot.mip00KeyPackages.PublishedKeyPackage
 import com.vitorpamplona.quartz.nip01Core.core.HexKey
 import com.vitorpamplona.quartz.nip01Core.crypto.verify
 import com.vitorpamplona.quartz.nip01Core.relay.client.INostrClient
@@ -47,11 +48,6 @@ import kotlinx.coroutines.launch
  * those sets themselves and pass them in.
  */
 object KeyPackageFetcher {
-    init {
-        // Typed parsing of the Marmot kinds needs Quartz's EventFactory to know them.
-        MarmotEvents.register()
-    }
-
     /**
      * Relays to query for a given user's KeyPackages.
      *

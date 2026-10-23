@@ -20,9 +20,9 @@
  */
 package com.vitorpamplona.marmot
 
-import com.vitorpamplona.marmot.mip00KeyPackages.KeyPackageEvent
 import com.vitorpamplona.marmot.mip00KeyPackages.KeyPackageUtils
-import com.vitorpamplona.marmot.mip03GroupMessages.GroupEvent
+import com.vitorpamplona.quartz.marmot.mip00KeyPackages.KeyPackageEvent
+import com.vitorpamplona.quartz.marmot.mip03GroupMessages.GroupEvent
 import com.vitorpamplona.quartz.nip01Core.core.HexKey
 import com.vitorpamplona.quartz.nip01Core.relay.filters.Filter
 import com.vitorpamplona.quartz.nip59Giftwrap.wraps.GiftWrapEvent
@@ -34,11 +34,6 @@ import com.vitorpamplona.quartz.nip59Giftwrap.wraps.GiftWrapEvent
  * Marmot event types on Nostr relays.
  */
 object MarmotFilters {
-    init {
-        // Typed parsing of the Marmot kinds needs Quartz's EventFactory to know them.
-        MarmotEvents.register()
-    }
-
     /**
      * Filter for KeyPackages by author (kind:30443).
      * Used to discover a user's available KeyPackages for group invitations.

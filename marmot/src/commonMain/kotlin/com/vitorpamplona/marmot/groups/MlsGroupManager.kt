@@ -20,7 +20,6 @@
  */
 package com.vitorpamplona.marmot.groups
 
-import com.vitorpamplona.marmot.MarmotEvents
 import com.vitorpamplona.marmot.appComponents.AdminPolicyV1
 import com.vitorpamplona.marmot.appComponents.GroupLifecycleV1
 import com.vitorpamplona.marmot.groups.MlsGroupManager.Companion.EPOCH_RETENTION_WINDOW
@@ -114,11 +113,6 @@ import kotlinx.coroutines.sync.withLock
 class MlsGroupManager(
     private val store: MlsGroupStateStore,
 ) {
-    init {
-        // Typed parsing of the Marmot kinds needs Quartz's EventFactory to know them.
-        MarmotEvents.register()
-    }
-
     private val mutex = Mutex()
     private val groups = mutableMapOf<HexKey, MlsGroup>()
     private val retainedEpochs = mutableMapOf<HexKey, MutableList<RetainedEpochSecrets>>()

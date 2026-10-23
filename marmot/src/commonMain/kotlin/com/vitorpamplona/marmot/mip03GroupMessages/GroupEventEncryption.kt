@@ -22,6 +22,7 @@ package com.vitorpamplona.marmot.mip03GroupMessages
 
 import com.vitorpamplona.crypto.chacha.ChaCha20Poly1305
 import com.vitorpamplona.crypto.random.RandomInstance
+import com.vitorpamplona.quartz.marmot.mip03GroupMessages.GroupEvent
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
 

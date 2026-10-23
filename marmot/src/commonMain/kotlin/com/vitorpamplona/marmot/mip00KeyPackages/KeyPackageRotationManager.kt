@@ -22,7 +22,6 @@ package com.vitorpamplona.marmot.mip00KeyPackages
 
 import com.vitorpamplona.crypto.curve25519.Ed25519
 import com.vitorpamplona.crypto.curve25519.X25519
-import com.vitorpamplona.marmot.MarmotEvents
 import com.vitorpamplona.marmot.appComponents.CurrentProfileGroupFactory
 import com.vitorpamplona.marmot.groups.MarmotCapabilities
 import com.vitorpamplona.marmot.mip00KeyPackages.KeyPackageRotationManager.Companion.SNAPSHOT_VERSION
@@ -69,11 +68,6 @@ import kotlinx.coroutines.sync.withLock
 class KeyPackageRotationManager(
     private val store: KeyPackageBundleStore? = null,
 ) {
-    init {
-        // Typed parsing of the Marmot kinds needs Quartz's EventFactory to know them.
-        MarmotEvents.register()
-    }
-
     private val mutex = Mutex()
     private val activeBundles = mutableMapOf<String, KeyPackageBundle>()
     private val pendingRotations = mutableSetOf<String>()

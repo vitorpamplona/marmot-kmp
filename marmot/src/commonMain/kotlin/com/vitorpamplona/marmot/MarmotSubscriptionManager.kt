@@ -54,11 +54,6 @@ data class GroupSubscriptionState(
 class MarmotSubscriptionManager(
     private val userPubKey: HexKey,
 ) {
-    init {
-        // Typed parsing of the Marmot kinds needs Quartz's EventFactory to know them.
-        MarmotEvents.register()
-    }
-
     private val mutex = Mutex()
     private val groupSubscriptions = mutableMapOf<HexKey, GroupSubscriptionState>()
     private var giftWrapSince: Long? = null

@@ -22,13 +22,13 @@ package com.vitorpamplona.marmot.transport
 
 import com.vitorpamplona.marmot.TestResourceLoader
 import com.vitorpamplona.marmot.appComponents.AppComponentIds
-import com.vitorpamplona.marmot.mip00KeyPackages.KeyPackageEvent
 import com.vitorpamplona.marmot.mip00KeyPackages.KeyPackageFetcher
 import com.vitorpamplona.marmot.mip00KeyPackages.KeyPackageUtils
 import com.vitorpamplona.mls.codec.TlsReader
 import com.vitorpamplona.mls.framing.MlsMessage
 import com.vitorpamplona.mls.messages.MlsKeyPackage
 import com.vitorpamplona.mls.tree.Credential
+import com.vitorpamplona.quartz.marmot.mip00KeyPackages.KeyPackageEvent
 import com.vitorpamplona.quartz.nip01Core.core.JsonMapper
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
 import com.vitorpamplona.quartz.nip01Core.crypto.KeyPair
