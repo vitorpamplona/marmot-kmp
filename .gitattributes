@@ -1,0 +1,4 @@
+# Golden test resources are compared byte-for-byte: force LF everywhere so a Windows CRLF
+# checkout cannot break the comparison.
+*.json text eol=lf
+*.bin binary
