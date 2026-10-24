@@ -131,13 +131,13 @@ class MarmotOutboundProcessor(
         nostrGroupId: HexKey,
         plaintext: ByteArray,
     ): OutboundGroupEvent {
-        // Step 1: MLS encrypt
-        val epoch = groupManager.getGroup(nostrGroupId)?.epoch
-        val mlsCiphertext = groupManager.encrypt(nostrGroupId, plaintext)
+        // Step 1: MLS encrypt, with its epoch and that epoch's outer key read in the same step
+        val sealed = groupManager.encryptForSend(nostrGroupId, plaintext)
+        val mlsCiphertext = sealed.mlsCiphertext
+        val epoch = sealed.epoch
 
         // Step 2: Outer ChaCha20-Poly1305 encryption
-        val exporterKey = groupManager.exporterSecret(nostrGroupId)
-        val encryptedContent = GroupEventEncryption.encrypt(mlsCiphertext, exporterKey)
+        val encryptedContent = GroupEventEncryption.encrypt(mlsCiphertext, sealed.groupEventKey)
 
         // Step 3: Build the GroupEvent template (auto-apply NIP-40 expiration
         // if the group has disappearing_message_secs configured per MIP-01/03).

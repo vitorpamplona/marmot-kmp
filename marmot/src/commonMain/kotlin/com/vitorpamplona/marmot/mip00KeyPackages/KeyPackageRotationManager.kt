@@ -210,12 +210,13 @@ class KeyPackageRotationManager(
                 retainedBundles.putAll(decoded.retainedBundles)
                 retainedInfo.clear()
                 // A snapshot written before the grace period was tracked says
-                // nothing about why an entry is held. Treat it as consumed and
-                // replaced now, so the 24-hour bound starts at the upgrade
-                // instead of the key living on to `not_after`.
-                val now = TimeUtils.now()
+                // nothing about why an entry is held: a consumed last-resort
+                // bundle, or a displaced one never used, whose KeyPackage peers
+                // may still hold and build a Welcome from. Keep the rule those
+                // entries were written under, `not_after`, rather than delete a
+                // key a pending invite needs a day after the upgrade.
                 for (eventId in decoded.retainedBundles.keys) {
-                    retainedInfo[eventId] = decoded.retainedInfo[eventId] ?: RetainedInfo(slot = "", consumed = true, replacedAt = now)
+                    retainedInfo[eventId] = decoded.retainedInfo[eventId] ?: RetainedInfo(slot = "", consumed = false, replacedAt = null)
                 }
                 val missingInfo = decoded.retainedBundles.keys.any { it !in decoded.retainedInfo }
                 val pruned = pruneExpiredRetainedUnlocked()
@@ -670,16 +671,6 @@ class KeyPackageRotationManager(
     }
 
     /**
-     * Drop retained bundles whose private keys must go:
-     * - past the KeyPackage's own `not_after`, since no peer may invite with an
-     *   expired KeyPackage; or
-     * - consumed, and more than [REPLACEMENT_GRACE_SECONDS] past the confirmed
-     *   publication of its replacement (`foundation/key-packages.md`: "Local
-     *   retention policy MUST NOT extend either bound").
-     *
-     * Caller must hold the mutex.
-     */
-    /**
      * Delete the private keys of every retained bundle past its bound, and save
      * the result. The deletion has to reach the store: a key dropped from memory
      * but still in the snapshot outlives the bound the spec sets
@@ -691,7 +682,16 @@ class KeyPackageRotationManager(
             if (pruneExpiredRetainedUnlocked()) persistUnlocked()
         }
 
-    /** Drops expired retained bundles; true when it dropped any. Caller must hold the mutex. */
+    /**
+     * Drop retained bundles whose private keys must go, and say whether any went:
+     * - past the KeyPackage's own `not_after`, since no peer may invite with an
+     *   expired KeyPackage; or
+     * - consumed, and more than [REPLACEMENT_GRACE_SECONDS] past the confirmed
+     *   publication of its replacement (`foundation/key-packages.md`: "Local
+     *   retention policy MUST NOT extend either bound").
+     *
+     * Caller must hold the mutex.
+     */
     private fun pruneExpiredRetainedUnlocked(): Boolean {
         val now = TimeUtils.now()
         val expired =

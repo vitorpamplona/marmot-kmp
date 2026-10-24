@@ -607,10 +607,12 @@ class MlsGroupManager(
                 clone.members().firstOrNull { it.first == clone.leafIndex }?.second
                     ?: throw IllegalStateException("Group $nostrGroupId has no local leaf")
             val dictionary = AppDataDictionary.fromExtensionsOrEmpty(mine.extensions)
+            // Added to what the leaf already advertises, as MDK's refresh does: a refresh must never
+            // withdraw support the group may require, or the downgrade check refuses it every time.
             val refreshed =
                 dictionary.with(
                     ComponentsList.APP_COMPONENTS_ID,
-                    ComponentsList.encode(CurrentProfileGroupFactory.SUPPORTED_COMPONENTS),
+                    ComponentsList.encode((leafSupportedComponents(mine) + CurrentProfileGroupFactory.SUPPORTED_COMPONENTS).toList()),
                 )
             val extensions =
                 mine.extensions.filterNot { it.extensionType == AppDataDictionary.EXTENSION_TYPE } + refreshed.toExtension()
@@ -781,6 +783,31 @@ class MlsGroupManager(
             val ciphertext = requireGroup(nostrGroupId).encrypt(plaintext)
             persistSenderRatchet(nostrGroupId)
             ciphertext
+        }
+
+    /**
+     * Runs [read] on the group under the lock commits are applied under, so it never sees one
+     * half-applied: a commit rewrites the extensions before it moves the epoch.
+     */
+    suspend fun <T> readGroup(
+        nostrGroupId: HexKey,
+        read: (MlsGroup) -> T,
+    ): T? = mutex.withLock { groups[nostrGroupId]?.let(read) }
+
+    /**
+     * [encrypt], with the epoch the ciphertext was made in and that epoch's group-event key, read
+     * under the same lock. Read apart, a commit merging in between would label the message with one
+     * epoch and seal its outer layer with another's key.
+     */
+    suspend fun encryptForSend(
+        nostrGroupId: HexKey,
+        plaintext: ByteArray,
+    ): SealedApplicationMessage =
+        mutex.withLock {
+            val group = requireGroup(nostrGroupId)
+            val ciphertext = group.encrypt(plaintext)
+            persistSenderRatchet(nostrGroupId)
+            SealedApplicationMessage(ciphertext, group.epoch, exporterSecret(nostrGroupId))
         }
 
     /**
@@ -1280,3 +1307,10 @@ class MlsGroupManager(
         private const val REUSE_GUARD_LENGTH = 4
     }
 }
+
+/** An application message encrypted for sending: see [MlsGroupManager.encryptForSend]. */
+class SealedApplicationMessage(
+    val mlsCiphertext: ByteArray,
+    val epoch: Long,
+    val groupEventKey: ByteArray,
+)

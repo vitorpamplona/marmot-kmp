@@ -1680,6 +1680,7 @@ class MarmotManager(
             // epoch is still the group's current retention.
             parsed?.let { pinExpiry(nostrGroupId, it, epoch) }
         } catch (e: Exception) {
+            currentCoroutineContext().ensureActive()
             Log.w("MarmotManager", "Failed to persist Marmot message for $nostrGroupId", e)
         }
     }
@@ -1833,15 +1834,12 @@ class MarmotManager(
     private suspend fun captureEpochAdmins(nostrGroupId: HexKey) = moderationMutex.withLock { captureEpochAdminsUnlocked(nostrGroupId) }
 
     private suspend fun captureEpochAdminsUnlocked(nostrGroupId: HexKey) {
-        val group = groupManager.getGroup(nostrGroupId) ?: return
-        val epoch = group.epoch
         val known = epochAdminsUnlocked(nostrGroupId)
+        // One read under the commit lock: a commit rewrites the admin list before it moves the
+        // epoch, and the record is first-write-wins, so a mid-commit read would file the next
+        // epoch's admins under this one for good.
+        val (epoch, admins) = groupManager.readGroup(nostrGroupId) { it.epoch to adminPubkeysOf(it).toSet() } ?: return
         if (known.containsKey(epoch)) return
-        val admins = groupView(nostrGroupId)?.adminPubkeys?.toSet() ?: return
-        // A merge between the two reads would file the next epoch's admins under this one, and the
-        // record is first-write-wins. A merge always moves the epoch, so an unchanged one proves
-        // both reads saw the same state.
-        if (groupManager.getGroup(nostrGroupId) !== group || group.epoch != epoch) return
         known[epoch] = admins
         try {
             messageStore?.recordEpochAdmins(nostrGroupId, epoch, admins)
@@ -2348,6 +2346,9 @@ class MarmotManager(
         val isCurrentProfile: Boolean,
     )
 
+    /** The group's active admins: the current-profile admin policy, else the legacy extension's list. */
+    private fun adminPubkeysOf(group: MlsGroup): List<HexKey> = group.currentGroupState().adminPolicy?.adminHexKeys ?: MarmotGroupData.fromExtensions(group.extensions)?.adminPubkeys.orEmpty()
+
     fun groupView(nostrGroupId: HexKey): GroupView? {
         val group = groupManager.getGroup(nostrGroupId) ?: return null
         val state = group.currentGroupState()
@@ -2356,7 +2357,7 @@ class MarmotManager(
         return GroupView(
             name = state.profile?.name?.takeIf { it.isNotEmpty() } ?: legacy?.name.orEmpty(),
             description = state.profile?.description?.takeIf { it.isNotEmpty() } ?: legacy?.description.orEmpty(),
-            adminPubkeys = state.adminPolicy?.adminHexKeys ?: legacy?.adminPubkeys.orEmpty(),
+            adminPubkeys = adminPubkeysOf(group),
             relays = state.routing?.relays ?: legacy?.relays.orEmpty(),
             image =
                 when {

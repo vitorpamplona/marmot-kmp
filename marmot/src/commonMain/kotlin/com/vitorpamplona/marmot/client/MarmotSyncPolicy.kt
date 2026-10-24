@@ -255,12 +255,13 @@ class MarmotSyncPolicy(
                         val confirming = publishAndConfirm
                         if (confirming == null) {
                             publish(event, kpRelays)
+                            log("rotated KeyPackage → ${event.id.take(8)} sent to ${kpRelays.size} relay(s)")
                         } else if (confirming(event, kpRelays)) {
                             marmot.confirmKeyPackagePublished(event)
+                            log("rotated KeyPackage → ${event.id.take(8)} on ${kpRelays.size} relay(s)")
                         } else {
                             log("rotated KeyPackage ${event.id.take(8)} was not confirmed by any relay")
                         }
-                        log("rotated KeyPackage → ${event.id.take(8)} on ${kpRelays.size} relay(s)")
                     }
                 }
             } catch (e: Exception) {

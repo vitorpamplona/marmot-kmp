@@ -75,7 +75,8 @@ class ComponentAdoptionTest {
     /**
      * Receivers refuse an UpdatePath leaf that drops a required component. The
      * committer must refuse it too, before merging: otherwise it moves to an
-     * epoch no peer accepts and forks itself.
+     * epoch no peer accepts and forks itself. It is refused when asked for,
+     * before a commit rotates any key, so the group stays usable.
      */
     @Test
     fun aCommitThatStopsAdvertisingARequiredComponentIsRefusedByItsCommitter(): Unit =
@@ -91,12 +92,27 @@ class ComponentAdoptionTest {
                         ComponentsList.encode(CurrentProfileGroupFactory.SUPPORTED_COMPONENTS - AppComponentIds.GROUP_LIFECYCLE_V1),
                     )
             val epoch = alice.epoch
-            alice.advertiseInNextCommit(
-                MarmotCapabilities.currentProfileLeaf(),
-                mine.extensions.filterNot { it.extensionType == AppDataDictionary.EXTENSION_TYPE } + dropped.toExtension(),
-            )
-            assertFailsWith<IllegalArgumentException> { alice.commit() }
+            assertFailsWith<IllegalArgumentException> {
+                alice.advertiseInNextCommit(
+                    MarmotCapabilities.currentProfileLeaf(),
+                    mine.extensions.filterNot { it.extensionType == AppDataDictionary.EXTENSION_TYPE } + dropped.toExtension(),
+                )
+            }
             assertEquals(epoch, alice.epoch)
+            // Nothing changed: the next commit goes through on the old advertisement.
+            alice.commit()
+            assertEquals(epoch + 1, alice.epoch)
+            assertTrue(
+                AppComponentIds.GROUP_LIFECYCLE_V1 in
+                    ComponentsList.supportedOrRequired(
+                        AppDataDictionary.fromExtensionsOrEmpty(
+                            alice
+                                .members()
+                                .first { it.first == alice.leafIndex }
+                                .second.extensions,
+                        ),
+                    ),
+            )
         }
 
     @Test
