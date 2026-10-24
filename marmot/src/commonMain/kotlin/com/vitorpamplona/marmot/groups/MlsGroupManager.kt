@@ -21,6 +21,7 @@
 package com.vitorpamplona.marmot.groups
 
 import com.vitorpamplona.marmot.appComponents.AdminPolicyV1
+import com.vitorpamplona.marmot.appComponents.CurrentProfileGroupFactory
 import com.vitorpamplona.marmot.appComponents.GroupLifecycleV1
 import com.vitorpamplona.marmot.groups.MlsGroupManager.Companion.EPOCH_RETENTION_WINDOW
 import com.vitorpamplona.marmot.groups.currentAdminIdentities
@@ -28,6 +29,7 @@ import com.vitorpamplona.marmot.groups.currentNostrGroupId
 import com.vitorpamplona.marmot.groups.isLocalAdmin
 import com.vitorpamplona.mls.codec.TlsReader
 import com.vitorpamplona.mls.codec.TlsWriter
+import com.vitorpamplona.mls.components.AppDataDictionary
 import com.vitorpamplona.mls.components.ComponentsList
 import com.vitorpamplona.mls.crypto.MlsCryptoProvider
 import com.vitorpamplona.mls.framing.PublicMessage
@@ -42,6 +44,7 @@ import com.vitorpamplona.mls.messages.KeyPackageBundle
 import com.vitorpamplona.mls.schedule.KeySchedule
 import com.vitorpamplona.mls.schedule.SecretTree
 import com.vitorpamplona.mls.tree.Extension
+import com.vitorpamplona.mls.tree.LeafNode
 import com.vitorpamplona.quartz.nip01Core.core.HexKey
 import com.vitorpamplona.quartz.utils.Log
 import kotlinx.coroutines.currentCoroutineContext
@@ -535,6 +538,14 @@ class MlsGroupManager(
      */
     suspend fun stageEnableDisbanding(nostrGroupId: HexKey): StagedCommit {
         requireAdminForExtensionChange(requireGroup(nostrGroupId))
+        // `app-components/README.md` ("Activation"): valid only when every leaf
+        // in the resulting state advertises the id. Checked again here, right
+        // before committing, so an activation another member cannot accept is
+        // never published.
+        val blockers = componentSupportBlockers(nostrGroupId, GroupLifecycleV1.COMPONENT_ID)
+        check(blockers.isEmpty()) {
+            "Cannot enable disbanding: ${blockers.size} member(s) do not advertise marmot.group.lifecycle.v1 yet"
+        }
         return stage(nostrGroupId) { clone ->
             val dictionary = clone.appDataDictionary()
             val required = ComponentsList.supportedOrRequired(dictionary).toMutableSet()
@@ -546,6 +557,75 @@ class MlsGroupManager(
             clone.commit()
         }
     }
+
+    /**
+     * The members (account identity hex, deduplicated) whose leaf in
+     * [nostrGroupId] does not advertise [componentId] in its `app_components`
+     * list. Empty means the group is eligible to require it
+     * (`app-components/README.md`, "Eligibility").
+     */
+    fun componentSupportBlockers(
+        nostrGroupId: HexKey,
+        componentId: Int,
+    ): List<HexKey> {
+        val group = requireGroup(nostrGroupId)
+        val blockers = LinkedHashSet<HexKey>()
+        for ((leafIndex, leaf) in group.members()) {
+            if (componentId !in leafSupportedComponents(leaf)) {
+                group.memberIdentityHex(leafIndex)?.let { blockers.add(it) }
+            }
+        }
+        return blockers.toList()
+    }
+
+    /**
+     * Component ids this client supports that its own leaf in [nostrGroupId]
+     * does not advertise, for a current-profile group; empty otherwise.
+     *
+     * A leaf's advertisement is fixed when it is created, so a member that
+     * joined before this release supported a component keeps hiding that
+     * support from the group until it replaces its leaf.
+     */
+    fun ownLeafMissingComponents(nostrGroupId: HexKey): Set<Int> {
+        val group = groups[nostrGroupId] ?: return emptySet()
+        if (!group.currentGroupState().isCurrentProfile) return emptySet()
+        val mine = group.members().firstOrNull { it.first == group.leafIndex }?.second ?: return emptySet()
+        val advertised = leafSupportedComponents(mine)
+        return CurrentProfileGroupFactory.SUPPORTED_COMPONENTS.filterNot { it in advertised }.toSet()
+    }
+
+    /**
+     * Stage a self-update Commit whose UpdatePath leaf advertises every
+     * component this client supports (`app-components/README.md`, "Advertising
+     * support"). Everything else on the leaf, the account identity proof
+     * included, is kept: the proof is bound to the leaf's signature key, which
+     * this commit does not rotate.
+     */
+    suspend fun stageLeafRefresh(nostrGroupId: HexKey): StagedCommit =
+        stage(nostrGroupId) { clone ->
+            val mine =
+                clone.members().firstOrNull { it.first == clone.leafIndex }?.second
+                    ?: throw IllegalStateException("Group $nostrGroupId has no local leaf")
+            val dictionary = AppDataDictionary.fromExtensionsOrEmpty(mine.extensions)
+            // Added to what the leaf already advertises, as MDK's refresh does: a refresh must never
+            // withdraw support the group may require, or the downgrade check refuses it every time.
+            val refreshed =
+                dictionary.with(
+                    ComponentsList.APP_COMPONENTS_ID,
+                    ComponentsList.encode((leafSupportedComponents(mine) + CurrentProfileGroupFactory.SUPPORTED_COMPONENTS).toList()),
+                )
+            val extensions =
+                mine.extensions.filterNot { it.extensionType == AppDataDictionary.EXTENSION_TYPE } + refreshed.toExtension()
+            clone.advertiseInNextCommit(MarmotCapabilities.currentProfileLeaf(), extensions)
+            clone.commit()
+        }
+
+    private fun leafSupportedComponents(leaf: LeafNode): Set<Int> =
+        AppDataDictionary
+            .fromExtensions(leaf.extensions)
+            ?.let { ComponentsList.supportedOrRequired(it) }
+            .orEmpty()
+            .toSet()
 
     /**
      * Stage the terminal disband Commit, in the exact shape
@@ -703,6 +783,31 @@ class MlsGroupManager(
             val ciphertext = requireGroup(nostrGroupId).encrypt(plaintext)
             persistSenderRatchet(nostrGroupId)
             ciphertext
+        }
+
+    /**
+     * Runs [read] on the group under the lock commits are applied under, so it never sees one
+     * half-applied: a commit rewrites the extensions before it moves the epoch.
+     */
+    suspend fun <T> readGroup(
+        nostrGroupId: HexKey,
+        read: (MlsGroup) -> T,
+    ): T? = mutex.withLock { groups[nostrGroupId]?.let(read) }
+
+    /**
+     * [encrypt], with the epoch the ciphertext was made in and that epoch's group-event key, read
+     * under the same lock. Read apart, a commit merging in between would label the message with one
+     * epoch and seal its outer layer with another's key.
+     */
+    suspend fun encryptForSend(
+        nostrGroupId: HexKey,
+        plaintext: ByteArray,
+    ): SealedApplicationMessage =
+        mutex.withLock {
+            val group = requireGroup(nostrGroupId)
+            val ciphertext = group.encrypt(plaintext)
+            persistSenderRatchet(nostrGroupId)
+            SealedApplicationMessage(ciphertext, group.epoch, exporterSecret(nostrGroupId))
         }
 
     /**
@@ -943,6 +1048,35 @@ class MlsGroupManager(
         )
 
     /**
+     * The encrypted-media key of [epoch], or null when this device no longer
+     * holds that epoch.
+     *
+     * `features/encrypted-media.md` derives an attachment's key from the epoch
+     * of the message that carries it, not from the group's current epoch, so a
+     * file sent before a later commit opens only under its own epoch's secret.
+     * The current epoch and the retained ones are the only epochs whose
+     * exporter secret is still known; a caller that needs an older one must
+     * have captured it while that epoch was live.
+     */
+    fun mediaExporterSecretAt(
+        nostrGroupId: HexKey,
+        epoch: Long,
+    ): ByteArray? {
+        val group = groups[nostrGroupId] ?: return null
+        if (group.epoch == epoch) return mediaExporterSecret(nostrGroupId)
+        val retained =
+            retainedEpochs[nostrGroupId]
+                ?.firstOrNull { it.epoch == epoch && it.exporterSecret.isNotEmpty() }
+                ?: return null
+        return KeySchedule.mlsExporter(
+            retained.exporterSecret,
+            "marmot",
+            "encrypted-media".encodeToByteArray(),
+            32,
+        )
+    }
+
+    /**
      * Return exporter secrets from retained epochs for a group.
      *
      * Used by the inbound processor to attempt outer decryption with
@@ -1173,3 +1307,10 @@ class MlsGroupManager(
         private const val REUSE_GUARD_LENGTH = 4
     }
 }
+
+/** An application message encrypted for sending: see [MlsGroupManager.encryptForSend]. */
+class SealedApplicationMessage(
+    val mlsCiphertext: ByteArray,
+    val epoch: Long,
+    val groupEventKey: ByteArray,
+)

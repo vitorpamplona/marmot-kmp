@@ -44,6 +44,7 @@ import com.vitorpamplona.quartz.marmot.mip03GroupMessages.GroupEvent
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.core.HexKey
 import com.vitorpamplona.quartz.nip01Core.core.toHexKey
+import com.vitorpamplona.quartz.nip01Core.crypto.verifyId
 import com.vitorpamplona.quartz.utils.Log
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -621,8 +622,11 @@ class MarmotInboundProcessor(
                     // canonical epoch by construction.
                     processCandidateBranchMessage(groupId, bytes)
                 } else {
-                    val payload = decrypted.content.decodeToString()
-                    val author = payloadAuthor(payload)
+                    val payload = readPayload(decrypted.content.decodeToString())
+                    if (payload.forgedId) {
+                        return GroupEventResult.Error(groupId, "inner event id does not match its content")
+                    }
+                    val author = payload.author
 
                     // `foundation/application-messages.md`, "Receiver
                     // authentication": the inner author MUST equal the account
@@ -649,7 +653,7 @@ class MarmotInboundProcessor(
 
                     GroupEventResult.ApplicationMessage(
                         groupId = groupId,
-                        innerEventJson = asEventShapedJson(payload),
+                        innerEventJson = payload.eventJson,
                         senderLeafIndex = decrypted.senderLeafIndex,
                         epoch = decrypted.epoch,
                     )
@@ -709,23 +713,30 @@ class MarmotInboundProcessor(
     }
 
     /**
-     * The account a payload claims as its author, or null when it has none.
+     * A decrypted app payload, read once.
      *
-     * The canonical shape is tried first, because that is what a conformant
-     * peer sends and its checks are the strict ones. The legacy fall-back
-     * exists only for payloads this client itself wrote before the switch to
-     * the unsigned shape: those carry a `sig` member, which the strict decoder
-     * refuses by design. It is deliberately not a general "accept anything"
-     * path — a payload that is neither shape still has no author, and still
-     * fails the comparison rather than passing it.
+     * [author] is the account the payload claims, or null when it has none.
+     * [eventJson] is the Event-shaped JSON the app layer consumes. [forgedId]
+     * is true for an event-shaped payload whose id is not the hash of its
+     * content: such a payload must be dropped, never delivered without an
+     * author, because the app layer keys deletions, edits and moderation
+     * verdicts by that id.
      */
-    private fun payloadAuthor(payload: String): HexKey? =
-        MarmotAppEvent.decodeOrNull(payload)?.pubKey
-            ?: Event.fromJsonOrNull(payload)?.pubKey
+    private class AppPayload(
+        val author: HexKey?,
+        val eventJson: String,
+        val forgedId: Boolean,
+    )
 
     /**
-     * Re-shape a canonical payload into the Event-shaped JSON the app layer
-     * consumes.
+     * The canonical shape is tried first, because that is what a conformant
+     * peer sends and its checks are the strict ones, its id included. The
+     * legacy fall-back exists only for payloads this client itself wrote
+     * before the switch to the unsigned shape: those carry a `sig` member,
+     * which the strict decoder refuses by design. Their id was computed by a
+     * signer, so it is checked here too; without that, a member could reuse
+     * another event's id (an admin's authorized deletion) and inherit its
+     * verdict. A payload that is neither shape has no author.
      *
      * The application pipeline is built around `Event`, which requires a `sig`
      * member; the wire form must not carry one. Rather than force every
@@ -733,9 +744,12 @@ class MarmotInboundProcessor(
      * the boundary. The id is unaffected either way — NIP-01 never hashed the
      * signature — so a message keeps one identity across the conversion.
      */
-    private fun asEventShapedJson(payload: String): String {
-        val appEvent = MarmotAppEvent.decodeOrNull(payload) ?: return payload
-        return appEvent.toJson().dropLast(1) + ",\"sig\":\"\"}"
+    private fun readPayload(payload: String): AppPayload {
+        MarmotAppEvent.decodeOrNull(payload)?.let { appEvent ->
+            return AppPayload(appEvent.pubKey, appEvent.toJson().dropLast(1) + ",\"sig\":\"\"}", forgedId = false)
+        }
+        val legacy = Event.fromJsonOrNull(payload) ?: return AppPayload(null, payload, forgedId = false)
+        return AppPayload(legacy.pubKey, payload, forgedId = !legacy.verifyId())
     }
 
     /**
@@ -760,9 +774,10 @@ class MarmotInboundProcessor(
                     "Application message decrypts on no canonical epoch or retained candidate branch",
                 )
 
-        val author = payloadAuthor(candidate.content.decodeToString())
+        val payload = readPayload(candidate.content.decodeToString())
+        val author = payload.author
         val sender = candidate.senderAccount
-        val valid = author != null && sender != null && author == sender
+        val valid = !payload.forgedId && author != null && sender != null && author == sender
         if (valid) {
             convergence.recordWitness(groupId, candidate.stateId, sender)
         }

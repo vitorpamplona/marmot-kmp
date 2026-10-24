@@ -55,7 +55,7 @@ class CurrentProfileAuthorizationTest {
         creator: ByteArray,
         admins: List<ByteArray>,
     ): MlsGroup {
-        val group = MlsGroup.create(creator, policy = MarmotGroupPolicy)
+        val group = MlsGroup.create(creator, leafExtensions = advertisingLeafExtensions(), policy = MarmotGroupPolicy)
         val dictionary =
             MarmotGroupState.buildDictionary(
                 adminPolicy = AdminPolicyV1.of(admins),
@@ -85,7 +85,7 @@ class CurrentProfileAuthorizationTest {
         // Alice creates the group and names only herself as admin, then adds
         // Bob. Bob is a member but not an admin.
         val alice = currentProfileGroup(aliceAccount, listOf(aliceAccount))
-        val bobBundle = alice.createKeyPackage(bobAccount, ByteArray(0))
+        val bobBundle = alice.createKeyPackage(bobAccount, ByteArray(0), leafExtensions = advertisingLeafExtensions())
         val add = alice.addMember(bobBundle.keyPackage.toTlsBytes())
         val bob = MlsGroup.processWelcome(add.welcomeBytes!!, bobBundle, policy = MarmotGroupPolicy)
 
@@ -116,7 +116,7 @@ class CurrentProfileAuthorizationTest {
     @Test
     fun adminshipCanBeHandedToAnotherMember() {
         val alice = currentProfileGroup(aliceAccount, listOf(aliceAccount))
-        val bobBundle = alice.createKeyPackage(bobAccount, ByteArray(0))
+        val bobBundle = alice.createKeyPackage(bobAccount, ByteArray(0), leafExtensions = advertisingLeafExtensions())
         alice.addMember(bobBundle.keyPackage.toTlsBytes())
 
         // Bob holds a leaf, so promoting him and stepping down is valid: the

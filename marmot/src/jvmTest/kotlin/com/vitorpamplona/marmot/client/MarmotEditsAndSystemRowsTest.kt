@@ -21,6 +21,8 @@
 package com.vitorpamplona.marmot.client
 
 import com.vitorpamplona.marmot.foundation.appEvents.MarmotAppEvent
+import com.vitorpamplona.marmot.foundation.appEvents.MarmotReport
+import com.vitorpamplona.marmot.foundation.appEvents.MarmotReportDismissal
 import com.vitorpamplona.marmot.foundation.appEvents.MarmotSystemEvent
 import com.vitorpamplona.marmot.foundation.appEvents.MarmotSystemType
 import com.vitorpamplona.marmot.mip01Groups.MarmotGroupData
@@ -167,19 +169,133 @@ class MarmotEditsAndSystemRowsTest {
                     createdAt = 1_800_000_000L,
                     tags = arrayOf(arrayOf("e", target.innerEvent.id)),
                 )
+            val epoch = f.manager.currentEpoch(nostrGroupId)
             val byStranger = removal(stranger)
-            f.manager.persistDecryptedMessage(nostrGroupId, byStranger.toJson().dropLast(1) + ",\"sig\":\"\"}")
-            val admins = setOf(admin)
-            assertTrue(target.innerEvent.id !in f.manager.deletedIds(f.manager.storedEvents(), admins))
+            f.manager.persistDecryptedMessage(nostrGroupId, byStranger.toJson().dropLast(1) + ",\"sig\":\"\"}", epoch)
+            assertTrue(target.innerEvent.id !in f.manager.deletedIds(nostrGroupId, f.manager.storedEvents()))
             assertTrue(f.manager.adminRemovalTargets(nostrGroupId, Event.fromJson(byStranger.toJson().dropLast(1) + ",\"sig\":\"\"}")).isEmpty())
 
             val byAdmin = removal(admin)
-            f.manager.persistDecryptedMessage(nostrGroupId, byAdmin.toJson().dropLast(1) + ",\"sig\":\"\"}")
-            assertTrue(target.innerEvent.id in f.manager.deletedIds(f.manager.storedEvents(), admins))
+            f.manager.persistDecryptedMessage(nostrGroupId, byAdmin.toJson().dropLast(1) + ",\"sig\":\"\"}", epoch)
+            assertTrue(target.innerEvent.id in f.manager.deletedIds(nostrGroupId, f.manager.storedEvents()))
             assertEquals(
                 listOf(target.innerEvent.id),
                 f.manager.adminRemovalTargets(nostrGroupId, Event.fromJson(byAdmin.toJson().dropLast(1) + ",\"sig\":\"\"}")),
             )
+        }
+
+    @Test
+    fun `a report names the message its author and reason, and an admin's kind 1985 dismisses it`() =
+        runBlocking {
+            // A dismissal is authorized exactly like a 4891: by the admin set of its source epoch.
+            val f = Fixture()
+            f.manager.createGroup(
+                nostrGroupId,
+                MarmotGroupData(
+                    nostrGroupId = nostrGroupId,
+                    name = "moderated",
+                    relays = listOf("wss://relay.invalid"),
+                    adminPubkeys = listOf(f.signer.pubKey),
+                ),
+            )
+            val target = f.manager.buildTextMessage(nostrGroupId, "report me")
+            val report = f.manager.buildReportRumor(target.innerEvent, MarmotReport.Reason.SPAM, "ads")
+            val reference = MarmotReport.referenceOf(report)!!
+            assertEquals(target.innerEvent.id, reference.target)
+            assertEquals(target.innerEvent.pubKey, reference.author)
+            assertEquals(MarmotReport.Reason.SPAM, reference.reason)
+            assertEquals("ads", report.content)
+
+            val epoch = f.manager.currentEpoch(nostrGroupId)
+
+            fun dismissal(by: String): Event {
+                val tags = MarmotReportDismissal.tags(listOf(report.id))!!
+                val event = MarmotAppEvent.build(pubKey = by, kind = MarmotAppEvent.KIND_REVIEW, content = "", createdAt = 1_800_000_000L, tags = tags)
+                val json = event.toJson().dropLast(1) + ",\"sig\":\"\"}"
+                runBlocking { f.manager.persistDecryptedMessage(nostrGroupId, json, epoch) }
+                return Event.fromJson(json)
+            }
+
+            assertTrue(f.manager.dismissedReportIds(nostrGroupId, dismissal("f".repeat(64))).isEmpty())
+            assertEquals(listOf(report.id), f.manager.dismissedReportIds(nostrGroupId, dismissal(f.signer.pubKey)))
+        }
+
+    @Test
+    fun `an admin deletion is decided by its source epoch and a later demotion does not undo it`() =
+        runBlocking {
+            // `features/content-moderation.md`: authority is the admin set of the
+            // event's source epoch, recorded, so neither a demotion nor a restart
+            // brings the deleted message back.
+            val signer = NostrSignerInternal(KeyPair())
+            val mlsStore = SnapshotStateStore()
+            val messageStore = SnapshotMessageStore()
+            val bundles = SnapshotBundleStore()
+            val manager = MarmotManager(signer, mlsStore, messageStore, bundles, publisher = ACCEPTING_RELAY)
+            manager.createCurrentProfileGroup(nostrGroupId, listOf("wss://relay.invalid"))
+            val target = manager.buildTextMessage(nostrGroupId, "moderate me")
+            val removal =
+                MarmotAppEvent.build(
+                    pubKey = signer.pubKey,
+                    kind = MarmotAppEvent.KIND_REMOVE,
+                    content = """{"v":1,"action":"remove"}""",
+                    createdAt = 1_800_000_000L,
+                    tags = arrayOf(arrayOf("e", target.innerEvent.id)),
+                )
+            val removalJson = removal.toJson().dropLast(1) + ",\"sig\":\"\"}"
+            manager.persistDecryptedMessage(nostrGroupId, removalJson, manager.currentEpoch(nostrGroupId))
+            assertTrue(target.innerEvent.id in manager.deletedIds(nostrGroupId, manager.loadStoredMessages(nostrGroupId).mapNotNull { Event.fromJsonOrNull(it) }))
+
+            // Move the group on so the source epoch's state is long gone, then restart.
+            repeat(7) { i -> manager.setGroupProfile(nostrGroupId, "renamed $i", "") }
+            val restarted = MarmotManager(signer, mlsStore, messageStore, bundles, publisher = ACCEPTING_RELAY)
+            restarted.restoreAll()
+            assertEquals(listOf(target.innerEvent.id), restarted.adminRemovalTargets(nostrGroupId, Event.fromJson(removalJson)))
+        }
+
+    @Test
+    fun `an admin deletion whose epoch is unknown is not authorized`() =
+        runBlocking {
+            val f = Fixture()
+            f.manager.createCurrentProfileGroup(nostrGroupId, listOf("wss://relay.invalid"))
+            val target = f.manager.buildTextMessage(nostrGroupId, "keep me")
+            val removal =
+                MarmotAppEvent.build(
+                    pubKey = f.signer.pubKey,
+                    kind = MarmotAppEvent.KIND_REMOVE,
+                    content = """{"v":1,"action":"remove"}""",
+                    createdAt = 1_800_000_000L,
+                    tags = arrayOf(arrayOf("e", target.innerEvent.id)),
+                )
+            // An epoch this device never held: no proof of authority, so no effect.
+            f.manager.persistDecryptedMessage(nostrGroupId, removal.toJson().dropLast(1) + ",\"sig\":\"\"}", 999L)
+            assertTrue(target.innerEvent.id !in f.manager.deletedIds(nostrGroupId, f.manager.storedEvents()))
+            // ...and not knowing is not a decision: no denial is frozen in the store.
+            assertTrue(removal.id !in f.messageStore.loadModerationVerdicts(nostrGroupId))
+        }
+
+    @Test
+    fun `a late deletion from an epoch this member closed with its own commit is authorized`() =
+        runBlocking {
+            // The member's first act in the group is a commit of its own, so no inbound
+            // event ever captured who administered the epoch it closed.
+            val f = Fixture()
+            f.manager.createCurrentProfileGroup(nostrGroupId, listOf("wss://relay.invalid"))
+            val sourceEpoch = f.manager.currentEpoch(nostrGroupId)!!
+            f.manager.setGroupProfile(nostrGroupId, "renamed", "")
+            assertTrue(f.manager.currentEpoch(nostrGroupId)!! > sourceEpoch)
+
+            val targetId = "c".repeat(64)
+            val removal =
+                MarmotAppEvent.build(
+                    pubKey = f.signer.pubKey,
+                    kind = MarmotAppEvent.KIND_REMOVE,
+                    content = """{"v":1,"action":"remove"}""",
+                    createdAt = 1_800_000_000L,
+                    tags = arrayOf(arrayOf("e", targetId)),
+                )
+            val removalJson = removal.toJson().dropLast(1) + ",\"sig\":\"\"}"
+            f.manager.persistDecryptedMessage(nostrGroupId, removalJson, sourceEpoch)
+            assertEquals(listOf(targetId), f.manager.adminRemovalTargets(nostrGroupId, Event.fromJson(removalJson)))
         }
 
     @Test

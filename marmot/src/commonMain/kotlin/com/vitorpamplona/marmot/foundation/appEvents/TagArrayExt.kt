@@ -32,4 +32,9 @@ import com.vitorpamplona.quartz.nip01Core.tags.events.ETag
  * Nostr event of that kind (which has no typed class). Checking that the tags belong to a
  * 4891, and that its author is a group admin, is the caller's job.
  */
+@Deprecated(
+    "Too lenient for kind 4891: the spec requires exactly one `e` tag and an exact content object. " +
+        "Use MarmotAdminDeletion.targetOf.",
+    ReplaceWith("MarmotAdminDeletion.targetOf(this, content)"),
+)
 fun TagArray.removedMessageIds(): List<HexKey> = mapNotNull(ETag::parseId)

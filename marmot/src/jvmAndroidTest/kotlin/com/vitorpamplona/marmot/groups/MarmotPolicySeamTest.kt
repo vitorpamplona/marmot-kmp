@@ -24,6 +24,7 @@ import com.vitorpamplona.marmot.appComponents.AdminPolicyV1
 import com.vitorpamplona.marmot.appComponents.GroupProfileV1
 import com.vitorpamplona.marmot.appComponents.MarmotGroupState
 import com.vitorpamplona.marmot.appComponents.NostrRoutingV1
+import com.vitorpamplona.marmot.appComponents.advertisingLeafExtensions
 import com.vitorpamplona.mls.group.MlsGroup
 import com.vitorpamplona.mls.group.MlsGroupPolicy
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
@@ -52,7 +53,7 @@ class MarmotPolicySeamTest {
         creator: ByteArray,
         admins: List<ByteArray>,
     ): MlsGroup {
-        val group = MlsGroup.create(creator, policy = MarmotGroupPolicy)
+        val group = MlsGroup.create(creator, leafExtensions = advertisingLeafExtensions(), policy = MarmotGroupPolicy)
         val dictionary =
             MarmotGroupState.buildDictionary(
                 adminPolicy = AdminPolicyV1.of(admins),

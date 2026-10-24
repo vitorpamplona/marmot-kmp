@@ -21,6 +21,7 @@
 package com.vitorpamplona.marmot.client
 
 import com.vitorpamplona.marmot.MarmotFilters
+import com.vitorpamplona.marmot.mip00KeyPackages.KeyPackageFetcher
 import com.vitorpamplona.quartz.marmot.mip03GroupMessages.GroupEvent
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.core.HexKey
@@ -58,6 +59,14 @@ class MarmotSyncPolicy(
     private val publish: suspend (event: Event, relayList: Set<NormalizedRelayUrl>) -> Unit,
     /** Progress/diagnostic sink; callers prefix/route as they see fit. */
     private val log: (String) -> Unit = {},
+    /**
+     * Publish and report whether at least one relay accepted, used instead of
+     * [publish] for rotated KeyPackages when given. A confirmed replacement is
+     * what starts the 24-hour grace period after which a consumed KeyPackage's
+     * private keys are deleted; with only [publish] that clock never starts and
+     * a retained key is bounded by its `not_after` alone.
+     */
+    private val publishAndConfirm: (suspend (event: Event, relayList: Set<NormalizedRelayUrl>) -> Boolean)? = null,
 ) {
     /**
      * Persisted `since` cursors. Backed by `RunState` (`state.json`) in the
@@ -82,7 +91,7 @@ class MarmotSyncPolicy(
         /** NIP-65 write relays. */
         suspend fun outboxRelays(): Set<NormalizedRelayUrl>
 
-        /** MIP-00 kind:10051 KeyPackage relays. */
+        /** MIP-00 kind:10051 KeyPackage relays (legacy; unioned into the NIP-65 write set, never preferred). */
         suspend fun keyPackageRelays(): Set<NormalizedRelayUrl>
 
         /** Union of every configured bucket — the last-resort fallback. */
@@ -232,12 +241,27 @@ class MarmotSyncPolicy(
         // inline rotation right after sync.
         if (marmot.needsKeyPackageRotation()) {
             try {
-                val kpRelays = relays.keyPackageRelays().ifEmpty { relays.outboxRelays() }.ifEmpty { relays.anyRelays() }
+                // The NIP-65 write set, with any legacy kind:10051 unioned in
+                // (KeyPackageFetcher.publishRelaysFor). Preferring 10051 made a
+                // conformant peer, which looks only in the write set, miss the
+                // replacement.
+                val kpRelays =
+                    KeyPackageFetcher
+                        .publishRelaysFor(relays.outboxRelays(), relays.keyPackageRelays())
+                        .ifEmpty { relays.anyRelays() }
                 if (kpRelays.isNotEmpty()) {
                     val rotated = marmot.rotateConsumedKeyPackages(kpRelays.toList())
                     for (event in rotated) {
-                        publish(event, kpRelays)
-                        log("rotated KeyPackage → ${event.id.take(8)} on ${kpRelays.size} relay(s)")
+                        val confirming = publishAndConfirm
+                        if (confirming == null) {
+                            publish(event, kpRelays)
+                            log("rotated KeyPackage → ${event.id.take(8)} sent to ${kpRelays.size} relay(s)")
+                        } else if (confirming(event, kpRelays)) {
+                            marmot.confirmKeyPackagePublished(event)
+                            log("rotated KeyPackage → ${event.id.take(8)} on ${kpRelays.size} relay(s)")
+                        } else {
+                            log("rotated KeyPackage ${event.id.take(8)} was not confirmed by any relay")
+                        }
                     }
                 }
             } catch (e: Exception) {

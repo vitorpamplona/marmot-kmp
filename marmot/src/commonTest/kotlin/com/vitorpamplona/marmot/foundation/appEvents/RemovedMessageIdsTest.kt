@@ -23,6 +23,7 @@ package com.vitorpamplona.marmot.foundation.appEvents
 import kotlin.test.Test
 import kotlin.test.assertEquals
 
+@Suppress("DEPRECATION")
 class RemovedMessageIdsTest {
     private val pk1 = "460c25e682fda7832b52d1f22d3d22b3176d972f60dcdc3212ed8c92ef85065c"
     private val pk2 = "99bb5591c9116600f845107d31f9b59e2f7c7e09a1ff802e84f1d43da557ca64"

@@ -31,6 +31,7 @@ import com.vitorpamplona.marmot.protocolCore.GroupLifecycleState
 import com.vitorpamplona.marmot.protocolCore.MarmotConvergenceEngine
 import com.vitorpamplona.quartz.marmot.mip03GroupMessages.GroupEvent
 import com.vitorpamplona.quartz.nip01Core.core.toHexKey
+import com.vitorpamplona.quartz.nip01Core.crypto.EventHasher
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
@@ -68,10 +69,11 @@ class MarmotConvergenceWiringTest {
      *
      * Only the `pubkey` field matters here: the receiver check compares it to
      * the account the MLS sender leaf authenticates, and that comparison is
-     * what separates a witness from a forgery.
+     * what separates a witness from a forgery. The id is real, because a
+     * payload whose id is not the hash of its content is no witness either.
      */
     private fun innerEventJson(authorHex: String) =
-        """{"id":"${"0".repeat(64)}","pubkey":"$authorHex","created_at":1,"kind":9,""" +
+        """{"id":"${EventHasher.hashId(authorHex, 1, 9, emptyArray(), "hi")}","pubkey":"$authorHex","created_at":1,"kind":9,""" +
             """"tags":[],"content":"hi","sig":"${"0".repeat(128)}"}"""
 
     private fun account(seed: Byte) = ByteArray(32) { seed }

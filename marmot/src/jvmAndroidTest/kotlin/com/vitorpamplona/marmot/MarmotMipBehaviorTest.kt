@@ -25,6 +25,7 @@ package com.vitorpamplona.marmot
 import com.vitorpamplona.marmot.groups.MarmotGroupPolicy
 import com.vitorpamplona.marmot.groups.MlsGroupManager
 import com.vitorpamplona.marmot.groups.isLocalAdmin
+import com.vitorpamplona.marmot.mip00KeyPackages.KeyPackageRotationManager
 import com.vitorpamplona.marmot.mip01Groups.MarmotGroupData
 import com.vitorpamplona.mls.InternalMlsApi
 import com.vitorpamplona.mls.codec.TlsReader
@@ -34,6 +35,7 @@ import com.vitorpamplona.quartz.marmot.mip02Welcome.WelcomeEvent
 import com.vitorpamplona.quartz.marmot.mip03GroupMessages.GroupEvent
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
 import com.vitorpamplona.quartz.nip01Core.core.toHexKey
+import com.vitorpamplona.quartz.nip01Core.crypto.EventHasher
 import com.vitorpamplona.quartz.nip01Core.crypto.KeyPair
 import com.vitorpamplona.quartz.nip01Core.signers.NostrSignerInternal
 import com.vitorpamplona.quartz.nip59Giftwrap.seals.SealEvent
@@ -293,8 +295,10 @@ class MarmotMipBehaviorTest {
             // she is going to encrypt and send an event claiming authorship by
             // an impostor pubkey.
             val impostor = "f".repeat(64)
+            // A correct id, so the payload fails on its author and not on its id.
+            val id = EventHasher.hashId(impostor, 1700000000, 9, emptyArray(), "spoof")
             val innerJson =
-                """{"id":"${"0".repeat(64)}","pubkey":"$impostor","created_at":1700000000,""" +
+                """{"id":"$id","pubkey":"$impostor","created_at":1700000000,""" +
                     """"kind":9,"tags":[],"content":"spoof","sig":"${"0".repeat(128)}"}"""
 
             val encrypted =
@@ -306,6 +310,33 @@ class MarmotMipBehaviorTest {
                 result.message.contains("inner event pubkey"),
                 "Expected inner-event-sender mismatch error, got: ${result.message}",
             )
+        }
+
+    /**
+     * The legacy signed-shape payload is read without the strict decoder, so its
+     * id must be checked here. Otherwise a member could reuse the id of an
+     * admin's authorized kind-4891 deletion and inherit its verdict, which the
+     * app layer caches by event id.
+     */
+    @Test
+    fun processGroupEvent_rejectsLegacyPayloadWithForgedId() =
+        runBlocking<Unit> {
+            val manager = createGroupManager()
+            manager.createGroup(groupId, aliceId.hexToByteArray())
+            val outbound = MarmotOutboundProcessor(manager)
+            val inbound = MarmotInboundProcessor(manager, KeyPackageRotationManager())
+
+            fun legacy(id: String) =
+                """{"id":"$id","pubkey":"$aliceId","created_at":1700000000,""" +
+                    """"kind":9,"tags":[],"content":"legacy","sig":"${"0".repeat(128)}"}"""
+            val realId = EventHasher.hashId(aliceId, 1700000000, 9, emptyArray(), "legacy")
+
+            val forged = inbound.processGroupEvent(outbound.buildGroupEventFromBytes(groupId, legacy("b".repeat(64)).encodeToByteArray()).signedEvent)
+            assertIs<GroupEventResult.Error>(forged)
+            assertTrue(forged.message.contains("inner event id"), forged.message)
+
+            val genuine = inbound.processGroupEvent(outbound.buildGroupEventFromBytes(groupId, legacy(realId).encodeToByteArray()).signedEvent)
+            assertIs<GroupEventResult.ApplicationMessage>(genuine)
         }
 
     // ----------------------------------------------------------------------
@@ -1081,8 +1112,9 @@ class MarmotMipBehaviorTest {
             val inbound = MarmotInboundProcessor(manager, keyPackageRotationManager)
 
             // Inner event whose pubkey matches Alice's credential identity.
+            val id = EventHasher.hashId(aliceId, 1700000000, 9, emptyArray(), "hello")
             val innerJson =
-                """{"id":"${"0".repeat(64)}","pubkey":"$aliceId","created_at":1700000000,""" +
+                """{"id":"$id","pubkey":"$aliceId","created_at":1700000000,""" +
                     """"kind":9,"tags":[],"content":"hello","sig":"${"0".repeat(128)}"}"""
 
             val encrypted =

@@ -139,9 +139,11 @@ object CurrentProfileGroupFactory {
         signer: NostrSigner,
         lastResort: Boolean = true,
         ciphersuite: MlsCiphersuite = MlsCiphersuite.DEFAULT,
+        /** The component ids the KeyPackage's leaf advertises; an older release advertised fewer. */
+        supportedComponents: List<Int> = SUPPORTED_COMPONENTS,
     ): KeyPackageBundle {
         val identity = signer.pubKey.hexToByteArray()
-        val leaf = newLeafIdentity(signer, ciphersuite)
+        val leaf = newLeafIdentity(signer, ciphersuite, supportedComponents)
 
         val keyPackageExtensions =
             if (lastResort) {

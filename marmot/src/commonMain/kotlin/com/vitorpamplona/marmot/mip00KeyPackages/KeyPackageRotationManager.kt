@@ -28,6 +28,8 @@ import com.vitorpamplona.marmot.mip00KeyPackages.KeyPackageRotationManager.Compa
 import com.vitorpamplona.marmot.mip01Groups.MlsCiphersuite
 import com.vitorpamplona.mls.codec.TlsReader
 import com.vitorpamplona.mls.codec.TlsWriter
+import com.vitorpamplona.mls.components.AppDataDictionary
+import com.vitorpamplona.mls.components.ComponentsList
 import com.vitorpamplona.mls.crypto.MlsCryptoProvider
 import com.vitorpamplona.mls.messages.KeyPackageBundle
 import com.vitorpamplona.mls.messages.MlsKeyPackage
@@ -119,6 +121,27 @@ class KeyPackageRotationManager(
     private val retainedBundles = mutableMapOf<String, KeyPackageBundle>()
 
     /**
+     * Why each [retainedBundles] entry is still held, keyed the same way.
+     *
+     * `foundation/key-packages.md` bounds how long a CONSUMED last-resort
+     * KeyPackage keeps its `init_key`: until 24 hours after a replacement is
+     * confirmed published, or `not_after` if that comes first. The grace exists
+     * because an inviter may have fetched the old publication just before the
+     * replacement reached it. A retained entry nobody has consumed is bounded
+     * only by `not_after`, the same as MDK.
+     */
+    private class RetainedInfo(
+        /** The d-tag slot it was published under; empty when that is unknown. */
+        val slot: String,
+        /** A Welcome has been processed against it. */
+        var consumed: Boolean,
+        /** When a replacement in [slot] was confirmed published, Unix seconds. */
+        var replacedAt: Long?,
+    )
+
+    private val retainedInfo = mutableMapOf<String, RetainedInfo>()
+
+    /**
      * Restore previously persisted bundles + rotation state from [store].
      * Call once at startup before any other use of this manager.
      * Safe to call when no store is configured (no-op in that case).
@@ -185,7 +208,19 @@ class KeyPackageRotationManager(
                 namedSlotDTags.putAll(decoded.namedSlotDTags)
                 retainedBundles.clear()
                 retainedBundles.putAll(decoded.retainedBundles)
-                if (unreachableActiveBundles) persistUnlocked()
+                retainedInfo.clear()
+                // A snapshot written before the grace period was tracked says
+                // nothing about why an entry is held: a consumed last-resort
+                // bundle, or a displaced one never used, whose KeyPackage peers
+                // may still hold and build a Welcome from. Keep the rule those
+                // entries were written under, `not_after`, rather than delete a
+                // key a pending invite needs a day after the upgrade.
+                for (eventId in decoded.retainedBundles.keys) {
+                    retainedInfo[eventId] = decoded.retainedInfo[eventId] ?: RetainedInfo(slot = "", consumed = false, replacedAt = null)
+                }
+                val missingInfo = decoded.retainedBundles.keys.any { it !in decoded.retainedInfo }
+                val pruned = pruneExpiredRetainedUnlocked()
+                if (unreachableActiveBundles || missingInfo || pruned) persistUnlocked()
             }
             Log.d("KeyPackageRotationManager") {
                 "Restored ${decoded.bundles.size} active KeyPackage bundle(s), " +
@@ -212,6 +247,7 @@ class KeyPackageRotationManager(
             eventIdToSlot.clear()
             namedSlotDTags.clear()
             retainedBundles.clear()
+            retainedInfo.clear()
             val store = store ?: return@withLock
             try {
                 store.delete()
@@ -226,6 +262,7 @@ class KeyPackageRotationManager(
         val eventIdToSlot: Map<String, String>,
         val namedSlotDTags: Map<String, String>,
         val retainedBundles: Map<String, KeyPackageBundle>,
+        val retainedInfo: Map<String, RetainedInfo>,
     )
 
     /**
@@ -270,6 +307,14 @@ class KeyPackageRotationManager(
             writer.putOpaque2(bundle.initPrivateKey)
             writer.putOpaque2(bundle.encryptionPrivateKey)
             writer.putOpaque2(bundle.signaturePrivateKey)
+        }
+        // why each retained bundle is held (trailing, so v5 readers skip it)
+        writer.putUint32(retainedInfo.size.toLong())
+        for ((eventId, info) in retainedInfo) {
+            writer.putOpaque2(eventId.encodeToByteArray())
+            writer.putOpaque2(info.slot.encodeToByteArray())
+            writer.putUint8(if (info.consumed) 1 else 0)
+            writer.putUint64(info.replacedAt ?: 0L)
         }
         return writer.toByteArray()
     }
@@ -331,7 +376,18 @@ class KeyPackageRotationManager(
                 retained[eventId] = KeyPackageBundle(keyPackage, initPriv, encPriv, sigPriv)
             }
         }
-        return Snapshot(bundles, pending, eventIdMap, namedSlots, retained)
+        val info = mutableMapOf<String, RetainedInfo>()
+        if (reader.hasRemaining) {
+            val numInfo = reader.readUint32().toInt()
+            repeat(numInfo) {
+                val eventId = reader.readOpaque2().decodeToString()
+                val slot = reader.readOpaque2().decodeToString()
+                val consumed = reader.readUint8() != 0
+                val replacedAt = reader.readUint64().takeIf { it != 0L }
+                info[eventId] = RetainedInfo(slot, consumed, replacedAt)
+            }
+        }
+        return Snapshot(bundles, pending, eventIdMap, namedSlots, retained, info)
     }
 
     /**
@@ -455,7 +511,7 @@ class KeyPackageRotationManager(
      */
     suspend fun findBundleByRef(keyPackageRef: ByteArray): KeyPackageBundle? =
         mutex.withLock {
-            pruneExpiredRetainedUnlocked()
+            if (pruneExpiredRetainedUnlocked()) persistUnlocked()
             activeBundles.values.find { bundle ->
                 bundle.keyPackage.reference().contentEquals(keyPackageRef)
             } ?: retainedBundles.values.find { bundle ->
@@ -473,7 +529,7 @@ class KeyPackageRotationManager(
      */
     suspend fun findBundleByEventId(eventId: HexKey): KeyPackageBundle? =
         mutex.withLock {
-            pruneExpiredRetainedUnlocked()
+            if (pruneExpiredRetainedUnlocked()) persistUnlocked()
             val slot = eventIdToSlot[eventId]
             if (slot != null) {
                 activeBundles[slot]?.let { return@withLock it }
@@ -519,6 +575,8 @@ class KeyPackageRotationManager(
             if (entry != null) {
                 consumeSlotUnlocked(entry.key)
                 persistUnlocked()
+            } else if (markRetainedConsumedUnlocked { it.keyPackage.reference().contentEquals(keyPackageRef) }) {
+                persistUnlocked()
             }
         }
 
@@ -528,10 +586,60 @@ class KeyPackageRotationManager(
      */
     suspend fun markConsumedByEventId(eventId: HexKey) =
         mutex.withLock {
-            val slot = eventIdToSlot[eventId] ?: return@withLock
-            consumeSlotUnlocked(slot)
+            val slot = eventIdToSlot[eventId]
+            if (slot != null) {
+                consumeSlotUnlocked(slot)
+                persistUnlocked()
+            } else if (retainedBundles[eventId] != null && markRetainedConsumedUnlocked { it === retainedBundles[eventId] }) {
+                persistUnlocked()
+            }
+        }
+
+    /**
+     * A Welcome was processed against a RETAINED bundle (one whose slot has
+     * already moved on). It is consumed now, so the replacement grace period
+     * bounds it from here. Caller must hold the mutex.
+     */
+    private fun markRetainedConsumedUnlocked(matches: (KeyPackageBundle) -> Boolean): Boolean {
+        var changed = false
+        for ((eventId, bundle) in retainedBundles) {
+            if (!matches(bundle)) continue
+            val info = retainedInfo.getOrPut(eventId) { RetainedInfo(slot = "", consumed = false, replacedAt = TimeUtils.now()) }
+            if (!info.consumed) {
+                info.consumed = true
+                changed = true
+            }
+        }
+        if (changed) pruneExpiredRetainedUnlocked()
+        return changed
+    }
+
+    /**
+     * Record that [replacementEventId], the KeyPackage now published in
+     * [dTagSlot], was confirmed by at least one relay. Starts the 24-hour grace
+     * period for every bundle that slot retained, after which a consumed one's
+     * private keys are deleted (`foundation/key-packages.md`).
+     *
+     * Call it when the publish is acknowledged, not when it is queued: the
+     * bound runs from confirmed publication, and a replacement that never
+     * lands leaves the old KeyPackage the one inviters still find.
+     */
+    suspend fun confirmReplacementPublished(
+        dTagSlot: String,
+        replacementEventId: HexKey,
+        confirmedAt: Long = TimeUtils.now(),
+    ) = mutex.withLock {
+        var changed = false
+        for ((eventId, info) in retainedInfo) {
+            if (eventId == replacementEventId || info.slot != dTagSlot || info.replacedAt != null) continue
+            info.replacedAt = confirmedAt
+            changed = true
+        }
+        if (changed) {
+            pruneExpiredRetainedUnlocked()
             persistUnlocked()
         }
+    }
 
     /**
      * Retire the bundle in [dTagSlot] and schedule the slot for a fresh
@@ -553,32 +661,55 @@ class KeyPackageRotationManager(
                 // survives eviction the longest.
                 retainedBundles.remove(staleEventId)
                 retainedBundles[staleEventId] = consumed
+                retainedInfo[staleEventId] = RetainedInfo(slot = dTagSlot, consumed = true, replacedAt = null)
             }
             pruneExpiredRetainedUnlocked()
-            while (retainedBundles.size > MAX_RETAINED_BUNDLES) {
-                retainedBundles.remove(retainedBundles.keys.first())
-            }
+            evictOverflowUnlocked()
         }
         staleEventIds.forEach { eventIdToSlot.remove(it) }
         pendingRotations.add(dTagSlot)
     }
 
     /**
-     * Drop retained bundles whose KeyPackage is past its own `not_after`.
-     * No peer may invite with an expired KeyPackage, so holding its private
-     * keys buys nothing. Caller must hold the mutex.
+     * Delete the private keys of every retained bundle past its bound, and save
+     * the result. The deletion has to reach the store: a key dropped from memory
+     * but still in the snapshot outlives the bound the spec sets
+     * (`foundation/key-packages.md`). Cheap when nothing is due, so the client
+     * calls it on a clock.
      */
-    private fun pruneExpiredRetainedUnlocked() {
+    suspend fun pruneExpired() =
+        mutex.withLock {
+            if (pruneExpiredRetainedUnlocked()) persistUnlocked()
+        }
+
+    /**
+     * Drop retained bundles whose private keys must go, and say whether any went:
+     * - past the KeyPackage's own `not_after`, since no peer may invite with an
+     *   expired KeyPackage; or
+     * - consumed, and more than [REPLACEMENT_GRACE_SECONDS] past the confirmed
+     *   publication of its replacement (`foundation/key-packages.md`: "Local
+     *   retention policy MUST NOT extend either bound").
+     *
+     * Caller must hold the mutex.
+     */
+    private fun pruneExpiredRetainedUnlocked(): Boolean {
         val now = TimeUtils.now()
         val expired =
             retainedBundles.entries
-                .filter { (_, bundle) ->
+                .filter { (eventId, bundle) ->
                     val notAfter =
                         bundle.keyPackage.leafNode.lifetime
-                            ?.notAfter ?: return@filter false
-                    now > notAfter
+                            ?.notAfter
+                    if (notAfter != null && now > notAfter) return@filter true
+                    val info = retainedInfo[eventId] ?: return@filter false
+                    val replacedAt = info.replacedAt ?: return@filter false
+                    info.consumed && now >= replacedAt + REPLACEMENT_GRACE_SECONDS
                 }.map { it.key }
-        expired.forEach { retainedBundles.remove(it) }
+        expired.forEach {
+            retainedBundles.remove(it)
+            retainedInfo.remove(it)
+        }
+        return expired.isNotEmpty()
     }
 
     /**
@@ -626,10 +757,18 @@ class KeyPackageRotationManager(
             // survives eviction the longest, matching [consumeSlotUnlocked].
             retainedBundles.remove(staleEventId)
             retainedBundles[staleEventId] = displaced
+            retainedInfo[staleEventId] = RetainedInfo(slot = dTagSlot, consumed = false, replacedAt = null)
         }
         pruneExpiredRetainedUnlocked()
+        evictOverflowUnlocked()
+    }
+
+    /** Drop the oldest retained bundles past [MAX_RETAINED_BUNDLES]. Caller must hold the mutex. */
+    private fun evictOverflowUnlocked() {
         while (retainedBundles.size > MAX_RETAINED_BUNDLES) {
-            retainedBundles.remove(retainedBundles.keys.first())
+            val oldest = retainedBundles.keys.first()
+            retainedBundles.remove(oldest)
+            retainedInfo.remove(oldest)
         }
     }
 
@@ -652,6 +791,25 @@ class KeyPackageRotationManager(
      * Check if any slots need rotation.
      */
     suspend fun needsRotation(): Boolean = mutex.withLock { pendingRotations.isNotEmpty() }
+
+    /**
+     * The slots whose active KeyPackage advertises fewer of [supported] than
+     * this client supports, i.e. it was minted by an older release.
+     * `foundation/key-packages.md`: when the supported set changes a client
+     * SHOULD replace its published KeyPackages, so inviters see the new set.
+     */
+    suspend fun slotsAdvertisingLessThan(supported: Collection<Int>): Set<String> =
+        mutex.withLock {
+            activeBundles
+                .filterValues { bundle ->
+                    val advertised =
+                        AppDataDictionary
+                            .fromExtensions(bundle.keyPackage.leafNode.extensions)
+                            ?.let { ComponentsList.supportedOrRequired(it) }
+                            .orEmpty()
+                    !advertised.containsAll(supported)
+                }.keys
+        }
 
     /**
      * Check if there are any active (non-consumed) KeyPackage bundles.
@@ -733,12 +891,21 @@ class KeyPackageRotationManager(
         const val MAX_RETAINED_BUNDLES = 8
 
         /**
+         * How long a consumed last-resort KeyPackage keeps its private keys
+         * after its replacement is confirmed published: 24 hours, per
+         * `foundation/key-packages.md` ("replacement grace period").
+         */
+        const val REPLACEMENT_GRACE_SECONDS = 24L * 60 * 60
+
+        /**
          * On-disk snapshot format version for [KeyPackageBundleStore].
          * v1: bundles + pendingRotations
          * v2: + eventIdToSlot map (so welcome lookup by Nostr event id works)
          * v3: + namedSlotDTags map (per MIP-00, d-tags are random 64-char hex, persisted here)
          * v4: capabilities fixed (0xF2EE, 0x000A extensions + 0x000A proposals; LastResort extension on KP)
          * v5: + retainedBundles map (consumed last-resort KeyPackages stay reusable)
+         *     + trailing retained-bundle info (slot, consumed, replacement confirmed at), read only
+         *       when present so earlier v5 snapshots still load
          */
         private const val SNAPSHOT_VERSION = 5
     }
