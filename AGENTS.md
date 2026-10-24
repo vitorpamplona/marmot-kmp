@@ -35,6 +35,13 @@ checked against MDK, the reference implementation (<https://github.com/marmot-pr
   - Tests: `commonTest`, `jvmAndroidTest` (JUnit, the in-process test relay in `testing/`),
     `jvmTest` (the `client/` suites and the scenario vectors in `jvmTest/resources/marmot/vectors`).
   - `marmot/tools/mdk-vector-gen`: Rust generator for the MDK vectors. `marmot/plans/`: design docs.
+- `marmot-quic/`: the raw QUIC binding of agent text stream previews (`transports/quic.md`),
+  published as `com.vitorpamplona.marmot:marmot-quic`. A module of its own because it sits on
+  [quic-kmp](https://github.com/vitorpamplona/quic-kmp), which builds for the JVM and Android only;
+  the codecs it frames stay in `marmot`'s `appComponents/agentTextStream`. JVM target 21, quic-kmp's.
+  Its interop tests run against MDK's `marmot-quic-broker` and `wn` and skip without them.
+- `marmot-bench/`: marmot-kmp against MDK, operation for operation (`./gradlew :marmot-bench:run`).
+  Not published.
 - `gradle/kmp-purity.gradle.kts`: the `verifyKmpPurity` task, the same file as Quartz's.
 - `tools/ci/quartz-args.sh`: points the build at a Quartz checkout while the pinned Quartz release is
   not on Maven Central yet (CI and the pre-push hook call it).
@@ -50,6 +57,12 @@ checked against MDK, the reference implementation (<https://github.com/marmot-pr
   storage lives here. Quartz must not import MLS, so anything reading MLS bytes off an event is an
   extension here (`KeyPackageEvent.buildCurrentProfileFrom`).
 - **Never depend on cordn-kmp**, and never let Quartz depend on this library.
+- **What stays in Amethyst:** the store implementations that encrypt at rest with a platform
+  keystore, the account wiring (which relays, which signer, the outbox), chatroom models, feeds,
+  notifications, UI and the `amy` verbs. A test that needs Amethyst code or both bindings lives
+  there; a test, bench or vector that exercises only this library lives here.
+- `:marmot` must keep building for every native target, so nothing JVM-only (quic-kmp included)
+  goes into it; a JVM/Android-only transport is a module beside it, like `marmot-quic`.
 - **Reuse Quartz's relay operations** (`fetchAll`, `fetchFirst`, `publishAndConfirm`, …, the
   `INostrClient` extensions in Quartz's `nip01Core/relay/client/accessories/`) instead of writing
   subscribe/collect loops.
@@ -58,7 +71,8 @@ checked against MDK, the reference implementation (<https://github.com/marmot-pr
   and Quartz's `PlatformLock`/`ConcurrentMap`.
 - Persisted formats are API: a store's bytes, a marker string, a derivation label. Changing one
   breaks every device that already wrote it.
-- JVM target is 17. Releases follow semantic versioning; Amethyst pins a version.
+- JVM target is 17 (`marmot-quic` is 21, quic-kmp's). Releases follow semantic versioning; `marmot`
+  and `marmot-quic` release together at one version, and Amethyst pins it.
 - Commits: conventional commits (`feat:`, `fix:`, …). Never `--no-verify`.
 
 ## Verify, don't guess
@@ -74,12 +88,15 @@ it before stating it: write the failing case first, watch it fail, then explain.
 ./gradlew :marmot:jvmTest                       # also `./gradlew test`
 ./gradlew :marmot:verifyKmpPurity :marmot:compileCommonMainKotlinMetadata :marmot:compileAppleMainKotlinMetadata
 ./gradlew :marmot:linuxX64Test                  # the whole suite on Linux Native
+./gradlew :marmot-quic:jvmTest                  # add -DmarmotQuicBroker=host:port to run interop
+./gradlew :marmot-bench:run                     # the MDK head-to-head
 ./gradlew :marmot:iosSimulatorArm64Test         # macOS only
 ```
 
 Until the Quartz version in `gradle/libs.versions.toml` is on Maven Central, add
 `-PquartzDir=../quartz` (a checkout beside this repo); `-PmlsKmpDir` and `-PcryptoKmpDir` work the
-same way. To try a change in Amethyst, build Amethyst with `-PmarmotKmpDir=../marmot-kmp`.
+same way, and so does `-PquicKmpDir`. To try a change in Amethyst, build Amethyst with
+`-PmarmotKmpDir=../marmot-kmp` (it substitutes both `marmot` and `marmot-quic`).
 
 ## Dependency licensing
 

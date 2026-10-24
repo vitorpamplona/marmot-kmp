@@ -35,6 +35,18 @@ marmot.restoreAll()
 The store interfaces live in `com.vitorpamplona.marmot.groups` and
 `com.vitorpamplona.marmot.mip00KeyPackages`; in-memory versions exist for tests.
 
+Agent text stream previews over raw QUIC (`transports/quic.md`) are a second artifact, for the JVM
+and Android only, on [quic-kmp](https://github.com/vitorpamplona/quic-kmp):
+
+```kotlin
+dependencies {
+    implementation("com.vitorpamplona.marmot:marmot-quic:<version>")
+}
+```
+
+See [marmot-quic/README.md](marmot-quic/README.md). [marmot-bench](marmot-bench/README.md) measures
+this library against MDK, operation for operation.
+
 ## Developer Setup
 
 ```bash
