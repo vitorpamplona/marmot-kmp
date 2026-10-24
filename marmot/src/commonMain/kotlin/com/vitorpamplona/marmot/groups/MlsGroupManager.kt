@@ -802,9 +802,16 @@ class MlsGroupManager(
     suspend fun encryptForSend(
         nostrGroupId: HexKey,
         plaintext: ByteArray,
+        /**
+         * The epoch the message must go out in, or null for whichever is current. Checked under
+         * the lock that encrypts: a message carrying media encrypted under one epoch's key must not
+         * be sent in another, where no receiver derives that key.
+         */
+        expectedEpoch: Long? = null,
     ): SealedApplicationMessage =
         mutex.withLock {
             val group = requireGroup(nostrGroupId)
+            if (expectedEpoch != null && group.epoch != expectedEpoch) throw MarmotEpochMovedException(expectedEpoch, group.epoch)
             val ciphertext = group.encrypt(plaintext)
             persistSenderRatchet(nostrGroupId)
             SealedApplicationMessage(ciphertext, group.epoch, exporterSecret(nostrGroupId))
@@ -1314,3 +1321,12 @@ class SealedApplicationMessage(
     val epoch: Long,
     val groupEventKey: ByteArray,
 )
+
+/**
+ * A send pinned to [expected] found the group at [current]: whatever the message carries that was
+ * encrypted under [expected]'s media key is unreadable in [current], so it must be encrypted again.
+ */
+class MarmotEpochMovedException(
+    val expected: Long,
+    val current: Long,
+) : IllegalStateException("The group moved from epoch $expected to $current; encrypt the media again")

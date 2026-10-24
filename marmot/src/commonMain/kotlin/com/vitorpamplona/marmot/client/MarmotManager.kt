@@ -54,6 +54,7 @@ import com.vitorpamplona.marmot.foundation.appEvents.MarmotReport
 import com.vitorpamplona.marmot.foundation.appEvents.MarmotReportDismissal
 import com.vitorpamplona.marmot.foundation.appEvents.MarmotSystemEvent
 import com.vitorpamplona.marmot.foundation.appEvents.MarmotSystemRowDiff
+import com.vitorpamplona.marmot.groups.MarmotEpochMovedException
 import com.vitorpamplona.marmot.groups.MarmotGroupPolicy
 import com.vitorpamplona.marmot.groups.MarmotMessageStore
 import com.vitorpamplona.marmot.groups.MlsGroupManager
@@ -582,9 +583,15 @@ class MarmotManager(
     suspend fun buildGroupMessage(
         nostrGroupId: HexKey,
         innerEvent: Event,
+        /**
+         * The epoch the message must go out in, when it carries media encrypted under that epoch's
+         * key ([encryptMediaForSend], [mediaUploadKey]). A group that moved on throws
+         * [MarmotEpochMovedException] instead of sending what no receiver could open.
+         */
+        expectedEpoch: Long? = null,
     ): OutboundGroupEvent {
         requireOutboundAllowed(nostrGroupId, "send a message")
-        return outboundProcessor.buildGroupEvent(nostrGroupId, innerEvent)
+        return outboundProcessor.buildGroupEvent(nostrGroupId, innerEvent, expectedEpoch)
     }
 
     /**
@@ -2885,6 +2892,31 @@ class MarmotManager(
             filename = filename,
         )
 
+    /**
+     * [encryptMedia], with the epoch whose key it used, read together. Send the message carrying it
+     * pinned to that epoch (`expectedEpoch` of [buildGroupMessage]): an upload takes long enough
+     * for a commit to land in between, and the attachment would then go out in an epoch whose key
+     * does not open it.
+     */
+    suspend fun encryptMediaForSend(
+        nostrGroupId: HexKey,
+        plaintext: ByteArray,
+        mediaType: String,
+        filename: String,
+    ): EpochEncryptedMedia {
+        val key = mediaUploadKey(nostrGroupId) ?: throw IllegalStateException("Not a member of group $nostrGroupId")
+        return EpochEncryptedMedia(EncryptedMediaV2.encrypt(plaintext, key.mediaSecret, mediaType, filename), key.epoch)
+    }
+
+    /**
+     * The current epoch's media key and that epoch, read together, for an uploader that encrypts
+     * on its own. Pin the carrying message to [MediaUploadKey.epoch], as with [encryptMediaForSend].
+     */
+    suspend fun mediaUploadKey(nostrGroupId: HexKey): MediaUploadKey? =
+        groupManager.readGroup(nostrGroupId) { group ->
+            MediaUploadKey(group.exporterSecret("marmot", "encrypted-media".encodeToByteArray(), 32), group.epoch)
+        }
+
     /** Decrypt an attachment a peer sent, verifying it is the file the reference names. */
     fun decryptMedia(
         nostrGroupId: HexKey,
@@ -2918,9 +2950,11 @@ class MarmotManager(
         reference: EncryptedMediaReferenceV2,
         caption: String = "",
         persistOwn: Boolean = true,
+        /** The epoch [reference] was encrypted in ([EpochEncryptedMedia.epoch]); see [buildGroupMessage]. */
+        sourceEpoch: Long? = null,
     ): TextMessageBundle {
         val innerEvent = buildMediaRumor(reference, caption)
-        val outbound = buildGroupMessage(nostrGroupId, innerEvent)
+        val outbound = buildGroupMessage(nostrGroupId, innerEvent, sourceEpoch)
         if (persistOwn) persistDecryptedMessage(nostrGroupId, innerEvent.toJson(), outbound.epoch)
         return TextMessageBundle(outbound = outbound, innerEvent = innerEvent)
     }
@@ -3319,4 +3353,16 @@ data class GroupMemberInfo(
 data class TextMessageBundle(
     val outbound: OutboundGroupEvent,
     val innerEvent: Event,
+)
+
+/** An attachment encrypted for a group, and the epoch whose media key encrypted it. */
+class EpochEncryptedMedia(
+    val result: EncryptedMediaV2.EncryptionResult,
+    val epoch: Long,
+)
+
+/** A group's media key for new uploads, and the epoch it belongs to. */
+class MediaUploadKey(
+    val mediaSecret: ByteArray,
+    val epoch: Long,
 )

@@ -94,7 +94,9 @@ class MarmotOutboundProcessor(
     suspend fun buildGroupEvent(
         nostrGroupId: HexKey,
         innerEvent: Event,
-    ): OutboundGroupEvent = buildAppEvent(nostrGroupId, MarmotAppEvent.fromEvent(innerEvent))
+        /** See [MlsGroupManager.encryptForSend]. */
+        expectedEpoch: Long? = null,
+    ): OutboundGroupEvent = buildAppEvent(nostrGroupId, MarmotAppEvent.fromEvent(innerEvent), expectedEpoch)
 
     /**
      * Send a Marmot app event — the canonical, UNSIGNED payload shape
@@ -115,7 +117,8 @@ class MarmotOutboundProcessor(
     suspend fun buildAppEvent(
         nostrGroupId: HexKey,
         appEvent: MarmotAppEvent,
-    ): OutboundGroupEvent = buildGroupEventFromBytes(nostrGroupId, appEvent.encodeToPayload())
+        expectedEpoch: Long? = null,
+    ): OutboundGroupEvent = buildGroupEventFromBytes(nostrGroupId, appEvent.encodeToPayload(), expectedEpoch)
 
     /**
      * Encrypt raw bytes and build a GroupEvent for publishing.
@@ -130,9 +133,11 @@ class MarmotOutboundProcessor(
     suspend fun buildGroupEventFromBytes(
         nostrGroupId: HexKey,
         plaintext: ByteArray,
+        /** See [MlsGroupManager.encryptForSend]. */
+        expectedEpoch: Long? = null,
     ): OutboundGroupEvent {
         // Step 1: MLS encrypt, with its epoch and that epoch's outer key read in the same step
-        val sealed = groupManager.encryptForSend(nostrGroupId, plaintext)
+        val sealed = groupManager.encryptForSend(nostrGroupId, plaintext, expectedEpoch)
         val mlsCiphertext = sealed.mlsCiphertext
         val epoch = sealed.epoch
 
