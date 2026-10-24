@@ -146,6 +146,44 @@ object GroupBlossomImageCrypto {
      */
     fun cipher(component: GroupBlossomImageV1): SymmetricCipher = ComponentCipher(component)
 
+    /**
+     * The encrypting half for a NEW image whose key material the caller already
+     * generated: an uploader that streams the plaintext through a [SymmetricCipher]
+     * learns `image_hash` only after encrypting, so it cannot build the component
+     * first. [imageKey] is the AEAD key itself and [mediaType] is bound into the AAD.
+     */
+    fun encryptingCipher(
+        imageKey: ByteArray,
+        imageNonce: ByteArray,
+        mediaType: String,
+    ): SymmetricCipher = NewImageCipher(imageKey, imageNonce, MarmotMediaType.requireCanonical(mediaType))
+
+    private class NewImageCipher(
+        private val imageKey: ByteArray,
+        private val imageNonce: ByteArray,
+        private val canonicalMediaType: String,
+    ) : SymmetricCipher {
+        init {
+            require(imageKey.size == KEY_LENGTH) { "image_key must be $KEY_LENGTH bytes" }
+            require(imageNonce.size == NONCE_LENGTH) { "image_nonce must be $NONCE_LENGTH bytes" }
+        }
+
+        override fun name(): String = "marmot-group-image-v1"
+
+        override fun encrypt(bytesToEncrypt: ByteArray): ByteArray = ChaCha20Poly1305.encrypt(bytesToEncrypt, GroupBlossomImageV1.aad(canonicalMediaType), imageNonce, imageKey)
+
+        override fun decrypt(bytesToDecrypt: ByteArray): ByteArray = ChaCha20Poly1305.decrypt(bytesToDecrypt, GroupBlossomImageV1.aad(canonicalMediaType), imageNonce, imageKey)
+
+        override fun decryptOrNull(bytesToDecrypt: ByteArray): ByteArray? =
+            try {
+                decrypt(bytesToDecrypt)
+            } catch (_: IllegalArgumentException) {
+                null
+            } catch (_: IllegalStateException) {
+                null
+            }
+    }
+
     private class ComponentCipher(
         private val component: GroupBlossomImageV1,
     ) : SymmetricCipher {

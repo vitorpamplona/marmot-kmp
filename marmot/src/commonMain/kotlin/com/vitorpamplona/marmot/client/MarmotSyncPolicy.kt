@@ -21,6 +21,7 @@
 package com.vitorpamplona.marmot.client
 
 import com.vitorpamplona.marmot.MarmotFilters
+import com.vitorpamplona.marmot.mip00KeyPackages.KeyPackageFetcher
 import com.vitorpamplona.quartz.marmot.mip03GroupMessages.GroupEvent
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.core.HexKey
@@ -90,7 +91,7 @@ class MarmotSyncPolicy(
         /** NIP-65 write relays. */
         suspend fun outboxRelays(): Set<NormalizedRelayUrl>
 
-        /** MIP-00 kind:10051 KeyPackage relays. */
+        /** MIP-00 kind:10051 KeyPackage relays (legacy; unioned into the NIP-65 write set, never preferred). */
         suspend fun keyPackageRelays(): Set<NormalizedRelayUrl>
 
         /** Union of every configured bucket — the last-resort fallback. */
@@ -240,7 +241,14 @@ class MarmotSyncPolicy(
         // inline rotation right after sync.
         if (marmot.needsKeyPackageRotation()) {
             try {
-                val kpRelays = relays.keyPackageRelays().ifEmpty { relays.outboxRelays() }.ifEmpty { relays.anyRelays() }
+                // The NIP-65 write set, with any legacy kind:10051 unioned in
+                // (KeyPackageFetcher.publishRelaysFor). Preferring 10051 made a
+                // conformant peer, which looks only in the write set, miss the
+                // replacement.
+                val kpRelays =
+                    KeyPackageFetcher
+                        .publishRelaysFor(relays.outboxRelays(), relays.keyPackageRelays())
+                        .ifEmpty { relays.anyRelays() }
                 if (kpRelays.isNotEmpty()) {
                     val rotated = marmot.rotateConsumedKeyPackages(kpRelays.toList())
                     for (event in rotated) {

@@ -892,6 +892,22 @@ class MarmotManager(
             },
         )
 
+    /**
+     * Build (and optionally persist) a kind-4891 admin deletion of another
+     * member's kind-9 message. See [buildAdminDeletionRumor].
+     */
+    suspend fun buildAdminDeletionMessage(
+        nostrGroupId: HexKey,
+        targetEventId: HexKey,
+        persistOwn: Boolean = true,
+    ): TextMessageBundle {
+        check(isGroupAdmin(nostrGroupId)) { "Only a group admin may delete another member's message" }
+        val innerEvent = buildAdminDeletionRumor(targetEventId)
+        val outbound = buildGroupMessage(nostrGroupId, innerEvent)
+        if (persistOwn) persistDecryptedMessage(nostrGroupId, innerEvent.toJson(), outbound.epoch)
+        return TextMessageBundle(outbound = outbound, innerEvent = innerEvent)
+    }
+
     /** Whether this account is an active admin of [nostrGroupId] now, and so may send a kind 4891. */
     fun isGroupAdmin(nostrGroupId: HexKey): Boolean = groupView(nostrGroupId)?.adminPubkeys?.contains(signer.pubKey) == true
 
@@ -2253,10 +2269,16 @@ class MarmotManager(
             image =
                 when {
                     image?.imageHash != null ->
-                        MarmotGroupImage(image.imageHash!!.toHexKey(), image.imageKey!!, image.imageNonce!!)
+                        MarmotGroupImage(
+                            hash = image.imageHash!!.toHexKey(),
+                            key = image.imageKey!!,
+                            nonce = image.imageNonce!!,
+                            scheme = MarmotGroupImage.Scheme.CURRENT_PROFILE,
+                            mediaType = image.mediaType,
+                        )
 
                     legacy?.hasImage() == true ->
-                        MarmotGroupImage(legacy.imageHash!!, legacy.imageKey!!, legacy.imageNonce!!)
+                        MarmotGroupImage(legacy.imageHash!!, legacy.imageKey!!, legacy.imageNonce!!, MarmotGroupImage.Scheme.MIP01)
 
                     else -> null
                 },
@@ -2626,6 +2648,22 @@ class MarmotManager(
 
         /** The requester is no longer an admin or no longer a member. */
         IMPOSSIBLE,
+    }
+
+    /**
+     * Fresh key material for a new avatar of [nostrGroupId], in the scheme that
+     * group's carrier uses (see [MarmotGroupImage]). Encrypt with
+     * [MarmotGroupImageUploadPlan.cipher], sign the Blossom upload with
+     * [MarmotGroupImageUploadPlan.uploadSecretKey], and commit
+     * [MarmotGroupImageUploadPlan.componentFor] the uploaded hash through
+     * [setGroupImage].
+     */
+    fun planGroupImageUpload(
+        nostrGroupId: HexKey,
+        mediaType: String,
+    ): MarmotGroupImageUploadPlan {
+        val view = groupView(nostrGroupId) ?: throw IllegalStateException("Not a member of group $nostrGroupId")
+        return if (view.isCurrentProfile) MarmotGroupImageUploadPlan.currentProfile(mediaType) else MarmotGroupImageUploadPlan.mip01(mediaType)
     }
 
     /**
