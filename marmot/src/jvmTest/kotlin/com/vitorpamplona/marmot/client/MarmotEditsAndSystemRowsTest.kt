@@ -269,6 +269,33 @@ class MarmotEditsAndSystemRowsTest {
             // An epoch this device never held: no proof of authority, so no effect.
             f.manager.persistDecryptedMessage(nostrGroupId, removal.toJson().dropLast(1) + ",\"sig\":\"\"}", 999L)
             assertTrue(target.innerEvent.id !in f.manager.deletedIds(nostrGroupId, f.manager.storedEvents()))
+            // ...and not knowing is not a decision: no denial is frozen in the store.
+            assertTrue(removal.id !in f.messageStore.loadModerationVerdicts(nostrGroupId))
+        }
+
+    @Test
+    fun `a late deletion from an epoch this member closed with its own commit is authorized`() =
+        runBlocking {
+            // The member's first act in the group is a commit of its own, so no inbound
+            // event ever captured who administered the epoch it closed.
+            val f = Fixture()
+            f.manager.createCurrentProfileGroup(nostrGroupId, listOf("wss://relay.invalid"))
+            val sourceEpoch = f.manager.currentEpoch(nostrGroupId)!!
+            f.manager.setGroupProfile(nostrGroupId, "renamed", "")
+            assertTrue(f.manager.currentEpoch(nostrGroupId)!! > sourceEpoch)
+
+            val targetId = "c".repeat(64)
+            val removal =
+                MarmotAppEvent.build(
+                    pubKey = f.signer.pubKey,
+                    kind = MarmotAppEvent.KIND_REMOVE,
+                    content = """{"v":1,"action":"remove"}""",
+                    createdAt = 1_800_000_000L,
+                    tags = arrayOf(arrayOf("e", targetId)),
+                )
+            val removalJson = removal.toJson().dropLast(1) + ",\"sig\":\"\"}"
+            f.manager.persistDecryptedMessage(nostrGroupId, removalJson, sourceEpoch)
+            assertEquals(listOf(targetId), f.manager.adminRemovalTargets(nostrGroupId, Event.fromJson(removalJson)))
         }
 
     @Test

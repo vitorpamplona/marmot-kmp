@@ -949,6 +949,18 @@ class MarmotManager(
     /** Whether this account is an active admin of [nostrGroupId] now, and so may send a kind 4891 or 1985. */
     fun isGroupAdmin(nostrGroupId: HexKey): Boolean = groupView(nostrGroupId)?.adminPubkeys?.contains(signer.pubKey) == true
 
+    /**
+     * Whether this account may delete [target], another member's message in
+     * [nostrGroupId], for everyone with [buildAdminDeletionRumor]: only a chat
+     * message (kind 9), and only as an admin of the current epoch, which is the
+     * one receivers check the deletion against (`features/content-moderation.md`).
+     * The author's own messages go through [buildDeletionRumor] instead.
+     */
+    fun canAdminDelete(
+        nostrGroupId: HexKey,
+        target: Event,
+    ): Boolean = target.kind == ChatEvent.KIND && target.pubKey != signer.pubKey && isGroupAdmin(nostrGroupId)
+
     /** The inner kind:5 deletion rumor alone. See [buildTextRumor]. */
     suspend fun buildDeletionRumor(targetEvents: List<Event>): DeletionRequestEvent {
         require(targetEvents.isNotEmpty()) { "buildDeletionRumor: targetEvents must not be empty" }
@@ -1331,6 +1343,11 @@ class MarmotManager(
                         "(lifecycle=${publishGate.lifecycle(nostrGroupId)}, gate=${publishGate.outboundGate(nostrGroupId)})"
                 }
 
+                // This commit closes the current epoch: keep its admins, against which a
+                // late kind-4891 or 1985 sent in it is authorized. Inbound commits capture
+                // on arrival; without this, a member whose first act after joining is a
+                // commit of its own would never know who administered the epoch it joined.
+                captureEpochAdmins(nostrGroupId)
                 val staged = stage()
                 val event =
                     outboundProcessor.buildCommitEvent(
@@ -1616,6 +1633,11 @@ class MarmotManager(
 
         subscriptionManager.unsubscribeGroup(nostrGroupId)
         forgetMediaKeys(nostrGroupId)
+        moderationMutex.withLock {
+            epochAdmins.remove(nostrGroupId)
+            moderationVerdicts.remove(nostrGroupId)
+        }
+        staleLeafLock.withLock { staleLeafDeadlines.remove(nostrGroupId) }
         try {
             messageStore?.delete(nostrGroupId)
         } catch (e: Exception) {
@@ -1811,10 +1833,15 @@ class MarmotManager(
     private suspend fun captureEpochAdmins(nostrGroupId: HexKey) = moderationMutex.withLock { captureEpochAdminsUnlocked(nostrGroupId) }
 
     private suspend fun captureEpochAdminsUnlocked(nostrGroupId: HexKey) {
-        val epoch = currentEpoch(nostrGroupId) ?: return
+        val group = groupManager.getGroup(nostrGroupId) ?: return
+        val epoch = group.epoch
         val known = epochAdminsUnlocked(nostrGroupId)
         if (known.containsKey(epoch)) return
         val admins = groupView(nostrGroupId)?.adminPubkeys?.toSet() ?: return
+        // A merge between the two reads would file the next epoch's admins under this one, and the
+        // record is first-write-wins. A merge always moves the epoch, so an unchanged one proves
+        // both reads saw the same state.
+        if (groupManager.getGroup(nostrGroupId) !== group || group.epoch != epoch) return
         known[epoch] = admins
         try {
             messageStore?.recordEpochAdmins(nostrGroupId, epoch, admins)
@@ -1828,7 +1855,8 @@ class MarmotManager(
      * Decide, once, whether [event] (a kind 4891 or 1985 delivered in [epoch]) may
      * act: well formed, and its author an active admin of that epoch. Anything that
      * cannot be proven, including an epoch whose admin set was never seen here,
-     * is unauthorized.
+     * is unauthorized. Only a decision is recorded: "the admins of that epoch are
+     * unknown" is not one, so it is not frozen as a denial.
      */
     private suspend fun decideAdminAction(
         nostrGroupId: HexKey,
@@ -1839,8 +1867,8 @@ class MarmotManager(
             val verdicts = moderationVerdictsUnlocked(nostrGroupId)
             verdicts[event.id]?.let { return@withLock it }
             if (epoch == currentEpoch(nostrGroupId)) captureEpochAdminsUnlocked(nostrGroupId)
-            val admins = epochAdminsUnlocked(nostrGroupId)[epoch]
-            val authorized = admins != null && isWellFormedAdminAction(event) && event.pubKey in admins
+            val admins = epochAdminsUnlocked(nostrGroupId)[epoch] ?: return@withLock false
+            val authorized = isWellFormedAdminAction(event) && event.pubKey in admins
             verdicts[event.id] = authorized
             try {
                 messageStore?.recordModerationVerdict(nostrGroupId, event.id, authorized)
@@ -3078,6 +3106,9 @@ class MarmotManager(
         now: Long = TimeUtils.now(),
         random: Random = Random.Default,
     ): List<HexKey> {
+        // The same clock deletes retained KeyPackage keys whose 24-hour grace ran
+        // out: nothing else runs on a long-lived client between two rotations.
+        keyPackageRotationManager.pruneExpired()
         val due = mutableListOf<HexKey>()
         staleLeafLock.withLock {
             for (groupId in groupManager.activeGroupIds()) {

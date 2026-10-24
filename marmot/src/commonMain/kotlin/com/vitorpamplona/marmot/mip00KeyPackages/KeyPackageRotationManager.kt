@@ -218,8 +218,8 @@ class KeyPackageRotationManager(
                     retainedInfo[eventId] = decoded.retainedInfo[eventId] ?: RetainedInfo(slot = "", consumed = true, replacedAt = now)
                 }
                 val missingInfo = decoded.retainedBundles.keys.any { it !in decoded.retainedInfo }
-                pruneExpiredRetainedUnlocked()
-                if (unreachableActiveBundles || missingInfo) persistUnlocked()
+                val pruned = pruneExpiredRetainedUnlocked()
+                if (unreachableActiveBundles || missingInfo || pruned) persistUnlocked()
             }
             Log.d("KeyPackageRotationManager") {
                 "Restored ${decoded.bundles.size} active KeyPackage bundle(s), " +
@@ -510,7 +510,7 @@ class KeyPackageRotationManager(
      */
     suspend fun findBundleByRef(keyPackageRef: ByteArray): KeyPackageBundle? =
         mutex.withLock {
-            pruneExpiredRetainedUnlocked()
+            if (pruneExpiredRetainedUnlocked()) persistUnlocked()
             activeBundles.values.find { bundle ->
                 bundle.keyPackage.reference().contentEquals(keyPackageRef)
             } ?: retainedBundles.values.find { bundle ->
@@ -528,7 +528,7 @@ class KeyPackageRotationManager(
      */
     suspend fun findBundleByEventId(eventId: HexKey): KeyPackageBundle? =
         mutex.withLock {
-            pruneExpiredRetainedUnlocked()
+            if (pruneExpiredRetainedUnlocked()) persistUnlocked()
             val slot = eventIdToSlot[eventId]
             if (slot != null) {
                 activeBundles[slot]?.let { return@withLock it }
@@ -679,7 +679,20 @@ class KeyPackageRotationManager(
      *
      * Caller must hold the mutex.
      */
-    private fun pruneExpiredRetainedUnlocked() {
+    /**
+     * Delete the private keys of every retained bundle past its bound, and save
+     * the result. The deletion has to reach the store: a key dropped from memory
+     * but still in the snapshot outlives the bound the spec sets
+     * (`foundation/key-packages.md`). Cheap when nothing is due, so the client
+     * calls it on a clock.
+     */
+    suspend fun pruneExpired() =
+        mutex.withLock {
+            if (pruneExpiredRetainedUnlocked()) persistUnlocked()
+        }
+
+    /** Drops expired retained bundles; true when it dropped any. Caller must hold the mutex. */
+    private fun pruneExpiredRetainedUnlocked(): Boolean {
         val now = TimeUtils.now()
         val expired =
             retainedBundles.entries
@@ -696,6 +709,7 @@ class KeyPackageRotationManager(
             retainedBundles.remove(it)
             retainedInfo.remove(it)
         }
+        return expired.isNotEmpty()
     }
 
     /**

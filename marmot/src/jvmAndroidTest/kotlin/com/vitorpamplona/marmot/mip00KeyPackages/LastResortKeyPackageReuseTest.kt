@@ -267,6 +267,37 @@ class LastResortKeyPackageReuseTest {
             assertNull(manager.findBundleByEventId(oldId))
         }
 
+    /**
+     * The deletion has to reach the store. A grace period that runs out while
+     * the app is open is noticed by a lookup or by the periodic prune; dropping
+     * the key from memory alone left it in the snapshot until the next rotation.
+     */
+    @Test
+    fun aKeyWhoseGraceRunsOutIsDeletedFromTheStoreToo() =
+        runBlocking {
+            val store = InMemoryKeyPackageBundleStore()
+            val manager = KeyPackageRotationManager(store)
+            val slot = manager.getOrCreateSlotDTag("primary")
+            manager.generateKeyPackage(identity, slot)
+            val consumedId = "7".repeat(64)
+            manager.recordPublishedEventId(slot, consumedId)
+            manager.markConsumedByEventId(consumedId)
+            manager.rotateSlot(identity, slot)
+            val replacementId = "8".repeat(64)
+            manager.recordPublishedEventId(slot, replacementId)
+            manager.confirmReplacementPublished(slot, replacementId, confirmedAt = TimeUtils.now() - KeyPackageRotationManager.REPLACEMENT_GRACE_SECONDS + 1)
+            val withKey = store.load()!!.size
+
+            Thread.sleep(2_100)
+            manager.pruneExpired()
+
+            assertTrue("the expired key must leave the snapshot", store.load()!!.size < withKey)
+            val restored = KeyPackageRotationManager(store)
+            restored.restoreFromStore()
+            assertNull(restored.findBundleByEventId(consumedId))
+            assertNotNull(restored.findBundleByEventId(replacementId))
+        }
+
     @Test
     fun theGracePeriodSurvivesARestart() =
         runBlocking {

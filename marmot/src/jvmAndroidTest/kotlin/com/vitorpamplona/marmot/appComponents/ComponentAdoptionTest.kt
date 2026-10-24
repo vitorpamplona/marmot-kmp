@@ -23,9 +23,11 @@
 package com.vitorpamplona.marmot.appComponents
 
 import com.vitorpamplona.marmot.TestGroupStateStore
+import com.vitorpamplona.marmot.groups.MarmotCapabilities
 import com.vitorpamplona.marmot.groups.MarmotGroupPolicy
 import com.vitorpamplona.marmot.groups.MlsGroupManager
 import com.vitorpamplona.mls.InternalMlsApi
+import com.vitorpamplona.mls.components.AppDataDictionary
 import com.vitorpamplona.mls.components.ComponentsList
 import com.vitorpamplona.mls.group.MlsGroup
 import com.vitorpamplona.quartz.nip01Core.crypto.KeyPair
@@ -68,6 +70,33 @@ class ComponentAdoptionTest {
                     supportedComponents = CurrentProfileGroupFactory.SUPPORTED_COMPONENTS - AppComponentIds.GROUP_LIFECYCLE_V1,
                 )
             assertFailsWith<IllegalArgumentException> { alice.addMember(stale.keyPackage.toTlsBytes()) }
+        }
+
+    /**
+     * Receivers refuse an UpdatePath leaf that drops a required component. The
+     * committer must refuse it too, before merging: otherwise it moves to an
+     * epoch no peer accepts and forks itself.
+     */
+    @Test
+    fun aCommitThatStopsAdvertisingARequiredComponentIsRefusedByItsCommitter(): Unit =
+        runBlocking {
+            val alice = CurrentProfileGroupFactory.createGroup(NostrSignerInternal(KeyPair()), nostrGroupId, listOf("wss://relay.invalid"))
+            assertTrue(AppComponentIds.GROUP_LIFECYCLE_V1 in requiredOf(alice))
+            val mine = alice.members().first { it.first == alice.leafIndex }.second
+            val dropped =
+                AppDataDictionary
+                    .fromExtensionsOrEmpty(mine.extensions)
+                    .with(
+                        ComponentsList.APP_COMPONENTS_ID,
+                        ComponentsList.encode(CurrentProfileGroupFactory.SUPPORTED_COMPONENTS - AppComponentIds.GROUP_LIFECYCLE_V1),
+                    )
+            val epoch = alice.epoch
+            alice.advertiseInNextCommit(
+                MarmotCapabilities.currentProfileLeaf(),
+                mine.extensions.filterNot { it.extensionType == AppDataDictionary.EXTENSION_TYPE } + dropped.toExtension(),
+            )
+            assertFailsWith<IllegalArgumentException> { alice.commit() }
+            assertEquals(epoch, alice.epoch)
         }
 
     @Test
