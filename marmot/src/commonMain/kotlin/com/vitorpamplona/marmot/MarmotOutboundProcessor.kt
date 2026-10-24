@@ -51,6 +51,14 @@ data class OutboundGroupEvent(
      * pubkey and therefore a different event id.
      */
     val marmotMessageId: HexKey,
+    /**
+     * The MLS epoch the payload was encrypted under, which is the source epoch
+     * a receiver attributes it to. Keys derived per epoch (an attachment's media
+     * key, an agent stream's record key) must use this epoch, not whatever epoch
+     * the group reaches by the time someone reads the message. Null for
+     * handshake messages, whose epoch is the one they create.
+     */
+    val epoch: Long? = null,
 )
 
 /**
@@ -124,6 +132,7 @@ class MarmotOutboundProcessor(
         plaintext: ByteArray,
     ): OutboundGroupEvent {
         // Step 1: MLS encrypt
+        val epoch = groupManager.getGroup(nostrGroupId)?.epoch
         val mlsCiphertext = groupManager.encrypt(nostrGroupId, plaintext)
 
         // Step 2: Outer ChaCha20-Poly1305 encryption
@@ -151,6 +160,7 @@ class MarmotOutboundProcessor(
             signedEvent = signedEvent,
             nostrGroupId = nostrGroupId,
             marmotMessageId = sha256(mlsCiphertext).toHexKey(),
+            epoch = epoch,
         )
     }
 

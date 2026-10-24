@@ -93,6 +93,62 @@ interface MarmotMessageStore {
     suspend fun loadEpochs(nostrGroupId: String): Map<String, Long> = emptyMap()
 
     /**
+     * Remember the encrypted-media key of [epoch]
+     * (`MLS-Exporter("marmot", "encrypted-media", 32)` under that epoch).
+     *
+     * An attachment's key comes from the epoch of the message that carries it
+     * (`features/encrypted-media.md`), and the MLS state forgets an epoch's
+     * exporter secret a few commits later. Capturing the media key while the
+     * epoch is still held is what lets a picture sent before the last commit
+     * still open, after a restart as much as before it.
+     *
+     * One entry per epoch that delivered a message, not one per message. It is
+     * a secret: store it under the same at-rest encryption as the messages.
+     *
+     * Optional, like [recordEpoch]: a store that keeps none can only open
+     * attachments from epochs the group still retains.
+     */
+    suspend fun recordMediaSecret(
+        nostrGroupId: String,
+        epoch: Long,
+        mediaSecret: ByteArray,
+    ) = Unit
+
+    /** MLS epoch → its encrypted-media key, for what was recorded. */
+    suspend fun loadMediaSecrets(nostrGroupId: String): Map<Long, ByteArray> = emptyMap()
+
+    // ── Admin moderation authority ───────────────────────────────────────────
+    //
+    // `features/content-moderation.md`: an admin deletion (kind 4891) is
+    // authorized by the admin set of the event's SOURCE epoch, not the current
+    // one, and "pruning source-epoch state MUST NOT undo an authorized
+    // deletion". So the admin set of each epoch this device passes through is
+    // kept, and each deletion's verdict is recorded once and read back after a
+    // restart. Optional, like [recordEpoch]: a store that keeps neither can
+    // still decide deletions that arrive in the current epoch while the app
+    // runs, and treats anything it cannot prove as unauthorized.
+
+    /** Remember the active admin account keys of [epoch]. First write wins. */
+    suspend fun recordEpochAdmins(
+        nostrGroupId: String,
+        epoch: Long,
+        admins: Set<String>,
+    ) = Unit
+
+    /** MLS epoch → its active admins, for what was recorded. */
+    suspend fun loadEpochAdmins(nostrGroupId: String): Map<Long, Set<String>> = emptyMap()
+
+    /** Remember whether the moderation event [innerEventId] was authorized. First write wins. */
+    suspend fun recordModerationVerdict(
+        nostrGroupId: String,
+        innerEventId: String,
+        authorized: Boolean,
+    ) = Unit
+
+    /** Moderation event id → whether it was authorized, for what was recorded. */
+    suspend fun loadModerationVerdicts(nostrGroupId: String): Map<String, Boolean> = emptyMap()
+
+    /**
      * Remember the group state the last kind `1210` rows were derived FROM.
      *
      * System rows are synthesized locally from canonical state rather than

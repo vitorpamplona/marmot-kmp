@@ -100,7 +100,13 @@ object AppComponentIds {
     /** `marmot.member.account-identity-proof.v2` — leaf-only; see `AccountIdentityProofV2`. */
     const val ACCOUNT_IDENTITY_PROOF_V2 = 0x8009
 
-    /** `marmot.authorization.multi-device-join.v1` — draft. */
+    /**
+     * `marmot.authorization.multi-device-join.v1` — no longer registered. The
+     * spec moved multi-device to an idea document and dropped the id from
+     * `foundation/registries.md`; MDK refuses it as GroupContext data. Never
+     * advertised, required or written; kept so the value is not reused here.
+     */
+    @Deprecated("Unregistered by the spec; multi-device is an idea, not a component.")
     const val MULTI_DEVICE_JOIN_V1 = 0x800a
 
     /** `marmot.group.encrypted-media.v2`. */

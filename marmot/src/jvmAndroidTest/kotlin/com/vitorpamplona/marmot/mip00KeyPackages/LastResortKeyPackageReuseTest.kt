@@ -24,6 +24,7 @@ import com.vitorpamplona.marmot.appComponents.CurrentProfileGroupFactory
 import com.vitorpamplona.mls.tree.Extension
 import com.vitorpamplona.quartz.nip01Core.crypto.KeyPair
 import com.vitorpamplona.quartz.nip01Core.signers.NostrSignerInternal
+import com.vitorpamplona.quartz.utils.TimeUtils
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -187,6 +188,109 @@ class LastResortKeyPackageReuseTest {
                     .reference()
                     .toList(),
             )
+        }
+
+    /**
+     * `foundation/key-packages.md` (#440): a consumed last-resort KeyPackage
+     * keeps its init key for 24 hours after its replacement is confirmed
+     * published, then it MUST go. Inside the grace period a Welcome built from
+     * the old publication still opens; past it, local policy may not extend it.
+     */
+    @Test
+    fun aConsumedKeyPackageIsDeletedOneDayAfterItsReplacementIsConfirmed() =
+        runBlocking {
+            val manager = KeyPackageRotationManager()
+            val slot = manager.getOrCreateSlotDTag("primary")
+            manager.generateKeyPackage(identity, slot)
+            val consumedId = "1".repeat(64)
+            manager.recordPublishedEventId(slot, consumedId)
+            manager.markConsumedByEventId(consumedId)
+            manager.rotateSlot(identity, slot)
+            val replacementId = "2".repeat(64)
+            manager.recordPublishedEventId(slot, replacementId)
+
+            assertNotNull("no confirmed replacement yet: the key is held", manager.findBundleByEventId(consumedId))
+
+            val now = TimeUtils.now()
+            manager.confirmReplacementPublished(slot, replacementId, confirmedAt = now - 60 * 60)
+            assertNotNull("an hour into the grace period a delayed Welcome still opens", manager.findBundleByEventId(consumedId))
+
+            manager.confirmReplacementPublished(slot, replacementId, confirmedAt = now - 2 * KeyPackageRotationManager.REPLACEMENT_GRACE_SECONDS)
+            assertNotNull("the grace period starts at the FIRST confirmation, a later one does not move it", manager.findBundleByEventId(consumedId))
+            assertNotNull("the replacement itself is untouched", manager.findBundleByEventId(replacementId))
+        }
+
+    @Test
+    fun pastTheGracePeriodTheConsumedKeyIsGone() =
+        runBlocking {
+            val manager = KeyPackageRotationManager()
+            val slot = manager.getOrCreateSlotDTag("primary")
+            val consumed = manager.generateKeyPackage(identity, slot)
+            val consumedId = "3".repeat(64)
+            manager.recordPublishedEventId(slot, consumedId)
+            manager.markConsumedByEventId(consumedId)
+            manager.rotateSlot(identity, slot)
+            val replacementId = "4".repeat(64)
+            manager.recordPublishedEventId(slot, replacementId)
+
+            manager.confirmReplacementPublished(
+                slot,
+                replacementId,
+                confirmedAt = TimeUtils.now() - KeyPackageRotationManager.REPLACEMENT_GRACE_SECONDS - 1,
+            )
+
+            assertNull(manager.findBundleByEventId(consumedId))
+            assertNull(manager.findBundleByRef(consumed.keyPackage.reference()))
+            assertNotNull(manager.findBundleByEventId(replacementId))
+        }
+
+    @Test
+    fun anUnconsumedDisplacedKeyPackageIsBoundOnlyByItsLifetime() =
+        runBlocking {
+            // Regenerating a slot without any Welcome leaves the old KeyPackage
+            // unconsumed. The grace bound is for consumed ones; this keeps its
+            // key until not_after, as MDK does.
+            val manager = KeyPackageRotationManager()
+            val slot = manager.getOrCreateSlotDTag("primary")
+            manager.generateKeyPackage(identity, slot)
+            val oldId = "5".repeat(64)
+            manager.recordPublishedEventId(slot, oldId)
+            manager.generateKeyPackage(identity, slot)
+            val newId = "6".repeat(64)
+            manager.recordPublishedEventId(slot, newId)
+
+            manager.confirmReplacementPublished(slot, newId, confirmedAt = TimeUtils.now() - 3 * KeyPackageRotationManager.REPLACEMENT_GRACE_SECONDS)
+            assertNotNull(manager.findBundleByEventId(oldId))
+
+            // ...until a delayed Welcome consumes it: the grace that already ran out applies now.
+            manager.markConsumedByEventId(oldId)
+            assertNull(manager.findBundleByEventId(oldId))
+        }
+
+    @Test
+    fun theGracePeriodSurvivesARestart() =
+        runBlocking {
+            val store = InMemoryKeyPackageBundleStore()
+            val manager = KeyPackageRotationManager(store)
+            val slot = manager.getOrCreateSlotDTag("primary")
+            manager.generateKeyPackage(identity, slot)
+            val consumedId = "7".repeat(64)
+            manager.recordPublishedEventId(slot, consumedId)
+            manager.markConsumedByEventId(consumedId)
+            manager.rotateSlot(identity, slot)
+            val replacementId = "8".repeat(64)
+            manager.recordPublishedEventId(slot, replacementId)
+            manager.confirmReplacementPublished(slot, replacementId, confirmedAt = TimeUtils.now() - 60)
+
+            val restored = KeyPackageRotationManager(store)
+            restored.restoreFromStore()
+            assertNotNull(restored.findBundleByEventId(consumedId))
+
+            // Confirming again after the restart must not restart the clock.
+            restored.confirmReplacementPublished(slot, replacementId, confirmedAt = TimeUtils.now())
+            val again = KeyPackageRotationManager(store)
+            again.restoreFromStore()
+            assertNotNull(again.findBundleByEventId(consumedId))
         }
 
     /**

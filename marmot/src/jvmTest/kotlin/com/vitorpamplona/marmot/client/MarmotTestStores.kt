@@ -85,6 +85,10 @@ class SnapshotMessageStore : MarmotMessageStore {
     private val snapshots = mutableMapOf<String, String>()
     private val expiries = mutableMapOf<String, MutableMap<String, Long>>()
     private val epochRetentions = mutableMapOf<String, MutableMap<Long, Long>>()
+    private val epochs = mutableMapOf<String, MutableMap<String, Long>>()
+    private val mediaSecrets = mutableMapOf<String, MutableMap<Long, ByteArray>>()
+    private val epochAdmins = mutableMapOf<String, MutableMap<Long, Set<String>>>()
+    private val verdicts = mutableMapOf<String, MutableMap<String, Boolean>>()
 
     override suspend fun appendMessage(
         nostrGroupId: String,
@@ -101,7 +105,51 @@ class SnapshotMessageStore : MarmotMessageStore {
         snapshots.remove(nostrGroupId)
         expiries.remove(nostrGroupId)
         epochRetentions.remove(nostrGroupId)
+        epochs.remove(nostrGroupId)
+        mediaSecrets.remove(nostrGroupId)
+        epochAdmins.remove(nostrGroupId)
+        verdicts.remove(nostrGroupId)
     }
+
+    override suspend fun recordEpochAdmins(
+        nostrGroupId: String,
+        epoch: Long,
+        admins: Set<String>,
+    ) {
+        epochAdmins.getOrPut(nostrGroupId) { mutableMapOf() }.putIfAbsent(epoch, admins)
+    }
+
+    override suspend fun loadEpochAdmins(nostrGroupId: String): Map<Long, Set<String>> = epochAdmins[nostrGroupId]?.toMap() ?: emptyMap()
+
+    override suspend fun recordModerationVerdict(
+        nostrGroupId: String,
+        innerEventId: String,
+        authorized: Boolean,
+    ) {
+        verdicts.getOrPut(nostrGroupId) { mutableMapOf() }.putIfAbsent(innerEventId, authorized)
+    }
+
+    override suspend fun loadModerationVerdicts(nostrGroupId: String): Map<String, Boolean> = verdicts[nostrGroupId]?.toMap() ?: emptyMap()
+
+    override suspend fun recordEpoch(
+        nostrGroupId: String,
+        innerEventId: String,
+        epoch: Long,
+    ) {
+        epochs.getOrPut(nostrGroupId) { mutableMapOf() }.putIfAbsent(innerEventId, epoch)
+    }
+
+    override suspend fun loadEpochs(nostrGroupId: String): Map<String, Long> = epochs[nostrGroupId]?.toMap() ?: emptyMap()
+
+    override suspend fun recordMediaSecret(
+        nostrGroupId: String,
+        epoch: Long,
+        mediaSecret: ByteArray,
+    ) {
+        mediaSecrets.getOrPut(nostrGroupId) { mutableMapOf() }.putIfAbsent(epoch, mediaSecret.copyOf())
+    }
+
+    override suspend fun loadMediaSecrets(nostrGroupId: String): Map<Long, ByteArray> = mediaSecrets[nostrGroupId]?.toMap() ?: emptyMap()
 
     override suspend fun recordGroupSnapshot(
         nostrGroupId: String,

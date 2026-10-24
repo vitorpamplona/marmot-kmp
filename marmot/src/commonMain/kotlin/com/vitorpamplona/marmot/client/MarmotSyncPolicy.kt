@@ -58,6 +58,14 @@ class MarmotSyncPolicy(
     private val publish: suspend (event: Event, relayList: Set<NormalizedRelayUrl>) -> Unit,
     /** Progress/diagnostic sink; callers prefix/route as they see fit. */
     private val log: (String) -> Unit = {},
+    /**
+     * Publish and report whether at least one relay accepted, used instead of
+     * [publish] for rotated KeyPackages when given. A confirmed replacement is
+     * what starts the 24-hour grace period after which a consumed KeyPackage's
+     * private keys are deleted; with only [publish] that clock never starts and
+     * a retained key is bounded by its `not_after` alone.
+     */
+    private val publishAndConfirm: (suspend (event: Event, relayList: Set<NormalizedRelayUrl>) -> Boolean)? = null,
 ) {
     /**
      * Persisted `since` cursors. Backed by `RunState` (`state.json`) in the
@@ -236,7 +244,14 @@ class MarmotSyncPolicy(
                 if (kpRelays.isNotEmpty()) {
                     val rotated = marmot.rotateConsumedKeyPackages(kpRelays.toList())
                     for (event in rotated) {
-                        publish(event, kpRelays)
+                        val confirming = publishAndConfirm
+                        if (confirming == null) {
+                            publish(event, kpRelays)
+                        } else if (confirming(event, kpRelays)) {
+                            marmot.confirmKeyPackagePublished(event)
+                        } else {
+                            log("rotated KeyPackage ${event.id.take(8)} was not confirmed by any relay")
+                        }
                         log("rotated KeyPackage → ${event.id.take(8)} on ${kpRelays.size} relay(s)")
                     }
                 }

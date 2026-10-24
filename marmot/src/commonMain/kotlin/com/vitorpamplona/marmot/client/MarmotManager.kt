@@ -46,12 +46,12 @@ import com.vitorpamplona.marmot.appComponents.agentTextStream.AgentTextStreamFin
 import com.vitorpamplona.marmot.appComponents.agentTextStream.AgentTextStreamKeyContextV1
 import com.vitorpamplona.marmot.appComponents.agentTextStream.AgentTextStreamStart
 import com.vitorpamplona.marmot.client.MarmotGroupImage
+import com.vitorpamplona.marmot.foundation.appEvents.MarmotAdminDeletion
 import com.vitorpamplona.marmot.foundation.appEvents.MarmotAppEvent
 import com.vitorpamplona.marmot.foundation.appEvents.MarmotGroupSnapshot
 import com.vitorpamplona.marmot.foundation.appEvents.MarmotMessageEdit
 import com.vitorpamplona.marmot.foundation.appEvents.MarmotSystemEvent
 import com.vitorpamplona.marmot.foundation.appEvents.MarmotSystemRowDiff
-import com.vitorpamplona.marmot.foundation.appEvents.removedMessageIds
 import com.vitorpamplona.marmot.groups.MarmotGroupPolicy
 import com.vitorpamplona.marmot.groups.MarmotMessageStore
 import com.vitorpamplona.marmot.groups.MlsGroupManager
@@ -93,6 +93,7 @@ import com.vitorpamplona.quartz.nip18Reposts.quotes.QEventTag
 import com.vitorpamplona.quartz.nip18Reposts.quotes.quote
 import com.vitorpamplona.quartz.nip30CustomEmoji.EmojiUrlTag
 import com.vitorpamplona.quartz.nip59Giftwrap.rumors.RumorAssembler
+import com.vitorpamplona.quartz.nipC7Chats.ChatEvent
 import com.vitorpamplona.quartz.utils.Log
 import com.vitorpamplona.quartz.utils.TimeUtils
 import com.vitorpamplona.quartz.utils.concurrent.PlatformLock
@@ -108,6 +109,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
+import kotlin.random.Random
 
 /**
  * Central coordinator for Marmot MLS group messaging.
@@ -460,7 +462,18 @@ class MarmotManager(
             return GroupEventResult.CommitProcessed(obligation.groupId, obligation.pendingState.groupContext.epoch)
         }
 
+        // Record the admin set of the epoch this event may close, BEFORE a
+        // commit in it moves the group on: a kind-4891 from this epoch that
+        // arrives late is authorized against exactly this set.
+        groupEvent.groupId()?.let { captureEpochAdmins(it) }
+
         val result = inboundProcessor.processGroupEvent(groupEvent)
+
+        if (result is GroupEventResult.ApplicationMessage) {
+            Event.fromJsonOrNull(result.innerEventJson)?.let { inner ->
+                if (inner.kind == MarmotAdminDeletion.KIND) decideAdminRemoval(result.groupId, inner, result.epoch)
+            }
+        }
 
         // A fork just opened a bounded pass. Inbound traffic settles it
         // opportunistically, but the group may fall silent before its cutoff —
@@ -608,7 +621,7 @@ class MarmotManager(
     ): TextMessageBundle {
         val innerEvent = buildTextRumor(text, replyToEventId, replyToAuthorPubKey, mentions)
         val outbound = buildGroupMessage(nostrGroupId, innerEvent)
-        if (persistOwn) persistDecryptedMessage(nostrGroupId, innerEvent.toJson())
+        if (persistOwn) persistDecryptedMessage(nostrGroupId, innerEvent.toJson(), outbound.epoch)
         return TextMessageBundle(outbound = outbound, innerEvent = innerEvent)
     }
 
@@ -666,7 +679,7 @@ class MarmotManager(
     ): TextMessageBundle {
         val innerEvent = buildReactionRumor(targetEvent, reaction)
         val outbound = buildGroupMessage(nostrGroupId, innerEvent)
-        if (persistOwn) persistDecryptedMessage(nostrGroupId, innerEvent.toJson())
+        if (persistOwn) persistDecryptedMessage(nostrGroupId, innerEvent.toJson(), outbound.epoch)
         return TextMessageBundle(outbound = outbound, innerEvent = innerEvent)
     }
 
@@ -736,7 +749,7 @@ class MarmotManager(
         // so remember it the same way an inbound anchor's epoch is remembered.
         val epoch = currentEpoch(nostrGroupId)
         val outbound = buildGroupMessage(nostrGroupId, innerEvent)
-        if (persistOwn) persistDecryptedMessage(nostrGroupId, innerEvent.toJson(), epoch)
+        if (persistOwn) persistDecryptedMessage(nostrGroupId, innerEvent.toJson(), outbound.epoch ?: epoch)
         return TextMessageBundle(outbound = outbound, innerEvent = innerEvent)
     }
 
@@ -768,7 +781,7 @@ class MarmotManager(
             com.vitorpamplona.quartz.nip59Giftwrap.rumors.RumorAssembler
                 .assembleRumor<Event>(signer.pubKey, template)
         val outbound = buildGroupMessage(nostrGroupId, innerEvent)
-        if (persistOwn) persistDecryptedMessage(nostrGroupId, innerEvent.toJson())
+        if (persistOwn) persistDecryptedMessage(nostrGroupId, innerEvent.toJson(), outbound.epoch)
         return TextMessageBundle(outbound = outbound, innerEvent = innerEvent)
     }
 
@@ -845,7 +858,7 @@ class MarmotManager(
     ): TextMessageBundle {
         val innerEvent = buildMessageEditRumor(targetEventId, replacement)
         val outbound = buildGroupMessage(nostrGroupId, innerEvent)
-        if (persistOwn) persistDecryptedMessage(nostrGroupId, innerEvent.toJson())
+        if (persistOwn) persistDecryptedMessage(nostrGroupId, innerEvent.toJson(), outbound.epoch)
         return TextMessageBundle(outbound = outbound, innerEvent = innerEvent)
     }
 
@@ -861,9 +874,26 @@ class MarmotManager(
     ): TextMessageBundle {
         val innerEvent = buildDeletionRumor(targetEvents)
         val outbound = buildGroupMessage(nostrGroupId, innerEvent)
-        if (persistOwn) persistDecryptedMessage(nostrGroupId, innerEvent.toJson())
+        if (persistOwn) persistDecryptedMessage(nostrGroupId, innerEvent.toJson(), outbound.epoch)
         return TextMessageBundle(outbound = outbound, innerEvent = innerEvent)
     }
+
+    /**
+     * The kind-4891 rumor with which an admin deletes any member's chat message
+     * ([targetEventId], a kind 9 in this group), in the exact v1 shape of
+     * `features/content-moderation.md`. Receivers honour it only when this
+     * account is an active admin in the epoch it is sent in.
+     */
+    suspend fun buildAdminDeletionRumor(targetEventId: HexKey): Event =
+        RumorAssembler.assembleRumor(
+            signer.pubKey,
+            eventTemplate<Event>(kind = MarmotAdminDeletion.KIND, description = MarmotAdminDeletion.CONTENT) {
+                MarmotAdminDeletion.tags(targetEventId).forEach { add(it) }
+            },
+        )
+
+    /** Whether this account is an active admin of [nostrGroupId] now, and so may send a kind 4891. */
+    fun isGroupAdmin(nostrGroupId: HexKey): Boolean = groupView(nostrGroupId)?.adminPubkeys?.contains(signer.pubKey) == true
 
     /** The inner kind:5 deletion rumor alone. See [buildTextRumor]. */
     suspend fun buildDeletionRumor(targetEvents: List<Event>): DeletionRequestEvent {
@@ -1531,6 +1561,7 @@ class MarmotManager(
         publishGate.raiseGate(nostrGroupId, LocalOutboundGate.LEAVING)
 
         subscriptionManager.unsubscribeGroup(nostrGroupId)
+        forgetMediaKeys(nostrGroupId)
         try {
             messageStore?.delete(nostrGroupId)
         } catch (e: Exception) {
@@ -1562,6 +1593,11 @@ class MarmotManager(
             val parsed = Event.fromJsonOrNull(innerEventJson)
             if (epoch != null && parsed != null) {
                 messageStore?.recordEpoch(nostrGroupId, parsed.id, epoch)
+                rememberMessageEpoch(nostrGroupId, parsed.id, epoch)
+                captureMediaSecret(nostrGroupId, epoch)
+                // Our own deletion is decided the same way as a peer's: by the
+                // admin set of the epoch it was sent in.
+                if (parsed.kind == MarmotAdminDeletion.KIND) decideAdminRemoval(nostrGroupId, parsed, epoch)
             }
             // Pinned here, at the moment the message enters the log, because
             // this is the last point at which the retention of its delivering
@@ -1595,13 +1631,19 @@ class MarmotManager(
     fun editOverlays(messages: List<Event>): Map<HexKey, String> {
         val authorOf = HashMap<HexKey, HexKey>(messages.size)
         val edits = HashMap<HexKey, MutableList<MarmotMessageEdit>>()
+        // An edit its author retracted with a kind 5 no longer applies (MDK
+        // skips those too), so the earlier edit, or the original, shows again.
+        val retracted = deletedIds(messages)
         for (event in messages) {
             if (event.kind == MarmotAppEvent.KIND_EDIT) {
+                if (event.id in retracted) continue
                 val edit =
                     MarmotMessageEdit.fromAppEvent(MarmotAppEvent.fromEvent(event))
                         ?: continue
                 edits.getOrPut(edit.targetId) { mutableListOf() }.add(edit)
-            } else {
+            } else if (event.kind == ChatEvent.KIND) {
+                // Only a kind-9 chat message can be edited; an edit naming a
+                // reaction or any other app event has nothing to replace.
                 authorOf[event.id] = event.pubKey
             }
         }
@@ -1627,11 +1669,10 @@ class MarmotManager(
      * that check any member could erase anyone's words by publishing a kind:5
      * naming them.
      *
-     * MDK additionally honours an *admin moderation* delete when the deleter
-     * held an authenticated moderation grant frozen at ingest. We do not issue
-     * or track that grant, so a cross-author delete is ignored here rather than
-     * guessed at — ignoring one MDK would have applied hides a message less
-     * often than applying one it would have rejected erases a message wrongly.
+     * A cross-author kind 5 is ignored. An admin removes someone else's
+     * message with a kind 4891 instead, whose authority depends on the epoch
+     * it was sent in, so it is decided by the group-scoped overload rather
+     * than here.
      *
      * A deletion naming a message this client does not hold contributes
      * nothing: it is not invalid, the target may simply not have arrived yet,
@@ -1642,46 +1683,157 @@ class MarmotManager(
      * targets together, since a deletion is only authorized against the message
      * it names.
      */
-    fun deletedIds(
-        messages: List<Event>,
-        /** The group's admins: their kind-4891 removals apply to anyone's message. */
-        admins: Set<HexKey> = emptySet(),
-    ): Set<HexKey> {
+    fun deletedIds(messages: List<Event>): Set<HexKey> {
         val authorOf = HashMap<HexKey, HexKey>(messages.size)
         val claims = ArrayList<Pair<HexKey, HexKey>>()
-        val removed = HashSet<HexKey>()
         for (event in messages) {
             // Stored messages are parsed through EventFactory, so every kind:5 is typed here.
             if (event is DeletionRequestEvent) {
                 for (targetId in event.deleteEventIds()) claims.add(targetId to event.pubKey)
-            } else if (event.kind == MarmotAppEvent.KIND_REMOVE) {
-                if (event.pubKey in admins) removed.addAll(event.tags.removedMessageIds())
+            } else if (event.kind == MarmotAdminDeletion.KIND) {
+                // Admin deletions are authorized per source epoch: see the
+                // group-scoped deletedIds(nostrGroupId, messages).
             } else {
                 authorOf[event.id] = event.pubKey
             }
         }
-        val deleted = HashSet<HexKey>(claims.size + removed.size)
+        val deleted = HashSet<HexKey>(claims.size)
         for ((targetId, deleter) in claims) {
             if (authorOf[targetId] == deleter) deleted.add(targetId)
         }
-        deleted.addAll(removed.filter { it in authorOf })
         return deleted
     }
 
+    // ── Admin deletions (kind 4891) ──────────────────────────────────────────
+    //
+    // `features/content-moderation.md`: the sender must have been an active
+    // admin in the event's authenticated SOURCE-epoch state. The current admin
+    // list does not decide it, a later demotion does not revoke it, and pruning
+    // source-epoch state must not undo it. So each epoch's admin set is kept as
+    // the group passes through it, and each deletion's verdict is recorded once.
+
+    private val moderationMutex = Mutex()
+
+    /** Group → (epoch → active admins), loaded from the store on first use. */
+    private val epochAdmins = mutableMapOf<HexKey, MutableMap<Long, Set<HexKey>>>()
+
+    /** Group → (kind-4891 event id → authorized), loaded from the store on first use. */
+    private val moderationVerdicts = mutableMapOf<HexKey, MutableMap<HexKey, Boolean>>()
+
+    private suspend fun epochAdminsUnlocked(nostrGroupId: HexKey): MutableMap<Long, Set<HexKey>> =
+        epochAdmins.getOrPut(nostrGroupId) {
+            try {
+                messageStore?.loadEpochAdmins(nostrGroupId)?.toMutableMap() ?: mutableMapOf()
+            } catch (e: Exception) {
+                currentCoroutineContext().ensureActive()
+                Log.w("MarmotManager", "Failed to read Marmot epoch admins for $nostrGroupId", e)
+                mutableMapOf()
+            }
+        }
+
+    private suspend fun moderationVerdictsUnlocked(nostrGroupId: HexKey): MutableMap<HexKey, Boolean> =
+        moderationVerdicts.getOrPut(nostrGroupId) {
+            try {
+                messageStore?.loadModerationVerdicts(nostrGroupId)?.toMutableMap() ?: mutableMapOf()
+            } catch (e: Exception) {
+                currentCoroutineContext().ensureActive()
+                Log.w("MarmotManager", "Failed to read Marmot moderation verdicts for $nostrGroupId", e)
+                mutableMapOf()
+            }
+        }
+
+    /** Record the active admins of [nostrGroupId]'s current epoch, once per epoch. */
+    private suspend fun captureEpochAdmins(nostrGroupId: HexKey) = moderationMutex.withLock { captureEpochAdminsUnlocked(nostrGroupId) }
+
+    private suspend fun captureEpochAdminsUnlocked(nostrGroupId: HexKey) {
+        val epoch = currentEpoch(nostrGroupId) ?: return
+        val known = epochAdminsUnlocked(nostrGroupId)
+        if (known.containsKey(epoch)) return
+        val admins = groupView(nostrGroupId)?.adminPubkeys?.toSet() ?: return
+        known[epoch] = admins
+        try {
+            messageStore?.recordEpochAdmins(nostrGroupId, epoch, admins)
+        } catch (e: Exception) {
+            currentCoroutineContext().ensureActive()
+            Log.w("MarmotManager", "Failed to persist Marmot admins of epoch $epoch for $nostrGroupId", e)
+        }
+    }
+
     /**
-     * The messages a kind-4891 removal names, if its author may remove them: a current
-     * admin of [nostrGroupId]. Empty for anything else. White Noise sends 4891 instead of
-     * kind 5 whenever the deleter is an admin (their own messages included), so without
-     * this an admin's deletion from White Noise never reached us.
+     * Decide, once, whether [event] (a kind 4891 delivered in [epoch]) may delete:
+     * well formed, and its author an active admin of that epoch. Anything that
+     * cannot be proven, including an epoch whose admin set was never seen here,
+     * is unauthorized.
      */
-    fun adminRemovalTargets(
+    private suspend fun decideAdminRemoval(
+        nostrGroupId: HexKey,
+        event: Event,
+        epoch: Long,
+    ): Boolean =
+        moderationMutex.withLock {
+            val verdicts = moderationVerdictsUnlocked(nostrGroupId)
+            verdicts[event.id]?.let { return@withLock it }
+            if (epoch == currentEpoch(nostrGroupId)) captureEpochAdminsUnlocked(nostrGroupId)
+            val admins = epochAdminsUnlocked(nostrGroupId)[epoch]
+            val authorized = admins != null && MarmotAdminDeletion.targetOf(event) != null && event.pubKey in admins
+            verdicts[event.id] = authorized
+            try {
+                messageStore?.recordModerationVerdict(nostrGroupId, event.id, authorized)
+            } catch (e: Exception) {
+                currentCoroutineContext().ensureActive()
+                Log.w("MarmotManager", "Failed to persist the verdict of ${event.id} for $nostrGroupId", e)
+            }
+            authorized
+        }
+
+    /**
+     * The message a kind-4891 deletion removes, if it is well formed and its
+     * author was an active admin of [nostrGroupId] in the deletion's SOURCE epoch.
+     * Empty for anything else.
+     *
+     * White Noise sends 4891 instead of kind 5 whenever the deleter is an admin
+     * (their own messages included), so without this an admin's deletion from
+     * White Noise never reaches the conversation. The verdict was recorded when
+     * the deletion was decrypted (or sent); on a restart replay it is read back,
+     * so a later demotion cannot bring the deleted message back.
+     */
+    suspend fun adminRemovalTargets(
         nostrGroupId: HexKey,
         event: Event,
     ): List<HexKey> {
-        if (event.kind != MarmotAppEvent.KIND_REMOVE) return emptyList()
-        val admins = groupView(nostrGroupId)?.adminPubkeys ?: return emptyList()
-        if (event.pubKey !in admins) return emptyList()
-        return event.tags.removedMessageIds()
+        val target = MarmotAdminDeletion.targetOf(event) ?: return emptyList()
+        return if (isAuthorizedAdminRemoval(nostrGroupId, event)) listOf(target) else emptyList()
+    }
+
+    private suspend fun isAuthorizedAdminRemoval(
+        nostrGroupId: HexKey,
+        event: Event,
+    ): Boolean {
+        moderationMutex.withLock { moderationVerdictsUnlocked(nostrGroupId)[event.id] }?.let { return it }
+        // No verdict yet: decide it now if this client knows the epoch that delivered it.
+        val epoch = mediaKeyMutex.withLock { messageEpochsUnlocked(nostrGroupId)[event.id] } ?: return false
+        return decideAdminRemoval(nostrGroupId, event, epoch)
+    }
+
+    /**
+     * The ids of the messages in [messages] that were retracted: by their own
+     * author's kind 5 (see [deletedIds]), or by an authorized kind-4891 admin
+     * deletion whose target is a kind-9 chat message.
+     */
+    suspend fun deletedIds(
+        nostrGroupId: HexKey,
+        messages: List<Event>,
+    ): Set<HexKey> {
+        val deleted = deletedIds(messages).toHashSet()
+        val chatIds = HashSet<HexKey>()
+        for (event in messages) if (event.kind == ChatEvent.KIND) chatIds.add(event.id)
+        for (event in messages) {
+            if (event.kind != MarmotAdminDeletion.KIND) continue
+            for (target in adminRemovalTargets(nostrGroupId, event)) {
+                if (target in chatIds) deleted.add(target)
+            }
+        }
+        return deleted
     }
 
     /**
@@ -1759,6 +1911,100 @@ class MarmotManager(
             emptyList()
         }
     }
+
+    // ── Per-epoch media keys ─────────────────────────────────────────────────
+    //
+    // `features/encrypted-media.md` keys an attachment to the epoch of the
+    // message that carries it. The MLS state keeps only the current epoch and a
+    // few retained ones, so each epoch's media key is captured the first time a
+    // message of that epoch is persisted, and read back by message id.
+
+    private val mediaKeyMutex = Mutex()
+
+    /** Group → (epoch → media key), loaded from the store on first use. */
+    private val mediaSecretsByEpoch = mutableMapOf<HexKey, MutableMap<Long, ByteArray>>()
+
+    /** Group → (inner event id → delivering epoch), loaded from the store on first use. */
+    private val messageEpochs = mutableMapOf<HexKey, MutableMap<HexKey, Long>>()
+
+    private suspend fun mediaSecretsUnlocked(nostrGroupId: HexKey): MutableMap<Long, ByteArray> =
+        mediaSecretsByEpoch.getOrPut(nostrGroupId) {
+            try {
+                messageStore?.loadMediaSecrets(nostrGroupId)?.toMutableMap() ?: mutableMapOf()
+            } catch (e: Exception) {
+                currentCoroutineContext().ensureActive()
+                Log.w("MarmotManager", "Failed to read Marmot media keys for $nostrGroupId", e)
+                mutableMapOf()
+            }
+        }
+
+    private suspend fun messageEpochsUnlocked(nostrGroupId: HexKey): MutableMap<HexKey, Long> = messageEpochs.getOrPut(nostrGroupId) { storedEpochs(nostrGroupId).toMutableMap() }
+
+    private suspend fun rememberMessageEpoch(
+        nostrGroupId: HexKey,
+        innerEventId: HexKey,
+        epoch: Long,
+    ) = mediaKeyMutex.withLock {
+        messageEpochsUnlocked(nostrGroupId)[innerEventId] = epoch
+    }
+
+    private suspend fun forgetMediaKeys(nostrGroupId: HexKey) =
+        mediaKeyMutex.withLock {
+            mediaSecretsByEpoch.remove(nostrGroupId)
+            messageEpochs.remove(nostrGroupId)
+        }
+
+    /**
+     * Record [epoch]'s media key if this device still holds that epoch and has
+     * not recorded it yet. Called while the message of that epoch is being
+     * persisted, which is the latest moment the key is sure to be derivable.
+     */
+    private suspend fun captureMediaSecret(
+        nostrGroupId: HexKey,
+        epoch: Long,
+    ) = mediaKeyMutex.withLock { mediaSecretAtUnlocked(nostrGroupId, epoch) }
+
+    /** [epoch]'s media key: recorded, or derived now (and recorded) while the epoch is still held. */
+    private suspend fun mediaSecretAtUnlocked(
+        nostrGroupId: HexKey,
+        epoch: Long,
+    ): ByteArray? {
+        val known = mediaSecretsUnlocked(nostrGroupId)
+        known[epoch]?.let { return it }
+        val secret = groupManager.mediaExporterSecretAt(nostrGroupId, epoch) ?: return null
+        known[epoch] = secret
+        try {
+            messageStore?.recordMediaSecret(nostrGroupId, epoch, secret)
+        } catch (e: Exception) {
+            currentCoroutineContext().ensureActive()
+            Log.w("MarmotManager", "Failed to persist the Marmot media key of epoch $epoch for $nostrGroupId", e)
+        }
+        return secret
+    }
+
+    /**
+     * The media key that opens the attachments of [innerEventId]: the key of
+     * the epoch that delivered (or sent) that message.
+     *
+     * A message whose epoch was never recorded (everything persisted before
+     * epochs were tracked) falls back to the current epoch's key, which is what
+     * every attachment used before. A message whose epoch is known but whose
+     * key was neither captured nor is still held returns null: the current key
+     * cannot open it, so offering it would only turn a clear "cannot decrypt"
+     * into a corrupt download.
+     */
+    suspend fun mediaSecretForMessage(
+        nostrGroupId: HexKey,
+        innerEventId: HexKey,
+    ): ByteArray? =
+        mediaKeyMutex.withLock {
+            val epoch = messageEpochsUnlocked(nostrGroupId)[innerEventId]
+            when {
+                epoch != null -> mediaSecretAtUnlocked(nostrGroupId, epoch)
+                groupManager.getGroup(nostrGroupId) != null -> groupManager.mediaExporterSecret(nostrGroupId)
+                else -> null
+            }
+        }
 
     /** Inner event id → delivering MLS epoch, for whatever the store kept. */
     suspend fun storedEpochs(nostrGroupId: HexKey): Map<String, Long> =
@@ -1951,6 +2197,14 @@ class MarmotManager(
         val group =
             groupManager.getGroup(nostrGroupId)
                 ?: throw IllegalStateException("Not a member of group $nostrGroupId")
+        // A current-profile group keeps its metadata in app components, changed
+        // with AppDataUpdate (setGroupProfile, setGroupAdmins, ...). Writing the
+        // legacy 0xF2EE extension into one would reorder its GroupContext
+        // extensions, and MDK's own reorder (mdk#2253) already shows that two
+        // implementations disagreeing on that order derive different epochs.
+        check(!group.currentGroupState().isCurrentProfile) {
+            "updateGroupMetadata is for legacy groups; group $nostrGroupId is on the current profile"
+        }
         val preserved = group.extensions.filter { it.extensionType != MarmotGroupData.EXTENSION_ID_INT }
         val merged = preserved + metadata.toExtension()
         return commitAndPublish(nostrGroupId, relays) {
@@ -2536,7 +2790,7 @@ class MarmotManager(
     ): TextMessageBundle {
         val innerEvent = buildMediaRumor(reference, caption)
         val outbound = buildGroupMessage(nostrGroupId, innerEvent)
-        if (persistOwn) persistDecryptedMessage(nostrGroupId, innerEvent.toJson())
+        if (persistOwn) persistDecryptedMessage(nostrGroupId, innerEvent.toJson(), outbound.epoch)
         return TextMessageBundle(outbound = outbound, innerEvent = innerEvent)
     }
 
@@ -2664,6 +2918,90 @@ class MarmotManager(
             keyPackageRotationManager.clearPendingRotation(slot)
             signed
         }
+    }
+
+    /**
+     * Tell the manager that [event], a KeyPackage this manager minted, was
+     * acknowledged by at least one relay.
+     *
+     * That is the "confirmed publication of a replacement" the KeyPackage
+     * deletion bound counts from (`foundation/key-packages.md`): a consumed
+     * last-resort KeyPackage displaced from the same slot keeps its private
+     * keys for 24 hours from now, so a Welcome an inviter built from the old
+     * publication still opens, and then they are deleted. Without this call a
+     * retained key is bounded only by its `not_after`.
+     */
+    suspend fun confirmKeyPackagePublished(event: KeyPackageEvent) {
+        val slot = event.dTag()
+        if (slot.isEmpty()) return
+        keyPackageRotationManager.confirmReplacementPublished(slot, event.id)
+    }
+
+    /**
+     * Replace every active KeyPackage minted before this release supported its
+     * current component set, and return the events to publish.
+     *
+     * `foundation/key-packages.md` (#439): a client SHOULD replace its published
+     * KeyPackages when the component ids it supports change, so an inviter can
+     * add it to a group that requires a newly supported component. The new
+     * KeyPackage goes into the same slot, so it supersedes the old publication;
+     * the old bundle stays retained (it was never consumed) until `not_after`.
+     */
+    suspend fun replaceStaleKeyPackages(relays: List<NormalizedRelayUrl>): List<KeyPackageEvent> =
+        keyPackageRotationManager
+            .slotsAdvertisingLessThan(CurrentProfileGroupFactory.SUPPORTED_COMPONENTS)
+            .map { slot -> mintKeyPackageEventForSlot(slot, relays, currentProfile = true) }
+
+    // ── Stale own leaves (`app-components/README.md`, "Advertising support") ──
+
+    /** Group → when this client replaces its stale leaf there, Unix seconds. */
+    private val staleLeafDeadlines = mutableMapOf<HexKey, Long>()
+    private val staleLeafLock = Mutex()
+
+    /**
+     * Replace this client's leaf in every group where it advertises fewer
+     * component ids than the client supports, once a per-group delay has passed.
+     *
+     * The spec asks for a delay drawn uniformly at random from a window that
+     * starts when the stale leaf is noticed, so that a new release does not make
+     * every member of a group commit at once; it SHOULD be several hours, and
+     * this uses [LEAF_REFRESH_WINDOW_SECS]. When the delay ends the leaf is
+     * replaced only if it is still stale: a commit of ours in the meantime that
+     * already carried the new advertisement makes it unnecessary.
+     *
+     * Call it periodically (and at startup); each call is cheap when nothing is
+     * due. Returns the groups whose leaf was refreshed.
+     */
+    suspend fun refreshStaleLeaves(
+        now: Long = TimeUtils.now(),
+        random: Random = Random.Default,
+    ): List<HexKey> {
+        val due = mutableListOf<HexKey>()
+        staleLeafLock.withLock {
+            for (groupId in groupManager.activeGroupIds()) {
+                if (groupManager.ownLeafMissingComponents(groupId).isEmpty()) {
+                    staleLeafDeadlines.remove(groupId)
+                    continue
+                }
+                val deadline = staleLeafDeadlines.getOrPut(groupId) { now + random.nextLong(0, LEAF_REFRESH_WINDOW_SECS + 1) }
+                if (now >= deadline) due.add(groupId)
+            }
+        }
+        val refreshed = mutableListOf<HexKey>()
+        for (groupId in due) {
+            if (groupManager.ownLeafMissingComponents(groupId).isEmpty()) continue
+            try {
+                commitAndPublish(groupId, groupRelays(groupId)) { groupManager.stageLeafRefresh(groupId) }
+                staleLeafLock.withLock { staleLeafDeadlines.remove(groupId) }
+                refreshed.add(groupId)
+            } catch (e: Exception) {
+                currentCoroutineContext().ensureActive()
+                // Not fatal: the group may be gated (pending publish, leaving).
+                // The deadline stays, so the next call tries again.
+                Log.w("MarmotManager", "Could not refresh our leaf in $groupId", e)
+            }
+        }
+        return refreshed
     }
 
     /**
@@ -2801,6 +3139,12 @@ class MarmotManager(
     fun isDesynced(nostrGroupId: HexKey): Boolean = desync.isDesynced(nostrGroupId)
 
     companion object {
+        /**
+         * Length of the window a stale-leaf refresh is delayed into: 12 hours.
+         * `app-components/README.md` asks for "at least several hours".
+         */
+        const val LEAF_REFRESH_WINDOW_SECS: Long = 12L * 60 * 60
+
         /**
          * Overlap window (seconds) subtracted from the newest persisted
          * message's createdAt when seeding a restored group's kind:445

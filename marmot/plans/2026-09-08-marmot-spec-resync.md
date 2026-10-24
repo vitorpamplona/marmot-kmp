@@ -698,11 +698,11 @@ test we have.
   in-memory `AgentTextStreamSequenceStore` exists; a platform-backed one lands
   with the transport that needs it.
 
-  Our leaf now advertises all three roles — `receive` (`0xF2D1`), `send`
-  (`0xF2D2`) and `fanout` (`0xF2D4`) — which is the same set MDK puts on every
-  KeyPackage it publishes, so a group requiring any of them admits us. A
-  capability is a claim about what the client supports, not a duty to stream: a
-  member that never originates one is a quiet member, not a broken one.
+  Our leaf advertises only the `receive` role (`0xF2D1`), which every group the
+  reference client creates requires (`MarmotCapabilities.currentProfileLeaf`).
+  `send` (`0xF2D2`) and `fanout` (`0xF2D4`) are not advertised: the app does not
+  originate previews, and a capability is a standing promise. (An earlier draft
+  of this note said all three; the code never did.)
 
 - **The QUIC transport binding is implemented and verified against MDK's
   broker.** `transports/quic.md` is a RAW QUIC binding — its own ALPNs
