@@ -21,6 +21,8 @@
 package com.vitorpamplona.marmot.client
 
 import com.vitorpamplona.marmot.foundation.appEvents.MarmotAppEvent
+import com.vitorpamplona.marmot.foundation.appEvents.MarmotReport
+import com.vitorpamplona.marmot.foundation.appEvents.MarmotReportDismissal
 import com.vitorpamplona.marmot.foundation.appEvents.MarmotSystemEvent
 import com.vitorpamplona.marmot.foundation.appEvents.MarmotSystemType
 import com.vitorpamplona.marmot.mip01Groups.MarmotGroupData
@@ -180,6 +182,42 @@ class MarmotEditsAndSystemRowsTest {
                 listOf(target.innerEvent.id),
                 f.manager.adminRemovalTargets(nostrGroupId, Event.fromJson(byAdmin.toJson().dropLast(1) + ",\"sig\":\"\"}")),
             )
+        }
+
+    @Test
+    fun `a report names the message its author and reason, and an admin's kind 1985 dismisses it`() =
+        runBlocking {
+            // A dismissal is authorized exactly like a 4891: by the admin set of its source epoch.
+            val f = Fixture()
+            f.manager.createGroup(
+                nostrGroupId,
+                MarmotGroupData(
+                    nostrGroupId = nostrGroupId,
+                    name = "moderated",
+                    relays = listOf("wss://relay.invalid"),
+                    adminPubkeys = listOf(f.signer.pubKey),
+                ),
+            )
+            val target = f.manager.buildTextMessage(nostrGroupId, "report me")
+            val report = f.manager.buildReportRumor(target.innerEvent, MarmotReport.Reason.SPAM, "ads")
+            val reference = MarmotReport.referenceOf(report)!!
+            assertEquals(target.innerEvent.id, reference.target)
+            assertEquals(target.innerEvent.pubKey, reference.author)
+            assertEquals(MarmotReport.Reason.SPAM, reference.reason)
+            assertEquals("ads", report.content)
+
+            val epoch = f.manager.currentEpoch(nostrGroupId)
+
+            fun dismissal(by: String): Event {
+                val tags = MarmotReportDismissal.tags(listOf(report.id))!!
+                val event = MarmotAppEvent.build(pubKey = by, kind = MarmotAppEvent.KIND_REVIEW, content = "", createdAt = 1_800_000_000L, tags = tags)
+                val json = event.toJson().dropLast(1) + ",\"sig\":\"\"}"
+                runBlocking { f.manager.persistDecryptedMessage(nostrGroupId, json, epoch) }
+                return Event.fromJson(json)
+            }
+
+            assertTrue(f.manager.dismissedReportIds(nostrGroupId, dismissal("f".repeat(64))).isEmpty())
+            assertEquals(listOf(report.id), f.manager.dismissedReportIds(nostrGroupId, dismissal(f.signer.pubKey)))
         }
 
     @Test

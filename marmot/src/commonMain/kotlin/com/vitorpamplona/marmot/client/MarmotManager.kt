@@ -50,6 +50,8 @@ import com.vitorpamplona.marmot.foundation.appEvents.MarmotAdminDeletion
 import com.vitorpamplona.marmot.foundation.appEvents.MarmotAppEvent
 import com.vitorpamplona.marmot.foundation.appEvents.MarmotGroupSnapshot
 import com.vitorpamplona.marmot.foundation.appEvents.MarmotMessageEdit
+import com.vitorpamplona.marmot.foundation.appEvents.MarmotReport
+import com.vitorpamplona.marmot.foundation.appEvents.MarmotReportDismissal
 import com.vitorpamplona.marmot.foundation.appEvents.MarmotSystemEvent
 import com.vitorpamplona.marmot.foundation.appEvents.MarmotSystemRowDiff
 import com.vitorpamplona.marmot.groups.MarmotGroupPolicy
@@ -471,7 +473,7 @@ class MarmotManager(
 
         if (result is GroupEventResult.ApplicationMessage) {
             Event.fromJsonOrNull(result.innerEventJson)?.let { inner ->
-                if (inner.kind == MarmotAdminDeletion.KIND) decideAdminRemoval(result.groupId, inner, result.epoch)
+                if (requiresSourceAuthority(inner.kind)) decideAdminAction(result.groupId, inner, result.epoch)
             }
         }
 
@@ -908,7 +910,43 @@ class MarmotManager(
         return TextMessageBundle(outbound = outbound, innerEvent = innerEvent)
     }
 
-    /** Whether this account is an active admin of [nostrGroupId] now, and so may send a kind 4891. */
+    /**
+     * The kind-1984 rumor with which a member reports [target], another message
+     * in this group, for [reason]. Every member sees it and who sent it; it hides
+     * or deletes nothing by itself. [explanation] is free text, as in NIP-56.
+     */
+    suspend fun buildReportRumor(
+        target: Event,
+        reason: MarmotReport.Reason,
+        explanation: String,
+    ): Event =
+        RumorAssembler.assembleRumor(
+            signer.pubKey,
+            eventTemplate<Event>(kind = MarmotReport.KIND, description = explanation) {
+                MarmotReport.tags(target.id, target.pubKey, reason).forEach { add(it) }
+            },
+        )
+
+    /**
+     * The kind-1985 rumor with which an admin dismisses [reportIds] (kind 1984s in
+     * this group), or null when there are none or more than MDK sends at once.
+     * Receivers honour it only when this account is an active admin in the epoch
+     * it is sent in.
+     */
+    suspend fun buildReportDismissalRumor(
+        reportIds: Collection<HexKey>,
+        explanation: String,
+    ): Event? {
+        val tags = MarmotReportDismissal.tags(reportIds) ?: return null
+        return RumorAssembler.assembleRumor(
+            signer.pubKey,
+            eventTemplate<Event>(kind = MarmotReportDismissal.KIND, description = explanation) {
+                tags.forEach { add(it) }
+            },
+        )
+    }
+
+    /** Whether this account is an active admin of [nostrGroupId] now, and so may send a kind 4891 or 1985. */
     fun isGroupAdmin(nostrGroupId: HexKey): Boolean = groupView(nostrGroupId)?.adminPubkeys?.contains(signer.pubKey) == true
 
     /** The inner kind:5 deletion rumor alone. See [buildTextRumor]. */
@@ -1611,9 +1649,9 @@ class MarmotManager(
                 messageStore?.recordEpoch(nostrGroupId, parsed.id, epoch)
                 rememberMessageEpoch(nostrGroupId, parsed.id, epoch)
                 captureMediaSecret(nostrGroupId, epoch)
-                // Our own deletion is decided the same way as a peer's: by the
-                // admin set of the epoch it was sent in.
-                if (parsed.kind == MarmotAdminDeletion.KIND) decideAdminRemoval(nostrGroupId, parsed, epoch)
+                // Our own deletion or dismissal is decided the same way as a
+                // peer's: by the admin set of the epoch it was sent in.
+                if (requiresSourceAuthority(parsed.kind)) decideAdminAction(nostrGroupId, parsed, epoch)
             }
             // Pinned here, at the moment the message enters the log, because
             // this is the last point at which the retention of its delivering
@@ -1720,20 +1758,31 @@ class MarmotManager(
         return deleted
     }
 
-    // ── Admin deletions (kind 4891) ──────────────────────────────────────────
+    // ── Admin actions: deletions (kind 4891) and report dismissals (kind 1985) ─
     //
     // `features/content-moderation.md`: the sender must have been an active
     // admin in the event's authenticated SOURCE-epoch state. The current admin
     // list does not decide it, a later demotion does not revoke it, and pruning
     // source-epoch state must not undo it. So each epoch's admin set is kept as
-    // the group passes through it, and each deletion's verdict is recorded once.
+    // the group passes through it, and each action's verdict is recorded once.
+
+    /** The kinds whose effect depends on an admin's authority, as in MDK's `requires_source_authority`. */
+    private fun requiresSourceAuthority(kind: Int): Boolean = kind == MarmotAdminDeletion.KIND || kind == MarmotReportDismissal.KIND
+
+    /** True when [event] has the shape its kind requires to act at all. */
+    private fun isWellFormedAdminAction(event: Event): Boolean =
+        when (event.kind) {
+            MarmotAdminDeletion.KIND -> MarmotAdminDeletion.targetOf(event) != null
+            MarmotReportDismissal.KIND -> MarmotReportDismissal.reportIdsOf(event) != null
+            else -> false
+        }
 
     private val moderationMutex = Mutex()
 
     /** Group → (epoch → active admins), loaded from the store on first use. */
     private val epochAdmins = mutableMapOf<HexKey, MutableMap<Long, Set<HexKey>>>()
 
-    /** Group → (kind-4891 event id → authorized), loaded from the store on first use. */
+    /** Group → (admin action event id → authorized), loaded from the store on first use. */
     private val moderationVerdicts = mutableMapOf<HexKey, MutableMap<HexKey, Boolean>>()
 
     private suspend fun epochAdminsUnlocked(nostrGroupId: HexKey): MutableMap<Long, Set<HexKey>> =
@@ -1776,12 +1825,12 @@ class MarmotManager(
     }
 
     /**
-     * Decide, once, whether [event] (a kind 4891 delivered in [epoch]) may delete:
-     * well formed, and its author an active admin of that epoch. Anything that
+     * Decide, once, whether [event] (a kind 4891 or 1985 delivered in [epoch]) may
+     * act: well formed, and its author an active admin of that epoch. Anything that
      * cannot be proven, including an epoch whose admin set was never seen here,
      * is unauthorized.
      */
-    private suspend fun decideAdminRemoval(
+    private suspend fun decideAdminAction(
         nostrGroupId: HexKey,
         event: Event,
         epoch: Long,
@@ -1791,7 +1840,7 @@ class MarmotManager(
             verdicts[event.id]?.let { return@withLock it }
             if (epoch == currentEpoch(nostrGroupId)) captureEpochAdminsUnlocked(nostrGroupId)
             val admins = epochAdminsUnlocked(nostrGroupId)[epoch]
-            val authorized = admins != null && MarmotAdminDeletion.targetOf(event) != null && event.pubKey in admins
+            val authorized = admins != null && isWellFormedAdminAction(event) && event.pubKey in admins
             verdicts[event.id] = authorized
             try {
                 messageStore?.recordModerationVerdict(nostrGroupId, event.id, authorized)
@@ -1818,17 +1867,32 @@ class MarmotManager(
         event: Event,
     ): List<HexKey> {
         val target = MarmotAdminDeletion.targetOf(event) ?: return emptyList()
-        return if (isAuthorizedAdminRemoval(nostrGroupId, event)) listOf(target) else emptyList()
+        return if (isAuthorizedAdminAction(nostrGroupId, event)) listOf(target) else emptyList()
     }
 
-    private suspend fun isAuthorizedAdminRemoval(
+    /**
+     * The reports a kind-1985 dismissal labels dismissed, if it is well formed and
+     * its author was an active admin of [nostrGroupId] in its SOURCE epoch. Empty
+     * for anything else. A dismissal hides nothing and deletes nothing: it only
+     * says those reports were reviewed. A named report that has not arrived yet
+     * stays dismissed when it does.
+     */
+    suspend fun dismissedReportIds(
+        nostrGroupId: HexKey,
+        event: Event,
+    ): List<HexKey> {
+        val reportIds = MarmotReportDismissal.reportIdsOf(event) ?: return emptyList()
+        return if (isAuthorizedAdminAction(nostrGroupId, event)) reportIds else emptyList()
+    }
+
+    private suspend fun isAuthorizedAdminAction(
         nostrGroupId: HexKey,
         event: Event,
     ): Boolean {
         moderationMutex.withLock { moderationVerdictsUnlocked(nostrGroupId)[event.id] }?.let { return it }
         // No verdict yet: decide it now if this client knows the epoch that delivered it.
         val epoch = mediaKeyMutex.withLock { messageEpochsUnlocked(nostrGroupId)[event.id] } ?: return false
-        return decideAdminRemoval(nostrGroupId, event, epoch)
+        return decideAdminAction(nostrGroupId, event, epoch)
     }
 
     /**

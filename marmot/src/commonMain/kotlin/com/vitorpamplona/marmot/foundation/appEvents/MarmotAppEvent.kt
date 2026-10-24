@@ -83,6 +83,12 @@ class MarmotAppEvent(
         /** A durable group system row, synthesized from canonical state. */
         const val KIND_SYSTEM = 1210
 
+        /** A member's report of a message in the group (NIP-56), seen by every member. */
+        const val KIND_REPORT = 1984
+
+        /** An admin's review of reports: a NIP-32 label that dismisses them. */
+        const val KIND_REVIEW = 1985
+
         /**
          * An admin's removal of a message (anyone's, their own included), with an `e` tag
          * naming the target and `{"v":1,"action":"remove"}` as content. White Noise sends
