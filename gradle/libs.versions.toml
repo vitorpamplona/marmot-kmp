@@ -10,7 +10,7 @@ kotlinxCoroutines = "1.11.0"
 kotlinxSerialization = "1.12.0"
 mavenPublish = "0.37.0"
 # RFC 9420 MLS engine (vitorpamplona/mls-kmp). Keep it at the version Quartz was built against.
-mlsKmp = "1.1.0"
+mlsKmp = "1.2.0"
 # The Nostr protocol library (vitorpamplona/quartz). 2.3.0 is the first release without the Marmot engine;
 # until it is on Maven Central, build against a checkout with -PquartzDir=../quartz.
 quartzKmp = "2.3.0"
