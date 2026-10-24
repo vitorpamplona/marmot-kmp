@@ -9,7 +9,7 @@ library for JVM, Android, iOS, macOS and Linux, published to Maven Central as
 
 The code was the engine half of Quartz's `com.vitorpamplona.quartz.marmot` package, plus the headless
 group pipeline from Amethyst's `commons` (`MarmotManager` and friends). It moved here so clients that
-do not speak Marmot don't carry an MLS engine. The Marmot **event classes, tags and push content
+do not speak Marmot don't carry an MLS engine. The signed Marmot **event classes, tags and push content
 codecs stay in Quartz** (`com.vitorpamplona.quartz.marmot.mip00KeyPackages` … `mip05PushNotifications`),
 so every Nostr client and relay parses and stores the kinds typed; this library imports them from
 there. cordn, the other MLS binding, is [cordn-kmp](https://github.com/vitorpamplona/cordn-kmp);
@@ -52,10 +52,16 @@ checked against MDK, the reference implementation (<https://github.com/marmot-pr
   `@Stable` are the only Compose dependency. Platform storage, keystores and UI state belong to
   the app; the library defines the store interfaces (`MlsGroupStateStore`, `MarmotMessageStore`,
   `KeyPackageBundleStore`, …) and in-memory implementations, and an app's must encrypt at rest.
-- **Event classes belong to Quartz.** A new Marmot kind, tag or content codec is a Quartz change
-  (`quartz/…/marmot/`, with its `EventFactory` branch); only code that needs MLS, crypto state or
-  storage lives here. Quartz must not import MLS, so anything reading MLS bytes off an event is an
-  extension here (`KeyPackageEvent.buildCurrentProfileFrom`).
+- **Signed event classes belong to Quartz.** A new signed Marmot kind that relays carry
+  (KeyPackage, Welcome, GroupEvent, the push events), its tags and content codecs, is a Quartz
+  change (`quartz/…/marmot/`, with its `EventFactory` branch). Quartz must not import MLS, so
+  anything reading MLS bytes off an event is an extension here (`KeyPackageEvent.buildCurrentProfileFrom`).
+- **What members send inside a group is Marmot's, MLS state or not.** The kinds, tags, limits and
+  validation of the unsigned app events (edits, polls, custom emoji, reports, admin deletion) live
+  in `foundation/appEvents/` (`MarmotAppEvent`, `MarmotPolls`, `MarmotCustomEmoji`,
+  `MarmotReports`, …), because two clients that disagree on them show one group different things.
+  The test: if another Marmot client (White Noise, `amy`, a bot) would need the code to agree with
+  us, it belongs here, not in an app.
 - **Never depend on cordn-kmp**, and never let Quartz depend on this library.
 - **What stays in Amethyst:** the store implementations that encrypt at rest with a platform
   keystore, the account wiring (which relays, which signer, the outbox), chatroom models, feeds,

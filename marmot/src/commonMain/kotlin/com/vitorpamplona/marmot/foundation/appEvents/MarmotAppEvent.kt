@@ -80,6 +80,12 @@ class MarmotAppEvent(
         /** In-place replacement of a prior message's text. */
         const val KIND_EDIT = 1009
 
+        /** An encrypted NIP-88 poll in MDK's bounded profile; see [MarmotPolls]. */
+        const val KIND_POLL = 1068
+
+        /** One member's complete selection in a [KIND_POLL] poll; see [MarmotPolls]. */
+        const val KIND_POLL_RESPONSE = 1018
+
         /** A durable group system row, synthesized from canonical state. */
         const val KIND_SYSTEM = 1210
 
