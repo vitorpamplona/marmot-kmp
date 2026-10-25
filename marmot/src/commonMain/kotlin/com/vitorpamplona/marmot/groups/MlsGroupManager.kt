@@ -997,9 +997,9 @@ class MlsGroupManager(
      *
      * The union of in-memory group IDs and [MlsGroupStateStore.listGroups]
      * is used so any orphaned on-disk state (e.g. a prior restore that
-     * failed to decode into memory) is also removed.
+     * failed to decode into memory) is also removed. Returns the ids it wiped.
      */
-    suspend fun clearAllState() =
+    suspend fun clearAllState(): List<String> =
         mutex.withLock {
             val ids = (groups.keys + store.listGroups().toSet()).toList()
             Log.d(TAG) { "clearAllState(): wiping ${ids.size} group(s): $ids" }
@@ -1014,6 +1014,7 @@ class MlsGroupManager(
             retainedEpochs.clear()
             retainedEpochRevision.clear()
             retainedEpochPersisted.clear()
+            ids
         }
 
     // --- Key Export ---

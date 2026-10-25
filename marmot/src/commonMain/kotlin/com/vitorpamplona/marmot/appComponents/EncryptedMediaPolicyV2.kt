@@ -192,6 +192,31 @@ data class EncryptedMediaPolicyV2(
         }
 
         /**
+         * [url] in the byte form a base URL must take, so the everyday spelling
+         * (`https://cdn.example.com`, no trailing slash) works.
+         *
+         * @throws IllegalArgumentException when it has none, e.g. a query or a
+         *   fragment, which would change where the group uploads if dropped.
+         */
+        fun normalizeBaseUrl(url: String): String = MarmotWebUrl.normalize(url, allowHttp = true, label = "base_url").also { requireNormalizedBaseUrl(it) }
+
+        /**
+         * A `blossom-v1` policy over [baseUrls], each normalized
+         * ([normalizeBaseUrl]) and kept in the order given, because that order
+         * is the upload and fetch fallback priority. Spellings of one server
+         * collapse to one endpoint.
+         *
+         * @throws IllegalArgumentException when a URL has no base-URL form, or
+         *   there are none or more than [MAX_ENTRIES] servers.
+         */
+        fun forBlossom(baseUrls: List<String>): EncryptedMediaPolicyV2 =
+            EncryptedMediaPolicyV2(
+                allowedLocatorKinds = listOf(INITIAL_LOCATOR_KIND),
+                defaultBlobEndpoints =
+                    baseUrls.map(::normalizeBaseUrl).distinct().map { BlobStoreEndpointV2(INITIAL_LOCATOR_KIND, it) },
+            )
+
+        /**
          * A base URL is normalized when it is byte-equal to its own
          * parse-and-serialize output — the same WHATWG normalization
          * `group-avatar-url-v1` defines, which is why it runs through the same

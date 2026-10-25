@@ -40,6 +40,15 @@ class EncryptedMediaV2Test {
     // --- policy component 0x800b -----------------------------------------
 
     @Test
+    fun aBlossomPolicyNormalizesItsServersAndKeepsTheirOrder() {
+        val policy = EncryptedMediaPolicyV2.forBlossom(listOf("https://B.example.com", "https://a.example.com/", "https://b.example.com/"))
+        assertEquals(listOf("https://b.example.com/", "https://a.example.com/"), policy.defaultBlobEndpoints.map { it.baseUrl })
+        assertEquals(listOf(EncryptedMediaPolicyV2.INITIAL_LOCATOR_KIND), policy.allowedLocatorKinds)
+        assertFailsWith<IllegalArgumentException> { EncryptedMediaPolicyV2.forBlossom(listOf("https://a.example.com/?token=1")) }
+        assertFailsWith<IllegalArgumentException> { EncryptedMediaPolicyV2.forBlossom(emptyList()) }
+    }
+
+    @Test
     fun theReferencePolicyRoundTrips() {
         val decoded = EncryptedMediaPolicyV2.decode(EncryptedMediaPolicyV2.REFERENCE.encode())
         assertEquals(EncryptedMediaPolicyV2.REFERENCE, decoded)
