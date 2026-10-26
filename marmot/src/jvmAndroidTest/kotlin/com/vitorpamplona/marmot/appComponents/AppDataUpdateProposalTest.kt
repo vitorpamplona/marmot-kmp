@@ -64,6 +64,15 @@ class AppDataUpdateProposalTest {
     private val lifecycleActive = GroupLifecycleV1.ACTIVE.encode()
     private val adminPolicy = AdminPolicyV1.of(listOf(creator)).encode()
 
+    // RFC 9420 §7.2/§12.2: app_data_update is not a default proposal type, so
+    // every member must advertise it (and the dictionary extension it writes
+    // into the GroupContext) before a commit may carry it.
+    private val appDataCapabilities =
+        Capabilities(
+            extensions = listOf(AppDataDictionary.EXTENSION_TYPE),
+            proposals = listOf(MlsGroup.APP_DATA_UPDATE_PROPOSAL_TYPE),
+        )
+
     private fun encode(proposal: Proposal): ByteArray {
         val writer = TlsWriter()
         proposal.encodeTls(writer)
@@ -118,7 +127,7 @@ class AppDataUpdateProposalTest {
 
     @Test
     fun aCommitInstallsAndReplacesComponents() {
-        val group = MlsGroup.create(creator)
+        val group = MlsGroup.create(creator, capabilities = appDataCapabilities)
         assertTrue(group.appDataDictionary().isEmpty)
 
         group.proposeAppDataUpdate(AppComponentIds.GROUP_PROFILE_V1, profileA)
@@ -146,7 +155,7 @@ class AppDataUpdateProposalTest {
         // Matching openmls: the dictionary extension is added-or-replaced and
         // never dropped. An absent extension and an empty one are different
         // GroupContexts, so dropping it here would fork us from the reference.
-        val group = MlsGroup.create(creator)
+        val group = MlsGroup.create(creator, capabilities = appDataCapabilities)
         group.proposeAppDataUpdate(AppComponentIds.GROUP_PROFILE_V1, profileA)
         group.commit()
         assertTrue(group.appDataDictionary().contains(AppComponentIds.GROUP_PROFILE_V1))
@@ -166,7 +175,7 @@ class AppDataUpdateProposalTest {
 
     @Test
     fun removingAnAbsentComponentIsANoOp() {
-        val group = MlsGroup.create(creator)
+        val group = MlsGroup.create(creator, capabilities = appDataCapabilities)
         group.proposeAppDataUpdate(AppComponentIds.GROUP_PROFILE_V1, profileA)
         group.commit()
 
@@ -185,7 +194,7 @@ class AppDataUpdateProposalTest {
         // "wrong" order to prove we do not simply follow list order.
         // Advertised, because installing the dictionary as a GroupContext
         // extension puts it under RFC 9420 §13.4: every member must support it.
-        val group = MlsGroup.create(creator, capabilities = Capabilities(extensions = listOf(AppDataDictionary.EXTENSION_TYPE)))
+        val group = MlsGroup.create(creator, capabilities = appDataCapabilities)
         group.proposeAppDataUpdate(AppComponentIds.GROUP_PROFILE_V1, profileA)
         group.proposeGroupContextExtensions(
             listOf(AppDataDictionary(listOf(ComponentData(AppComponentIds.ADMIN_POLICY_V1, adminPolicy))).toExtension()),
@@ -227,8 +236,8 @@ class AppDataUpdateProposalTest {
     }
 
     private fun twoMemberGroup(): Pair<MlsGroup, MlsGroup> {
-        val alice = MlsGroup.create(creator)
-        val bobBundle = alice.createKeyPackage("22".repeat(32).hexToByteArray(), ByteArray(0))
+        val alice = MlsGroup.create(creator, capabilities = appDataCapabilities)
+        val bobBundle = alice.createKeyPackage("22".repeat(32).hexToByteArray(), ByteArray(0), capabilities = appDataCapabilities)
         val result = alice.addMember(bobBundle.keyPackage.toTlsBytes())
         val bob = MlsGroup.processWelcome(result.welcomeBytes!!, bobBundle)
         return alice to bob

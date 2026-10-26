@@ -53,7 +53,15 @@ class MarmotPolicySeamTest {
         creator: ByteArray,
         admins: List<ByteArray>,
     ): MlsGroup {
-        val group = MlsGroup.create(creator, leafExtensions = advertisingLeafExtensions(), policy = MarmotGroupPolicy)
+        // A leaf carrying the app_data_dictionary extension must list it in its
+        // capabilities (RFC 9420 §7.3): the current-profile leaf set does.
+        val group =
+            MlsGroup.create(
+                creator,
+                leafExtensions = advertisingLeafExtensions(),
+                capabilities = MarmotCapabilities.currentProfileLeaf(),
+                policy = MarmotGroupPolicy,
+            )
         val dictionary =
             MarmotGroupState.buildDictionary(
                 adminPolicy = AdminPolicyV1.of(admins),
