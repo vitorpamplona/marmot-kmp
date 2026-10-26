@@ -16,8 +16,10 @@ concurrency:
 # Until the Quartz release this library pins is on Maven Central, tools/ci/quartz-args.sh clones
 # vitorpamplona/quartz at QUARTZ_REF (a repository variable, default main) and the build uses
 # that checkout. Once the release is out it prints nothing and the build uses the artifact.
+# tools/ci/mls-kmp-args.sh does the same for mls-kmp, at MLS_KMP_REF.
 env:
   QUARTZ_REF: ${{ vars.QUARTZ_REF || 'main' }}
+  MLS_KMP_REF: ${{ vars.MLS_KMP_REF || 'main' }}
 
 jobs:
   build:
@@ -46,17 +48,20 @@ jobs:
       - name: Resolve Quartz
         run: echo "QUARTZ_ARGS=$(QUARTZ_CLONE_TO=$RUNNER_TEMP/quartz tools/ci/quartz-args.sh)" >> $GITHUB_ENV
 
+      - name: Resolve mls-kmp
+        run: echo "MLS_KMP_ARGS=$(MLS_KMP_CLONE_TO=$RUNNER_TEMP/mls-kmp tools/ci/mls-kmp-args.sh)" >> $GITHUB_ENV
+
       # The metadata compiles resolve commonMain against only the deps every target shares,
       # which is the Apple classpath, so a JVM-only API in shared code fails here, on Linux.
       - name: Linter (gradle)
         run: |
-          ./gradlew $QUARTZ_ARGS spotlessCheck \
+          ./gradlew $QUARTZ_ARGS $MLS_KMP_ARGS spotlessCheck \
             :marmot:verifyKmpPurity \
             :marmot:compileCommonMainKotlinMetadata \
             :marmot:compileAppleMainKotlinMetadata
 
       - name: Test JVM (gradle)
-        run: ./gradlew $QUARTZ_ARGS :marmot:jvmTest
+        run: ./gradlew $QUARTZ_ARGS $MLS_KMP_ARGS :marmot:jvmTest
 
       - name: JVM Test Report
         uses: mikepenz/action-junit-report@6ef3fdcfcd5f0b5d14df3e659ef19b8c6820f93d # v6.6.1
@@ -75,7 +80,7 @@ jobs:
           path: marmot/build/reports/tests
 
       - name: Build (gradle)
-        run: ./gradlew $QUARTZ_ARGS :marmot:assemble
+        run: ./gradlew $QUARTZ_ARGS $MLS_KMP_ARGS :marmot:assemble
 
   # Runs the whole suite on Linux Native, which catches a commonMain or commonTest source
   # reaching for a JVM-only API on a target that has no Foundation to fall back on.
@@ -109,8 +114,11 @@ jobs:
       - name: Resolve Quartz
         run: echo "QUARTZ_ARGS=$(QUARTZ_CLONE_TO=$RUNNER_TEMP/quartz tools/ci/quartz-args.sh)" >> $GITHUB_ENV
 
+      - name: Resolve mls-kmp
+        run: echo "MLS_KMP_ARGS=$(MLS_KMP_CLONE_TO=$RUNNER_TEMP/mls-kmp tools/ci/mls-kmp-args.sh)" >> $GITHUB_ENV
+
       - name: Test Linux Native
-        run: ./gradlew $QUARTZ_ARGS :marmot:linuxX64Test
+        run: ./gradlew $QUARTZ_ARGS $MLS_KMP_ARGS :marmot:linuxX64Test
 
       - name: Linux Native Test Report
         uses: mikepenz/action-junit-report@6ef3fdcfcd5f0b5d14df3e659ef19b8c6820f93d # v6.6.1
@@ -152,9 +160,12 @@ jobs:
       - name: Resolve Quartz
         run: echo "QUARTZ_ARGS=$(QUARTZ_CLONE_TO=$RUNNER_TEMP/quartz tools/ci/quartz-args.sh)" >> $GITHUB_ENV
 
+      - name: Resolve mls-kmp
+        run: echo "MLS_KMP_ARGS=$(MLS_KMP_CLONE_TO=$RUNNER_TEMP/mls-kmp tools/ci/mls-kmp-args.sh)" >> $GITHUB_ENV
+
       - name: Test iOS
         run: |
-          ./gradlew $QUARTZ_ARGS \
+          ./gradlew $QUARTZ_ARGS $MLS_KMP_ARGS \
             -Dorg.gradle.jvmargs="-Xmx4g -Dfile.encoding=UTF-8" \
             :marmot:iosSimulatorArm64Test \
             :marmot:compileTestKotlinIosArm64

@@ -6,8 +6,8 @@ on:
     - 'v*' # Push events to matching v*, i.e. v1.0, v20.15.10
 
 jobs:
-  # A release must depend only on published artifacts: its POM names the Quartz version it was
-  # built against, so that version has to be on Maven Central before this one can be.
+  # A release must depend only on published artifacts: its POM names the Quartz and mls-kmp
+  # versions it was built against, so those have to be on Maven Central before this one can be.
   check-dependencies:
     runs-on: ubuntu-latest
     steps:
@@ -19,6 +19,14 @@ jobs:
           args=$(tools/ci/quartz-args.sh 2>/dev/null || echo missing)
           if [ -n "$args" ]; then
             echo "::error::The Quartz version in gradle/libs.versions.toml is not on Maven Central. Release Quartz first."
+            exit 1
+          fi
+
+      - name: mls-kmp release is published
+        run: |
+          args=$(tools/ci/mls-kmp-args.sh 2>/dev/null || echo missing)
+          if [ -n "$args" ]; then
+            echo "::error::The mls-kmp version in gradle/libs.versions.toml is not on Maven Central. Release mls-kmp first."
             exit 1
           fi
 
