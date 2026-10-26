@@ -3,8 +3,9 @@ agp = "9.4.1"
 android-compileSdk = "37"
 android-minSdk = "26"
 composeRuntimeAnnotation = "1.12.1"
-# SHA, HMAC, HKDF, AES, ChaCha20, X25519, Ed25519 (vitorpamplona/crypto-kmp). Keep it at Quartz's version.
-cryptoKmp = "2.0.0"
+# SHA, HMAC, HKDF, AES, ChaCha20, X25519, Ed25519 (vitorpamplona/crypto-kmp). Keep it at the newer of
+# the versions Quartz and mls-kmp depend on, which is the one Gradle resolves anyway.
+cryptoKmp = "2.1.0"
 kotlin = "2.4.21"
 kotlinxCoroutines = "1.11.0"
 kotlinxSerialization = "1.12.0"
