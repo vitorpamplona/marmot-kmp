@@ -156,18 +156,16 @@ object CurrentProfileGroupFactory {
                 emptyList()
             }
 
-        // A throwaway group only as a factory for the bundle; nothing about it
-        // survives the call.
-        return MlsGroup
-            .create(identity)
-            .createKeyPackage(
-                identity = identity,
-                signingKey = leaf.signatureKeyPair.privateKey,
-                leafSignatureKeyPair = leaf.signatureKeyPair,
-                leafExtensions = leaf.leafExtensions,
-                capabilities = MarmotCapabilities.currentProfileLeaf(),
-                keyPackageExtensions = keyPackageExtensions,
-            )
+        // Under Marmot's policy, so the KeyPackage carries no GREASE values
+        // (see MarmotGroupPolicy.greaseCapabilities).
+        return MlsGroup.createKeyPackage(
+            identity = identity,
+            policy = MarmotGroupPolicy,
+            leafSignatureKeyPair = leaf.signatureKeyPair,
+            leafExtensions = leaf.leafExtensions,
+            capabilities = MarmotCapabilities.currentProfileLeaf(),
+            keyPackageExtensions = keyPackageExtensions,
+        )
     }
 
     /**

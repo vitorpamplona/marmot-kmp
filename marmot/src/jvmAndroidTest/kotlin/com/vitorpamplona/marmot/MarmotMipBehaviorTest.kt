@@ -31,6 +31,7 @@ import com.vitorpamplona.mls.InternalMlsApi
 import com.vitorpamplona.mls.codec.TlsReader
 import com.vitorpamplona.mls.group.MlsGroup
 import com.vitorpamplona.mls.messages.KeyPackageBundle
+import com.vitorpamplona.mls.messages.Proposal
 import com.vitorpamplona.quartz.marmot.mip02Welcome.WelcomeEvent
 import com.vitorpamplona.quartz.marmot.mip03GroupMessages.GroupEvent
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
@@ -650,7 +651,9 @@ class MarmotMipBehaviorTest {
             val proposal =
                 com.vitorpamplona.mls.messages
                     .Proposal
-                    .Psk(pskType = 1, pskId = ByteArray(16) { 0xAB.toByte() }, pskNonce = ByteArray(16))
+                    // A full-length nonce, so the PSK is otherwise valid and only the
+                    // standalone-proposal policy refuses it.
+                    .Psk(pskType = 1, pskId = ByteArray(16) { 0xAB.toByte() }, pskNonce = ByteArray(32))
             val wireBytes = bob.encryptProposalAsPrivateMessage(proposal)
 
             val ex =
@@ -682,7 +685,8 @@ class MarmotMipBehaviorTest {
     }
 
     // ----------------------------------------------------------------------
-    // DoS guards: forward-ratchet cap + PrivateMessage size caps
+    // DoS guards: forward-ratchet cap (whole messages are bounded by the
+    // engine's MlsGroupPolicy.maxMessageSize, checked before decoding)
     // ----------------------------------------------------------------------
 
     /**
@@ -708,38 +712,6 @@ class MarmotMipBehaviorTest {
                 st.applicationKeyNonceForGeneration(0, 4096 + 4097 + 1)
             }
         assertTrue(ex.message!!.contains("jump too large"), "must explain the cap: ${ex.message}")
-    }
-
-    /**
-     * Marmot tightens `authenticated_data` to 64 KiB even though the
-     * underlying TlsReader cap is 1 MiB — those fields are never
-     * legitimately that large, and tightening turns a 1 MiB pre-
-     * verification allocation into 64 KiB. Hand-build a frame with a
-     * 65 KiB authenticated_data and verify rejection.
-     */
-    @Test
-    fun privateMessage_rejectsOversizedAuthenticatedData() {
-        val w =
-            com.vitorpamplona.mls.codec
-                .TlsWriter()
-        w.putOpaqueVarInt(ByteArray(32)) // group_id
-        w.putUint64(0L) // epoch
-        w.putUint8(1) // content_type = APPLICATION
-        w.putOpaqueVarInt(ByteArray((1 shl 16) + 1)) // authenticated_data: 64 KiB + 1
-        w.putOpaqueVarInt(ByteArray(0)) // encrypted_sender_data
-        w.putOpaqueVarInt(ByteArray(64)) // ciphertext (small)
-        val ex =
-            assertFailsWith<IllegalArgumentException> {
-                com.vitorpamplona.mls.framing.PrivateMessage
-                    .decodeTls(
-                        com.vitorpamplona.mls.codec
-                            .TlsReader(w.toByteArray()),
-                    )
-            }
-        assertTrue(
-            ex.message!!.contains("authenticated_data too large"),
-            "must name the field: ${ex.message}",
-        )
     }
 
     // ----------------------------------------------------------------------
@@ -999,12 +971,13 @@ class MarmotMipBehaviorTest {
      * psk_extracted_0 = HKDF.Extract(salt = 0, ikm = psk_0)
      * psk_input_0     = ExpandWithLabel(psk_extracted_0, "derived psk",
      *                                    PSKLabel(id_0, 0, 1), 32)
-     * psk_secret_0    = HKDF.Extract(salt = 0, ikm = psk_input_0)
+     * psk_secret_1    = HKDF.Extract(salt = psk_input_0, ikm = psk_secret_0)
      * ```
      *
-     * The previous implementation HKDF-Extracted the bare PSK value with the
-     * running pskSecret as salt and never built a PSKLabel — its output
-     * would not match this expected value.
+     * with `psk_secret_0` all zeros (RFC 9420 §8.4: `KDF.Extract(psk_input,
+     * psk_secret)`, the input as salt). An earlier implementation had the two
+     * swapped, and this test pinned that; mls-kmp now matches the RFC 9420
+     * PSK test vectors and the other implementations.
      */
     @Test
     fun computePskSecret_singleExternalPsk_matchesSpecDerivation() {
@@ -1042,31 +1015,25 @@ class MarmotMipBehaviorTest {
                 context = labelWriter.toByteArray(),
                 length = 32,
             )
-        val expected = crypto.hkdfExtract(salt = zero, ikm = pskInput)
+        val expected = crypto.hkdfExtract(salt = pskInput, ikm = zero)
 
         assertContentEquals(expected, actual, "psk_secret must match RFC 9420 §5.3 derivation")
     }
 
     /**
-     * Resumption PSK (psktype = 2) carries usage/psk_group_id/psk_epoch
-     * fields that aren't representable on `Proposal.Psk` today. Encoding a
-     * PSKLabel without them would silently diverge from spec-conformant
-     * peers — we reject loudly until the proposal type is widened.
+     * A resumption PSK (psktype = 2) is identified by usage, psk_group_id and
+     * psk_epoch, which the legacy three-field `Psk(pskType, pskId, pskNonce)`
+     * shape cannot carry. Rather than encode a PSKLabel that diverges from
+     * spec-conformant peers, that shape refuses psktype 2 and names the one
+     * that can: `Psk(PreSharedKeyId.Resumption(...))`.
      */
     @Test
-    fun computePskSecret_resumptionPskRejectsUntilProposalWidened() {
-        val alice = MlsGroup.create(aliceId.hexToByteArray(), policy = MarmotGroupPolicy)
-        val pskId = ByteArray(16) { it.toByte() }
-        alice.registerPsk(pskId, ByteArray(32))
-
-        val proposal =
-            com.vitorpamplona.mls.messages
-                .Proposal
-                .Psk(pskType = 2, pskId = pskId, pskNonce = ByteArray(16))
-
-        assertFailsWith<IllegalStateException> {
-            alice.computePskSecret(listOf(proposal))
-        }
+    fun legacyPskShapeRefusesAResumptionPsk() {
+        val ex =
+            assertFailsWith<IllegalArgumentException> {
+                Proposal.Psk(pskType = 2, pskId = ByteArray(16), pskNonce = ByteArray(32))
+            }
+        assertTrue(ex.message!!.contains("PreSharedKeyId.Resumption"), "must name the replacement: ${ex.message}")
     }
 
     /**

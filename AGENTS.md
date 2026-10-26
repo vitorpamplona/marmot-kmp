@@ -44,7 +44,8 @@ checked against MDK, the reference implementation (<https://github.com/marmot-pr
   Not published.
 - `gradle/kmp-purity.gradle.kts`: the `verifyKmpPurity` task, the same file as Quartz's.
 - `tools/ci/quartz-args.sh`: points the build at a Quartz checkout while the pinned Quartz release is
-  not on Maven Central yet (CI and the pre-push hook call it).
+  not on Maven Central yet (CI and the pre-push hook call it). `tools/ci/mls-kmp-args.sh` does the
+  same for mls-kmp.
 
 ## Rules
 

@@ -22,6 +22,7 @@
 
 package com.vitorpamplona.marmot.appComponents
 
+import com.vitorpamplona.marmot.groups.MarmotCapabilities
 import com.vitorpamplona.marmot.groups.MarmotGroupPolicy
 import com.vitorpamplona.marmot.groups.currentAdminIdentities
 import com.vitorpamplona.marmot.groups.currentGroupState
@@ -55,7 +56,16 @@ class CurrentProfileAuthorizationTest {
         creator: ByteArray,
         admins: List<ByteArray>,
     ): MlsGroup {
-        val group = MlsGroup.create(creator, leafExtensions = advertisingLeafExtensions(), policy = MarmotGroupPolicy)
+        // The current-profile leaf set: a leaf carrying the app_data_dictionary
+        // extension must list it in its capabilities (RFC 9420 §7.3), and every
+        // member must list app_data_update before a commit may carry one (§12.2).
+        val group =
+            MlsGroup.create(
+                creator,
+                leafExtensions = advertisingLeafExtensions(),
+                capabilities = MarmotCapabilities.currentProfileLeaf(),
+                policy = MarmotGroupPolicy,
+            )
         val dictionary =
             MarmotGroupState.buildDictionary(
                 adminPolicy = AdminPolicyV1.of(admins),
@@ -85,7 +95,7 @@ class CurrentProfileAuthorizationTest {
         // Alice creates the group and names only herself as admin, then adds
         // Bob. Bob is a member but not an admin.
         val alice = currentProfileGroup(aliceAccount, listOf(aliceAccount))
-        val bobBundle = alice.createKeyPackage(bobAccount, ByteArray(0), leafExtensions = advertisingLeafExtensions())
+        val bobBundle = alice.createKeyPackage(bobAccount, ByteArray(0), leafExtensions = advertisingLeafExtensions(), capabilities = MarmotCapabilities.currentProfileLeaf())
         val add = alice.addMember(bobBundle.keyPackage.toTlsBytes())
         val bob = MlsGroup.processWelcome(add.welcomeBytes!!, bobBundle, policy = MarmotGroupPolicy)
 
@@ -116,7 +126,7 @@ class CurrentProfileAuthorizationTest {
     @Test
     fun adminshipCanBeHandedToAnotherMember() {
         val alice = currentProfileGroup(aliceAccount, listOf(aliceAccount))
-        val bobBundle = alice.createKeyPackage(bobAccount, ByteArray(0), leafExtensions = advertisingLeafExtensions())
+        val bobBundle = alice.createKeyPackage(bobAccount, ByteArray(0), leafExtensions = advertisingLeafExtensions(), capabilities = MarmotCapabilities.currentProfileLeaf())
         alice.addMember(bobBundle.keyPackage.toTlsBytes())
 
         // Bob holds a leaf, so promoting him and stepping down is valid: the

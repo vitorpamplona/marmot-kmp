@@ -56,6 +56,15 @@ object MarmotGroupPolicy : MlsGroupPolicy {
     override val defaultRequiredCapabilities: Extension get() = MarmotCapabilities.mipRequired()
 
     /**
+     * No GREASE values in our capabilities. Every KeyPackage's capability lists
+     * are republished verbatim in its `mls_extensions` and `mls_proposals`
+     * tags, and the reference client (MDK, on OpenMLS, which only adds GREASE
+     * when asked) neither sends them nor has been tested against KeyPackages
+     * that carry them. Our KeyPackages stay the shape MDK expects.
+     */
+    override val greaseCapabilities: Boolean get() = false
+
+    /**
      * Marmot's two group-context extension types, exempted from the §13.4
      * all-members-support check.
      *
@@ -84,6 +93,23 @@ object MarmotGroupPolicy : MlsGroupPolicy {
     ) {
         enforceAuthorizedProposalSet(group, proposals, committerLeafIndex)
         enforceNoAdminDepletion(group, proposals)
+    }
+
+    /**
+     * MIP-03: SelfRemove is the only proposal a member sends on its own; every
+     * other change is committed directly. The engine accepts any standalone
+     * proposal RFC 9420 allows and pools it for the next commit, so a stray one
+     * from a peer — a non-admin's Add, say — would be swept into an admin's
+     * next commit, and [authorizeCommit] would then refuse that whole commit.
+     * Refused on arrival instead, it never reaches the pool.
+     */
+    override fun authorizeProposal(
+        group: GroupView,
+        proposal: PendingProposal,
+    ) {
+        require(proposal.proposal is Proposal.SelfRemove) {
+            "Only SelfRemove may be sent as a standalone proposal (MIP-03), not ${proposal.proposal::class.simpleName}"
+        }
     }
 
     override fun authorizeSelfRemove(group: GroupView) {

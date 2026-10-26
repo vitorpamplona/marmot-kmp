@@ -3,14 +3,18 @@ agp = "9.4.1"
 android-compileSdk = "37"
 android-minSdk = "26"
 composeRuntimeAnnotation = "1.12.1"
-# SHA, HMAC, HKDF, AES, ChaCha20, X25519, Ed25519 (vitorpamplona/crypto-kmp). Keep it at Quartz's version.
-cryptoKmp = "2.0.0"
+# SHA, HMAC, HKDF, AES, ChaCha20, X25519, Ed25519 (vitorpamplona/crypto-kmp). Keep it at the newer of
+# the versions Quartz and mls-kmp depend on, which is the one Gradle resolves anyway.
+cryptoKmp = "2.1.0"
 kotlin = "2.4.21"
 kotlinxCoroutines = "1.11.0"
 kotlinxSerialization = "1.12.0"
 mavenPublish = "0.37.0"
-# RFC 9420 MLS engine (vitorpamplona/mls-kmp). Keep it at the version Quartz was built against.
-mlsKmp = "1.2.0"
+# RFC 9420 MLS engine (vitorpamplona/mls-kmp). Quartz no longer depends on it (2.3.0 dropped the
+# Marmot engine), so it moves on its own. 1.3.0 is its next release; until that is on Maven
+# Central, build against a checkout with -PmlsKmpDir=../mls-kmp (tools/ci/mls-kmp-args.sh does
+# it in CI).
+mlsKmp = "1.3.0"
 # The Nostr protocol library (vitorpamplona/quartz). 2.3.0 is the first release without the Marmot engine;
 # until it is on Maven Central, build against a checkout with -PquartzDir=../quartz.
 quartzKmp = "2.3.0"
