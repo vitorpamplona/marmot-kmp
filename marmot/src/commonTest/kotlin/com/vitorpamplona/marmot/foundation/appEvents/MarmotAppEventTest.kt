@@ -190,6 +190,27 @@ class MarmotAppEventTest {
         )
     }
 
+    @Test
+    fun aTieBreaksOnTheReceivedEventIdNotARebuiltOne() {
+        // A received edit may carry tags besides its `e`. Rebuilding it from the parsed
+        // fields drops them and changes the id, so the tie would break on an id no other
+        // client sees.
+        val target = "a".repeat(64)
+        val received =
+            listOf("aaa", "bbb", "ccc", "ddd").map { body ->
+                MarmotAppEvent.build(
+                    pubKey = alice,
+                    kind = MarmotAppEvent.KIND_EDIT,
+                    content = body,
+                    createdAt = 1700000005L,
+                    tags = arrayOf(arrayOf("e", target), arrayOf("client", "x")),
+                )
+            }
+        val edits = received.map { MarmotMessageEdit.fromAppEvent(it)!! }
+        assertEquals(received.map { it.id }, edits.map { it.id })
+        assertEquals(received.maxBy { it.id }.content, MarmotMessageEdit.selectOverlay(edits)!!.replacement)
+    }
+
     // --- kind 1210 -------------------------------------------------------
 
     @Test
@@ -225,5 +246,18 @@ class MarmotAppEventTest {
         val event = MarmotAppEvent.build(alice, MarmotAppEvent.KIND_SYSTEM, content, 1700000000L)
         assertEquals(event.id, MarmotAppEvent.decode(event.toJson()).id)
         assertNull(MarmotSystemEvent.fromAppEvent(event))
+    }
+
+    @Test
+    fun timelineRowsAreMessagesAndOurOwnSystemRows() {
+        val me = "a".repeat(64)
+        val peer = "b".repeat(64)
+        assertTrue(MarmotAppEvent.isTimelineRow(MarmotAppEvent.KIND_CHAT, peer, me))
+        assertTrue(MarmotAppEvent.isTimelineRow(MarmotAppEvent.KIND_POLL, peer, me))
+        assertFalse(MarmotAppEvent.isTimelineRow(MarmotAppEvent.KIND_EDIT, me, me))
+        assertFalse(MarmotAppEvent.isTimelineRow(7, peer, me))
+        assertFalse(MarmotAppEvent.isTimelineRow(MarmotAppEvent.KIND_POLL_RESPONSE, peer, me))
+        assertTrue(MarmotAppEvent.isTimelineRow(MarmotAppEvent.KIND_SYSTEM, me, me))
+        assertFalse(MarmotAppEvent.isTimelineRow(MarmotAppEvent.KIND_SYSTEM, peer, me), "a peer's system row is only its claim")
     }
 }

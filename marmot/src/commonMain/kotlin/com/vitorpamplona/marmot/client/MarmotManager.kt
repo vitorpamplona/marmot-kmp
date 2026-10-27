@@ -1586,8 +1586,9 @@ class MarmotManager(
 
     /**
      * Nuke all local Marmot state — every MLS group, every retained epoch
-     * secret, every persisted KeyPackage bundle, and every relay
-     * subscription. Does NOT publish any leave/SelfRemove commits: the
+     * secret, every persisted KeyPackage bundle, every group's decrypted
+     * message log, and every relay subscription. Does NOT publish any
+     * leave/SelfRemove commits: the
      * reset path is specifically for recovering from corrupted or
      * unrecoverable local state where graceful teardown may be impossible.
      *
@@ -1598,7 +1599,9 @@ class MarmotManager(
     suspend fun resetAllState() {
         Log.w("MarmotManager") { "resetAllState(): wiping all Marmot local state for ${signer.pubKey.take(8)}…" }
         try {
-            groupManager.clearAllState()
+            // What a leave drops for one group, for each: the decrypted log is
+            // the plaintext of every message, and nothing would refer to it again.
+            groupManager.clearAllState().forEach { forgetGroup(it) }
         } catch (e: Exception) {
             Log.w("MarmotManager", "resetAllState(): groupManager.clearAllState failed", e)
         }
@@ -1615,8 +1618,59 @@ class MarmotManager(
     }
 
     /**
-     * Leave a group.
-     * Returns proposal bytes to publish (as a GroupEvent).
+     * Leave a group: step down if this account is an admin, then propose the
+     * SelfRemove.
+     *
+     * MIP-03 forbids an admin's SelfRemove, so an admin first commits an admin
+     * set without itself. That commit must still leave an admin among the
+     * members (admin depletion), so when no other listed admin is in the tree
+     * the first other member, in leaf order, inherits the role. The step-down
+     * is published here, because the SelfRemove is refused until it lands.
+     *
+     * The last member has nobody to commit a SelfRemove and may not propose
+     * one as an admin, so it only drops its local state.
+     *
+     * The caller publishes [MarmotDeparture.selfRemove] to the group's relays.
+     *
+     * @throws IllegalStateException when this account is not a member, or no
+     *   relay acknowledged the step-down (the account is still an admin and has
+     *   not left).
+     */
+    suspend fun leave(
+        nostrGroupId: HexKey,
+        relays: List<NormalizedRelayUrl> = groupRelays(nostrGroupId),
+    ): MarmotDeparture {
+        val view = groupView(nostrGroupId) ?: throw IllegalStateException("Not a member of group $nostrGroupId")
+        val me = signer.pubKey
+        val others = memberPubkeys(nostrGroupId).map { it.pubkey }.filter { it != me }
+
+        if (others.isEmpty()) {
+            groupManager.removeGroupState(nostrGroupId)
+            forgetGroup(nostrGroupId)
+            return MarmotDeparture(stepDown = null, selfRemove = null)
+        }
+
+        val stepDown =
+            if (me in view.adminPubkeys) {
+                val admins = view.adminPubkeys.filter { it != me }
+                val heirs = if (admins.any { it in others }) admins else admins + others.first()
+                setGroupAdmins(nostrGroupId, heirs, relays).also {
+                    check(!isGroupAdmin(nostrGroupId)) {
+                        "No relay acknowledged the admin step-down for $nostrGroupId; not leaving"
+                    }
+                }
+            } else {
+                null
+            }
+
+        return MarmotDeparture(stepDown = stepDown, selfRemove = leaveGroup(nostrGroupId))
+    }
+
+    /**
+     * Propose this account's SelfRemove and drop the group locally. Returns the
+     * proposal to publish.
+     *
+     * Refused for an admin, which must step down first: [leave] does both.
      */
     suspend fun leaveGroup(nostrGroupId: HexKey): OutboundGroupEvent {
         // leaveGroup() returns the framed standalone SelfRemove proposal
@@ -1638,6 +1692,12 @@ class MarmotManager(
         // start new group-state work it would have no standing to publish.
         publishGate.raiseGate(nostrGroupId, LocalOutboundGate.LEAVING)
 
+        forgetGroup(nostrGroupId)
+        return outboundEvent
+    }
+
+    /** Drop everything this manager holds for a group besides its MLS state. */
+    private suspend fun forgetGroup(nostrGroupId: HexKey) {
         subscriptionManager.unsubscribeGroup(nostrGroupId)
         forgetMediaKeys(nostrGroupId)
         moderationMutex.withLock {
@@ -1651,7 +1711,6 @@ class MarmotManager(
             currentCoroutineContext().ensureActive()
             Log.w("MarmotManager", "Failed to delete persisted messages for $nostrGroupId", e)
         }
-        return outboundEvent
     }
 
     /**
@@ -3336,6 +3395,14 @@ class MarmotManager(
         internal const val CONVERGENCE_POLL_MS: Long = 250L
     }
 }
+
+/** What [MarmotManager.leave] produced. */
+class MarmotDeparture(
+    /** The admin-set commit that stepped this account down, already published. Null when it held no admin role. */
+    val stepDown: OutboundGroupEvent?,
+    /** The SelfRemove proposal for the caller to publish. Null when this account was the last member. */
+    val selfRemove: OutboundGroupEvent?,
+)
 
 /**
  * Information about a member in a Marmot MLS group.

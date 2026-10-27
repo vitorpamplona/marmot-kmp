@@ -521,7 +521,7 @@ class MarmotInboundProcessor(
      * instead of being re-applied.
      *
      * Callers should invoke this right after publishing a commit (e.g. from
-     * [com.vitorpamplona.amethyst.commons.marmot.MarmotManager.addMember])
+     * [com.vitorpamplona.marmot.client.MarmotManager.addMember])
      * because `group.addMember` / `group.commit` have already advanced the
      * local epoch. Reprocessing the same commit bytes would otherwise fail
      * with a confirmation-tag / transcript mismatch.

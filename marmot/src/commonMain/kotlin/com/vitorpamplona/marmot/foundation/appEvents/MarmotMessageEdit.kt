@@ -39,7 +39,16 @@ class MarmotMessageEdit(
     val createdAt: Long,
     /** Account that authored the edit. */
     val author: HexKey,
+    /** The received edit's event id. Left null for an edit built here, which takes [toAppEvent]'s. */
+    eventId: HexKey? = null,
 ) {
+    /**
+     * The edit's event id, which breaks a [selectOverlay] tie. A received edit keeps
+     * its own: rebuilding it would drop any tag besides the `e`, change the id and
+     * break the tie differently from every client that used the real one.
+     */
+    val id: HexKey = eventId ?: toAppEvent().id
+
     fun toAppEvent() =
         MarmotAppEvent.build(
             pubKey = author,
@@ -65,6 +74,7 @@ class MarmotMessageEdit(
                 replacement = event.content,
                 createdAt = event.createdAt,
                 author = event.pubKey,
+                eventId = event.id,
             )
         }
 
@@ -92,7 +102,7 @@ class MarmotMessageEdit(
         fun selectOverlay(edits: List<MarmotMessageEdit>): MarmotMessageEdit? =
             edits.maxWithOrNull(
                 compareBy<MarmotMessageEdit> { it.createdAt }
-                    .thenBy { it.toAppEvent().id },
+                    .thenBy { it.id },
             )
     }
 }

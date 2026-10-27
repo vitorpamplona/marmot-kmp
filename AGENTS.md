@@ -9,7 +9,7 @@ library for JVM, Android, iOS, macOS and Linux, published to Maven Central as
 
 The code was the engine half of Quartz's `com.vitorpamplona.quartz.marmot` package, plus the headless
 group pipeline from Amethyst's `commons` (`MarmotManager` and friends). It moved here so clients that
-do not speak Marmot don't carry an MLS engine. The Marmot **event classes, tags and push content
+do not speak Marmot don't carry an MLS engine. The signed Marmot **event classes, tags and push content
 codecs stay in Quartz** (`com.vitorpamplona.quartz.marmot.mip00KeyPackages` … `mip05PushNotifications`),
 so every Nostr client and relay parses and stores the kinds typed; this library imports them from
 there. cordn, the other MLS binding, is [cordn-kmp](https://github.com/vitorpamplona/cordn-kmp);
@@ -35,6 +35,13 @@ checked against MDK, the reference implementation (<https://github.com/marmot-pr
   - Tests: `commonTest`, `jvmAndroidTest` (JUnit, the in-process test relay in `testing/`),
     `jvmTest` (the `client/` suites and the scenario vectors in `jvmTest/resources/marmot/vectors`).
   - `marmot/tools/mdk-vector-gen`: Rust generator for the MDK vectors. `marmot/plans/`: design docs.
+- `marmot-quic/`: the raw QUIC binding of agent text stream previews (`transports/quic.md`),
+  published as `com.vitorpamplona.marmot:marmot-quic`. A module of its own because it sits on
+  [quic-kmp](https://github.com/vitorpamplona/quic-kmp), which builds for the JVM and Android only;
+  the codecs it frames stay in `marmot`'s `appComponents/agentTextStream`. JVM target 21, quic-kmp's.
+  Its interop tests run against MDK's `marmot-quic-broker` and `wn` and skip without them.
+- `marmot-bench/`: marmot-kmp against MDK, operation for operation (`./gradlew :marmot-bench:run`).
+  Not published.
 - `gradle/kmp-purity.gradle.kts`: the `verifyKmpPurity` task, the same file as Quartz's.
 - `tools/ci/quartz-args.sh`: points the build at a Quartz checkout while the pinned Quartz release is
   not on Maven Central yet (CI and the pre-push hook call it). `tools/ci/mls-kmp-args.sh` does the
@@ -46,11 +53,23 @@ checked against MDK, the reference implementation (<https://github.com/marmot-pr
   `@Stable` are the only Compose dependency. Platform storage, keystores and UI state belong to
   the app; the library defines the store interfaces (`MlsGroupStateStore`, `MarmotMessageStore`,
   `KeyPackageBundleStore`, …) and in-memory implementations, and an app's must encrypt at rest.
-- **Event classes belong to Quartz.** A new Marmot kind, tag or content codec is a Quartz change
-  (`quartz/…/marmot/`, with its `EventFactory` branch); only code that needs MLS, crypto state or
-  storage lives here. Quartz must not import MLS, so anything reading MLS bytes off an event is an
-  extension here (`KeyPackageEvent.buildCurrentProfileFrom`).
+- **Signed event classes belong to Quartz.** A new signed Marmot kind that relays carry
+  (KeyPackage, Welcome, GroupEvent, the push events), its tags and content codecs, is a Quartz
+  change (`quartz/…/marmot/`, with its `EventFactory` branch). Quartz must not import MLS, so
+  anything reading MLS bytes off an event is an extension here (`KeyPackageEvent.buildCurrentProfileFrom`).
+- **What members send inside a group is Marmot's, MLS state or not.** The kinds, tags, limits and
+  validation of the unsigned app events (edits, polls, custom emoji, reports, admin deletion) live
+  in `foundation/appEvents/` (`MarmotAppEvent`, `MarmotPolls`, `MarmotCustomEmoji`,
+  `MarmotReports`, …), because two clients that disagree on them show one group different things.
+  The test: if another Marmot client (White Noise, `amy`, a bot) would need the code to agree with
+  us, it belongs here, not in an app.
 - **Never depend on cordn-kmp**, and never let Quartz depend on this library.
+- **What stays in Amethyst:** the store implementations that encrypt at rest with a platform
+  keystore, the account wiring (which relays, which signer, the outbox), chatroom models, feeds,
+  notifications, UI and the `amy` verbs. A test that needs Amethyst code or both bindings lives
+  there; a test, bench or vector that exercises only this library lives here.
+- `:marmot` must keep building for every native target, so nothing JVM-only (quic-kmp included)
+  goes into it; a JVM/Android-only transport is a module beside it, like `marmot-quic`.
 - **Reuse Quartz's relay operations** (`fetchAll`, `fetchFirst`, `publishAndConfirm`, …, the
   `INostrClient` extensions in Quartz's `nip01Core/relay/client/accessories/`) instead of writing
   subscribe/collect loops.
@@ -59,7 +78,8 @@ checked against MDK, the reference implementation (<https://github.com/marmot-pr
   and Quartz's `PlatformLock`/`ConcurrentMap`.
 - Persisted formats are API: a store's bytes, a marker string, a derivation label. Changing one
   breaks every device that already wrote it.
-- JVM target is 17. Releases follow semantic versioning; Amethyst pins a version.
+- JVM target is 17 (`marmot-quic` is 21, quic-kmp's). Releases follow semantic versioning; `marmot`
+  and `marmot-quic` release together at one version, and Amethyst pins it.
 - Commits: conventional commits (`feat:`, `fix:`, …). Never `--no-verify`.
 
 ## Verify, don't guess
@@ -75,12 +95,15 @@ it before stating it: write the failing case first, watch it fail, then explain.
 ./gradlew :marmot:jvmTest                       # also `./gradlew test`
 ./gradlew :marmot:verifyKmpPurity :marmot:compileCommonMainKotlinMetadata :marmot:compileAppleMainKotlinMetadata
 ./gradlew :marmot:linuxX64Test                  # the whole suite on Linux Native
+./gradlew :marmot-quic:jvmTest                  # add -DmarmotQuicBroker=host:port to run interop
+./gradlew :marmot-bench:run                     # the MDK head-to-head
 ./gradlew :marmot:iosSimulatorArm64Test         # macOS only
 ```
 
 Until the Quartz version in `gradle/libs.versions.toml` is on Maven Central, add
 `-PquartzDir=../quartz` (a checkout beside this repo); `-PmlsKmpDir` and `-PcryptoKmpDir` work the
-same way. To try a change in Amethyst, build Amethyst with `-PmarmotKmpDir=../marmot-kmp`.
+same way, and so does `-PquicKmpDir`. To try a change in Amethyst, build Amethyst with
+`-PmarmotKmpDir=../marmot-kmp` (it substitutes both `marmot` and `marmot-quic`).
 
 ## Dependency licensing
 

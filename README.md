@@ -1,5 +1,13 @@
 # Marmot KMP
 
+[![GitHub downloads](https://img.shields.io/github/downloads/vitorpamplona/marmot-kmp/total?label=Downloads&labelColor=27303D&color=0D1117&logo=github&logoColor=FFFFFF&style=flat)](https://github.com/vitorpamplona/marmot-kmp/releases)
+[![Last Version](https://img.shields.io/github/release/vitorpamplona/marmot-kmp.svg?maxAge=3600&label=Stable&labelColor=06599d&color=043b69)](https://github.com/vitorpamplona/marmot-kmp/releases/latest)
+[![Maven Central](https://img.shields.io/maven-central/v/com.vitorpamplona.marmot/marmot?label=Maven%20Central&labelColor=27303D&color=0877d2)](https://central.sonatype.com/artifact/com.vitorpamplona.marmot/marmot)
+[![Maven Central](https://img.shields.io/maven-central/v/com.vitorpamplona.marmot/marmot-quic?label=marmot-quic%20%28Maven%20Central%29&labelColor=27303D&color=0877d2)](https://central.sonatype.com/artifact/com.vitorpamplona.marmot/marmot-quic)
+[![JitPack snapshots](https://img.shields.io/badge/snapshots-JitPack-27303D?labelColor=27303D&color=0877d2)](https://jitpack.io/#vitorpamplona/marmot-kmp)
+[![CI](https://img.shields.io/github/actions/workflow/status/vitorpamplona/marmot-kmp/build.yml?labelColor=27303D)](https://github.com/vitorpamplona/marmot-kmp/actions/workflows/build.yml)
+[![License: MIT](https://img.shields.io/github/license/vitorpamplona/marmot-kmp?labelColor=27303D&color=0877d2)](LICENSE)
+
 Marmot, MLS group messaging over Nostr, for Kotlin
 Multiplatform: JVM, Android, iOS, macOS and Linux. It implements MIP-00 to MIP-05 (KeyPackages,
 groups, Welcomes, group messages, encrypted media, push notifications) and the current Marmot
@@ -34,6 +42,18 @@ marmot.restoreAll()
 
 The store interfaces live in `com.vitorpamplona.marmot.groups` and
 `com.vitorpamplona.marmot.mip00KeyPackages`; in-memory versions exist for tests.
+
+Agent text stream previews over raw QUIC (`transports/quic.md`) are a second artifact, for the JVM
+and Android only, on [quic-kmp](https://github.com/vitorpamplona/quic-kmp):
+
+```kotlin
+dependencies {
+    implementation("com.vitorpamplona.marmot:marmot-quic:<version>")
+}
+```
+
+See [marmot-quic/README.md](marmot-quic/README.md). [marmot-bench](marmot-bench/README.md) measures
+this library against MDK, operation for operation.
 
 ## Developer Setup
 

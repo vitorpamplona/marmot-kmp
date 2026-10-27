@@ -80,6 +80,12 @@ class MarmotAppEvent(
         /** In-place replacement of a prior message's text. */
         const val KIND_EDIT = 1009
 
+        /** An encrypted NIP-88 poll in MDK's bounded profile; see [MarmotPolls]. */
+        const val KIND_POLL = 1068
+
+        /** One member's complete selection in a [KIND_POLL] poll; see [MarmotPolls]. */
+        const val KIND_POLL_RESPONSE = 1018
+
         /** A durable group system row, synthesized from canonical state. */
         const val KIND_SYSTEM = 1210
 
@@ -95,6 +101,46 @@ class MarmotAppEvent(
          * it instead of a kind-5 deletion whenever the deleter is a group admin.
          */
         const val KIND_REMOVE = 4891
+
+        /**
+         * Inner kinds that never get a row of their own in a group's timeline.
+         *
+         * Each one changes or annotates something else, or is addressed to clients
+         * rather than people, so rendering it as a message would show a blank or
+         * duplicate bubble and advance an unread count nobody can clear:
+         *
+         * - 5 deletions, [KIND_REMOVE] admin removals, 7 reactions and [KIND_EDIT]
+         *   edits change a message already on the timeline.
+         * - [KIND_POLL_RESPONSE] votes change their poll's tally (MDK projects no
+         *   row for one either).
+         * - [KIND_REPORT] and [KIND_REVIEW] are moderation state for the admins.
+         * - 447/448/449 push-token gossip is routing data for a notification server.
+         * - 1200 agent-stream anchors carry routing metadata with an empty body;
+         *   the reader sees the live preview and then the final kind 9. 1201 and
+         *   1202 agent activity and operation status are telemetry about a run
+         *   whose result arrives as a kind 9.
+         *
+         * [KIND_SYSTEM] is not here: see [isTimelineRow].
+         */
+        val NON_TIMELINE_KINDS: Set<Int> =
+            setOf(5, KIND_REMOVE, 7, KIND_EDIT, 1200, 1201, 1202, 447, 448, 449, KIND_POLL_RESPONSE, KIND_REPORT, KIND_REVIEW)
+
+        /**
+         * Whether an inner event of [kind] by [author] is a row in [self]'s timeline.
+         *
+         * A [KIND_SYSTEM] row belongs in the conversation, but only the one this
+         * client derived. MLS authenticates who sent a payload, not whether it is
+         * true, so a received 1210 is its sender's claim with an actor and subject
+         * of their choosing: showing it would let any member forge "X removed Y".
+         * Rows derived here (`MarmotManager.syncGroupSystemRows`) come from
+         * authenticated group state and are authored by [self], and every client
+         * that applied the same commits derives the same rows, so nothing is lost.
+         */
+        fun isTimelineRow(
+            kind: Int,
+            author: HexKey,
+            self: HexKey,
+        ): Boolean = if (kind == KIND_SYSTEM) author == self else kind !in NON_TIMELINE_KINDS
 
         private val ALLOWED_MEMBERS = setOf("id", "pubkey", "created_at", "kind", "tags", "content")
 

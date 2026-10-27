@@ -7,7 +7,7 @@ commit the shipping White Noise apps embed
 
 Their `manifest.v1.json` marks 31 artifacts `portable` — meaning they are
 meant to be replayed by an implementation that is not theirs. Three are byte
-fixtures we already consume from `quartz/src/commonTest/resources/marmot/
+fixtures we already consume from `marmot/src/commonTest/resources/marmot/
 conformance/`. The rest are **scenario scripts**: a client roster, a step
 list, and an expected trace.
 
