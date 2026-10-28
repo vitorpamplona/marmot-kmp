@@ -1,0 +1,4 @@
+# JitPack defaults to JDK 17; marmot-quic and marmot-bench need a Java 21 toolchain
+# (quic-kmp's target). JDK 21 still compiles :marmot's JVM 17 target.
+jdk:
+  - openjdk21
