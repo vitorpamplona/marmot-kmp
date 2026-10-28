@@ -404,6 +404,45 @@ class LegacyKeyPackageEventTest {
         }
 
     @Test
+    fun theWholeInviteLookupAsksEveryListAndSaysWhere() =
+        runBlocking {
+            // The package sits only on the relay the invitee's legacy kind:10051 names: not on
+            // their outbox (they published none) and not on ours. Asking the union is what finds it.
+            val keyPackageRelay = RelayUrlNormalizer.normalize("ws://127.0.0.1:7773/")
+            val client = NostrClient(hub, scope)
+            val peer = Peer(createdAt = TimeUtils.now() - 600)
+            assertTrue(client.publishAndConfirm(peer.addressable, setOf(keyPackageRelay)))
+
+            val lookup =
+                KeyPackageFetcher.fetchForInvite(
+                    client = client,
+                    targetPubKey = peer.signer.pubKey,
+                    targetOutbox = emptySet(),
+                    myOutbox = setOf(InProcessRelays.DEFAULT_URL),
+                    targetKeyPackageRelays = setOf(keyPackageRelay),
+                    idleTimeoutMs = 2_000,
+                    settleAfterFirstMs = 200,
+                )
+            assertEquals(peer.addressable.id, lookup.keyPackage?.id)
+            assertEquals(setOf(InProcessRelays.DEFAULT_URL, keyPackageRelay), lookup.relays)
+            client.disconnect()
+        }
+
+    @Test
+    fun anInviteLookupWithNowhereToAskFindsNothing() =
+        runBlocking {
+            val lookup =
+                KeyPackageFetcher.fetchForInvite(
+                    client = NostrClient(hub, scope),
+                    targetPubKey = Peer(createdAt = TimeUtils.now()).signer.pubKey,
+                    targetOutbox = emptySet(),
+                    myOutbox = emptySet(),
+                )
+            assertNull(lookup.keyPackage)
+            assertTrue(lookup.relays.isEmpty())
+        }
+
+    @Test
     fun theInviteLookupStillPrefers30443() =
         runBlocking {
             val client = NostrClient(hub, scope)

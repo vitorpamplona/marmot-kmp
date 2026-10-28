@@ -69,6 +69,22 @@ class MarmotSyncPolicy(
     private val publishAndConfirm: (suspend (event: Event, relayList: Set<NormalizedRelayUrl>) -> Boolean)? = null,
 ) {
     /**
+     * Holds an event that arrived ahead of the commit it needs and replays it once that commit
+     * lands, across syncs as long as this policy lives, and collects staged departures for an
+     * admin to commit. Shared with Amethyst's live subscription, so both apply the same rules.
+     */
+    private val receiver =
+        MarmotReceiver(marmot) { event, result ->
+            val detail =
+                when (result) {
+                    is MarmotIngestResult.Failure -> " ${result.message}"
+                    is MarmotIngestResult.Ignored -> " (${result.reason})"
+                    else -> ""
+                }
+            log("ingest ${event.kind}/${event.id.take(8)} → ${result::class.simpleName}$detail")
+        }
+
+    /**
      * Persisted `since` cursors. Backed by `RunState` (`state.json`) in the
      * CLI; any durable per-account key-value store works.
      */
@@ -169,24 +185,15 @@ class MarmotSyncPolicy(
         val maxGroupSeen = perGroupFilters.keys.associateWith { cursors.groupSince(it) ?: 0L }.toMutableMap()
         var sawGiftWrap = false
         val sawGroupEvent = mutableSetOf<HexKey>()
-        val stagedProposals = mutableSetOf<HexKey>()
-        val waitingOnEpoch = mutableListOf<Event>()
-        var advancedEpoch = false
 
         for ((relay, event) in events) {
-            // All the MLS/NIP-59 decryption + persistence lives in MarmotIngest —
-            // we only care about bookkeeping (since-cursors, logging) here.
-            val result = marmot.ingest(event)
-            val detail =
-                when (result) {
-                    is MarmotIngestResult.Failure -> " ${result.message}"
-                    is MarmotIngestResult.Ignored -> " (${result.reason})"
-                    else -> ""
-                }
-            log("ingest ${event.kind}/${event.id.take(8)} via $relay → ${result::class.simpleName}$detail")
-            if (result is MarmotIngestResult.ProposalStaged) stagedProposals.add(result.groupId)
-            if (event.kind == GroupEvent.KIND && result.couldOpenAfterACommit()) waitingOnEpoch.add(event)
-            if (result is MarmotIngestResult.Commit) advancedEpoch = true
+            // All the MLS/NIP-59 decryption + persistence lives in MarmotIngest, and
+            // replaying what a commit unblocks in MarmotReceiver — we only care about
+            // bookkeeping (since-cursors, logging) here. Same-second ties and cross-relay
+            // stragglers can still put an event ahead of the commit it needs; the receiver
+            // gives those another go when that commit lands.
+            log("from $relay: ${event.kind}/${event.id.take(8)}")
+            receiver.receive(event)
 
             when (event.kind) {
                 GiftWrapEvent.KIND -> {
@@ -203,25 +210,10 @@ class MarmotSyncPolicy(
             }
         }
 
-        // Same-second ties and cross-relay stragglers can still put an event ahead of the
-        // commit it needs; once a commit landed, give those another go, until a pass
-        // opens nothing new.
-        while (advancedEpoch && waitingOnEpoch.isNotEmpty()) {
-            advancedEpoch = false
-            val retry = waitingOnEpoch.toList()
-            waitingOnEpoch.clear()
-            for (event in retry) {
-                val result = marmot.ingest(event)
-                log("retry ${event.kind}/${event.id.take(8)} → ${result::class.simpleName}")
-                if (result is MarmotIngestResult.Commit) advancedEpoch = true
-                if (result is MarmotIngestResult.ProposalStaged) stagedProposals.add(result.groupId)
-                if (result.couldOpenAfterACommit()) waitingOnEpoch.add(event)
-            }
-        }
-
-        // A member's SelfRemove only takes effect once an admin commits it.
-        for (gid in stagedProposals) {
-            marmot.commitStagedProposalsIfAdmin(gid)?.let { log("committed staged proposals for ${gid.take(8)} → ${it.signedEvent.id.take(8)}") }
+        // A member's SelfRemove only takes effect once an admin commits it; one commit per
+        // group for the whole batch.
+        for ((gid, commit) in receiver.commitStagedProposals()) {
+            log("committed staged proposals for ${gid.take(8)} → ${commit.signedEvent.id.take(8)}")
         }
 
         if (sawGiftWrap && maxGwSeen > 0) {
@@ -280,11 +272,3 @@ class MarmotSyncPolicy(
         const val GIFT_WRAP_LOOKBACK_SECS: Long = 2L * 24 * 60 * 60
     }
 }
-
-/**
- * Failed only because the epoch it was sent at isn't reached yet; a later commit may open it.
- * Only an undecryptable outer layer qualifies. A "no canonical epoch" failure already opened
- * its outer layer on an epoch we hold, so no commit can help it, and the inbound processor
- * remembers its id: a retry would only come back as a duplicate.
- */
-private fun MarmotIngestResult.couldOpenAfterACommit(): Boolean = this is MarmotIngestResult.UndecryptableOuter
