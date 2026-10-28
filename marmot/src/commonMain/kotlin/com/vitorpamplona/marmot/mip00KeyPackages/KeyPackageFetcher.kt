@@ -139,6 +139,42 @@ object KeyPackageFetcher {
     }
 
     /**
+     * What [fetchForInvite] found, and the relays it asked.
+     *
+     * [relays] is reported even when [keyPackage] is null, so a caller can say where it looked;
+     * an empty set means there was nowhere to look at all.
+     */
+    class InviteLookup(
+        val keyPackage: PublishedKeyPackage?,
+        val relays: Set<NormalizedRelayUrl>,
+    )
+
+    /**
+     * The whole lookup an invite needs: [fetchRelaysFor] over the target's relay lists and ours,
+     * then [fetchKeyPackageForInvite] across that set.
+     *
+     * Which relay lists to pass stays the caller's (a cache, a network fetch, a bootstrap pool);
+     * how to combine them and which KeyPackage to invite with is the protocol's, so every client
+     * asks the same relays and picks the same package. The result is always a valid package or
+     * null: [KeyPackageUtils.selectForInvite] already refuses empty content, a bad signature and
+     * a stale or malformed package.
+     */
+    suspend fun fetchForInvite(
+        client: INostrClient,
+        targetPubKey: HexKey,
+        targetOutbox: Collection<NormalizedRelayUrl>,
+        myOutbox: Collection<NormalizedRelayUrl>,
+        targetKeyPackageRelays: Collection<NormalizedRelayUrl> = emptySet(),
+        idleTimeoutMs: Long = 30_000,
+        settleAfterFirstMs: Long = 3_000,
+        nowSeconds: Long = TimeUtils.now(),
+    ): InviteLookup {
+        val relays = fetchRelaysFor(targetOutbox, myOutbox, targetKeyPackageRelays)
+        val keyPackage = fetchKeyPackageForInvite(client, targetPubKey, relays, idleTimeoutMs, settleAfterFirstMs, nowSeconds)
+        return InviteLookup(keyPackage, relays)
+    }
+
+    /**
      * Collect every [T] signed by [author] that the [filter] returns from [relays], stopping
      * [settleAfterFirstMs] after the first one that [startsSettle] arrives or when every relay
      * went idle for [idleTimeoutMs].
