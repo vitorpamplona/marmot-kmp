@@ -123,20 +123,43 @@ private suspend fun MarmotManager.ingestGiftWrap(wrap: GiftWrapEvent): MarmotIng
     // every wrap in that band is unwrapped and re-decided on every single sync.
     if (isTerminallyIngested(wrap.id)) return MarmotIngestResult.Ignored("already ingested")
     val result = ingestGiftWrapUncached(wrap)
-    when (result) {
-        // Joined, or already in the group: nothing more can come of this wrap.
-        is MarmotIngestResult.JoinedGroup, is MarmotIngestResult.AlreadyInGroup -> markTerminallyIngested(wrap.id)
-
-        // A Welcome naming a KeyPackage whose private half we never held can
-        // never become processable: bundles are generated locally BEFORE the
-        // KeyPackage is published, so one we do not have is one we never will.
-        is MarmotIngestResult.Failure ->
-            if (result.message.contains("No matching KeyPackageBundle")) markTerminallyIngested(wrap.id)
-
-        else -> Unit
-    }
+    if (result.isTerminalForWelcome()) markTerminallyIngested(wrap.id)
     return result
 }
+
+/**
+ * Apply a Welcome a client already unwrapped itself: the same join as [ingest] gives a gift wrap,
+ * for a front end whose own gift-wrap pipeline peels the NIP-59 layers (Amethyst's does, to index
+ * the seal and rumor like any other DM).
+ *
+ * Marks [welcome]'s id terminally ingested once nothing more can come of it, as [ingest] marks the
+ * wrap's: joined, already in the group, or naming a KeyPackage this device never held. Any other
+ * failure stays retryable.
+ */
+suspend fun MarmotManager.ingestWelcome(welcome: WelcomeEvent): MarmotIngestResult {
+    if (isTerminallyIngested(welcome.id)) return MarmotIngestResult.Ignored("already ingested")
+    val result =
+        try {
+            joinFromWelcome(welcome)
+        } catch (e: Exception) {
+            currentCoroutineContext().ensureActive()
+            MarmotIngestResult.Failure("welcome failed: ${e.message}", e)
+        }
+    if (result.isTerminalForWelcome()) markTerminallyIngested(welcome.id)
+    return result
+}
+
+/**
+ * Joined, or already in the group: nothing more can come of this Welcome. And one naming a
+ * KeyPackage whose private half we never held can never become processable either: bundles are
+ * generated locally BEFORE the KeyPackage is published, so one we do not have is one we never will.
+ */
+private fun MarmotIngestResult.isTerminalForWelcome(): Boolean =
+    when (this) {
+        is MarmotIngestResult.JoinedGroup, is MarmotIngestResult.AlreadyInGroup -> true
+        is MarmotIngestResult.Failure -> message.contains("No matching KeyPackageBundle")
+        else -> false
+    }
 
 private suspend fun MarmotManager.ingestGiftWrapUncached(wrap: GiftWrapEvent): MarmotIngestResult =
     try {
@@ -149,31 +172,35 @@ private suspend fun MarmotManager.ingestGiftWrapUncached(wrap: GiftWrapEvent): M
         if (!MarmotInboundProcessor.isWelcomeEvent(rumor) || rumor !is WelcomeEvent) {
             return MarmotIngestResult.Ignored("gift wrap does not carry a Welcome")
         }
-        when (val result = processWelcome(rumor, rumor.nostrGroupId())) {
-            is WelcomeResult.Joined -> {
-                // Establish the baseline for this group's system rows without
-                // writing any: a joiner announcing every existing member as
-                // newly added would be a timeline full of events that never
-                // happened.
-                recordRetentionForCurrentEpoch(result.nostrGroupId)
-                syncGroupSystemRows(result.nostrGroupId)
-                MarmotIngestResult.JoinedGroup(
-                    nostrGroupId = result.nostrGroupId,
-                    needsKeyPackageRotation = result.needsKeyPackageRotation,
-                )
-            }
-
-            is WelcomeResult.AlreadyJoined -> {
-                MarmotIngestResult.AlreadyInGroup(result.nostrGroupId)
-            }
-
-            is WelcomeResult.Error -> {
-                MarmotIngestResult.Failure(result.message, result.cause)
-            }
-        }
+        joinFromWelcome(rumor)
     } catch (e: Exception) {
         currentCoroutineContext().ensureActive()
         MarmotIngestResult.Failure("giftwrap unwrap failed: ${e.message}", e)
+    }
+
+private suspend fun MarmotManager.joinFromWelcome(welcome: WelcomeEvent): MarmotIngestResult =
+    when (val result = processWelcome(welcome, welcome.nostrGroupId())) {
+        is WelcomeResult.Joined -> {
+            // Establish the baseline for this group's system rows without
+            // writing any: a joiner announcing every existing member as
+            // newly added would be a timeline full of events that never
+            // happened. Without it the first commit after joining becomes the
+            // baseline instead, and the change it made is never shown.
+            recordRetentionForCurrentEpoch(result.nostrGroupId)
+            syncGroupSystemRows(result.nostrGroupId)
+            MarmotIngestResult.JoinedGroup(
+                nostrGroupId = result.nostrGroupId,
+                needsKeyPackageRotation = result.needsKeyPackageRotation,
+            )
+        }
+
+        is WelcomeResult.AlreadyJoined -> {
+            MarmotIngestResult.AlreadyInGroup(result.nostrGroupId)
+        }
+
+        is WelcomeResult.Error -> {
+            MarmotIngestResult.Failure(result.message, result.cause)
+        }
     }
 
 private suspend fun MarmotManager.ingestGroupEvent(ge: GroupEvent): MarmotIngestResult =

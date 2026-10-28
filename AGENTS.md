@@ -31,7 +31,9 @@ checked against MDK, the reference implementation (<https://github.com/marmot-pr
   - The package root: `MarmotInboundProcessor`/`MarmotOutboundProcessor`, subscriptions, filters,
     `RecipientRelayFetcher`.
   - `client/`: the headless client a front end drives: `MarmotManager` (group lifecycle, send,
-    ingest, restore), `MarmotSyncPolicy`, `MarmotPushCoordinator`, `MarmotAgentStreamWatcher`.
+    ingest, restore), `MarmotReceiver` (what every client does with an ingest result: replay
+    after a commit, commit staged departures), `MarmotSyncPolicy`, `MarmotPushCoordinator`,
+    `MarmotAgentStreamWatcher`.
   - Tests: `commonTest`, `jvmAndroidTest` (JUnit, the in-process test relay in `testing/`),
     `jvmTest` (the `client/` suites and the scenario vectors in `jvmTest/resources/marmot/vectors`).
   - `marmot/tools/mdk-vector-gen`: Rust generator for the MDK vectors. `marmot/plans/`: design docs.
