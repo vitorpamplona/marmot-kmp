@@ -26,6 +26,7 @@ import com.vitorpamplona.quartz.nip01Core.relay.client.INostrClient
 import com.vitorpamplona.quartz.nip01Core.relay.client.accessories.fetchAll
 import com.vitorpamplona.quartz.nip01Core.relay.filters.Filter
 import com.vitorpamplona.quartz.nip01Core.relay.normalizer.NormalizedRelayUrl
+import com.vitorpamplona.quartz.nip01Core.relay.normalizer.isDialableFromOthers
 import com.vitorpamplona.quartz.nip17Dm.settings.DmRelayListEvent
 import com.vitorpamplona.quartz.nip65RelayList.AdvertisedRelayListEvent
 
@@ -66,10 +67,10 @@ object RecipientRelayFetcher {
         val dmInboxWithheld: Boolean = false,
     ) {
         /** Read-marker relays from kind:10002. Mirrors `User.inboxRelays()`. */
-        fun nip65Read(): List<NormalizedRelayUrl> = nip65?.readRelaysNorm().orEmpty()
+        fun nip65Read(): List<NormalizedRelayUrl> = nip65?.allReadRelaysNorm().orEmpty().filter { it.isDialableFromOthers() }
 
         /** Write-marker relays from kind:10002. Mirrors `User.outboxRelays()`. */
-        fun nip65Write(): List<NormalizedRelayUrl> = nip65?.writeRelaysNorm().orEmpty()
+        fun nip65Write(): List<NormalizedRelayUrl> = nip65?.allWriteRelaysNorm().orEmpty().filter { it.isDialableFromOthers() }
 
         /**
          * Where to deliver a NIP-59 gift wrap addressed to this user.
@@ -136,10 +137,10 @@ object RecipientRelayFetcher {
             }
         }
 
-        val dmInbox = dm?.relays().orEmpty()
+        val dmInbox = dm?.allRelays().orEmpty().filter { it.isDialableFromOthers() }
         return Lists(
             dmInbox = dmInbox,
-            keyPackage = kp?.relays().orEmpty(),
+            keyPackage = kp?.allRelays().orEmpty().filter { it.isDialableFromOthers() },
             nip65 = nip65,
             dmInboxWithheld = dmInbox.isEmpty() && dm?.allRelays().orEmpty().isNotEmpty(),
         )

@@ -102,7 +102,7 @@ class CurrentProfileKeyPackageEventTest {
         // the rule that defines it, and KeyPackage events do not repeat the
         // author's relays because discovery is their NIP-65 write set.
         assertNull(event.encoding(), "the encoding tag is forbidden")
-        assertNull(event.relays(), "kind 30443 does not repeat relays")
+        assertNull(event.allRelays(), "kind 30443 does not repeat relays")
 
         val components = event.appComponents()!!
         assertTrue(components.contains("0x8009"), "app_components MUST name 0x8009")
