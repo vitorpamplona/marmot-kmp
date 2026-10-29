@@ -266,7 +266,7 @@ object KeyPackageUtils {
             if (event.encoding() != null) return false
             // ...and does not repeat relays; discovery is the author's NIP-65
             // write set.
-            if (event.relays() != null) return false
+            if (event.allRelays() != null) return false
         } else {
             // MIP-era shape, kept so groups already on disk stay readable.
             if (!extensions.contains("0xf2ee") || !extensions.contains("0x000a")) return false
