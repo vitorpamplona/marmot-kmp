@@ -11,3 +11,4 @@ holds what is specific to Claude Code.
   block the call on failure. A Stop hook runs `./gradlew spotlessApply` when Kotlin
   files changed. `session-start.sh` sets up proxy, SSL, the Android SDK and the
   Kotlin/Native toolchain on Claude Code on the web.
+- **Skills** load from `.claude/skills/`; each one is also invocable as `/<name>`.
