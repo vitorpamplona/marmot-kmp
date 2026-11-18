@@ -80,7 +80,7 @@ checked against MDK, the reference implementation (<https://github.com/marmot-pr
   and Quartz's `PlatformLock`/`ConcurrentMap`.
 - Persisted formats are API: a store's bytes, a marker string, a derivation label. Changing one
   breaks every device that already wrote it.
-- JVM target is 17 (`marmot-quic` is 21, quic-kmp's). Releases follow semantic versioning; `marmot`
+- JVM target is 21, Quartz's and quic-kmp's: a library can't target a lower JVM than its dependencies. Releases follow semantic versioning; `marmot`
   and `marmot-quic` release together at one version, and Amethyst pins it.
 - Commits: conventional commits (`feat:`, `fix:`, …). Never `--no-verify`.
 

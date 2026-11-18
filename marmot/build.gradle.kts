@@ -20,7 +20,7 @@ kotlin {
     // JVM 17, like Quartz: a library cannot need a newer JVM than its users.
     jvm {
         compilerOptions {
-            jvmTarget.set(JvmTarget.JVM_17)
+            jvmTarget.set(JvmTarget.JVM_21)
         }
     }
 
@@ -36,7 +36,7 @@ kotlin {
                 .toInt()
 
         compilerOptions {
-            jvmTarget.set(JvmTarget.JVM_17)
+            jvmTarget.set(JvmTarget.JVM_21)
         }
 
         withHostTest {}
