@@ -15,10 +15,10 @@ kotlin {
         freeCompilerArgs.add("-Xexpect-actual-classes")
     }
 
-    // JVM 17, like Quartz: a library cannot need a newer JVM than its users.
+    // JVM 21, like Quartz: Kotlin will not inline Quartz's functions (built for 21) into older bytecode.
     jvm {
         compilerOptions {
-            jvmTarget.set(JvmTarget.JVM_17)
+            jvmTarget.set(JvmTarget.JVM_21)
         }
     }
 
@@ -34,7 +34,7 @@ kotlin {
                 .toInt()
 
         compilerOptions {
-            jvmTarget.set(JvmTarget.JVM_17)
+            jvmTarget.set(JvmTarget.JVM_21)
         }
 
         withHostTest {}
