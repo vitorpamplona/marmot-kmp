@@ -198,6 +198,89 @@ object KeyPackageUtils {
             ?: newestValid(byAuthor.filterIsInstance<LegacyKeyPackageEvent>(), nowSeconds)
     }
 
+    /** NIP-09 deletion request kind. */
+    const val DELETION_KIND = 5
+
+    /** `foundation/key-packages.md`: a candidate is fresh when published at most 30 days before selection. */
+    const val FRESH_SECONDS = 2_592_000L
+
+    /** `foundation/key-packages.md`: at most 20 KeyPackages of one account in one Commit. */
+    const val MAX_PER_ACCOUNT = 20
+
+    /**
+     * Every KeyPackage to invite [author] with — one leaf per device
+     * (`foundation/key-packages.md`, "Selection and lifecycle";
+     * `transports/nostr.md`, "Slot deletion").
+     *
+     * 1. Only [author]'s valid kind 30443 events count ([isCryptographicallyValid]),
+     *    the newest per `d` slot, and none a held [deletions] request covers: a
+     *    kind-5 event by [author] whose `a` tag names the slot and whose
+     *    `created_at` is at or after the candidate's.
+     * 2. [compatible] must hold — every primitive and component the group
+     *    will require. Freshness never overrides it.
+     * 3. Every candidate published within [FRESH_SECONDS], ranked non-last-resort
+     *    first, then newest, then lower KeyPackageRef, cut to [MAX_PER_ACCOUNT].
+     *    With none fresh, the single highest-ranked one.
+     * 4. With no usable 30443 at all, the legacy fallback of [selectForInvite]:
+     *    the newest valid kind 443 (which has no slots and no deletion).
+     */
+    @OptIn(ExperimentalEncodingApi::class)
+    fun selectAllForInvite(
+        candidates: Collection<Event>,
+        author: HexKey,
+        nowSeconds: Long = TimeUtils.now(),
+        compatible: (MlsKeyPackage) -> Boolean = { true },
+    ): List<PublishedKeyPackage> {
+        val deletions = candidates.filter { it.kind == DELETION_KIND && it.pubKey == author }
+
+        fun deleted(event: KeyPackageEvent): Boolean {
+            val address = "${KeyPackageEvent.KIND}:$author:${event.dTag()}"
+            return deletions.any { deletion ->
+                deletion.createdAt >= event.createdAt && deletion.tags.any { it.size >= 2 && it[0] == "a" && it[1] == address }
+            }
+        }
+
+        class Ranked(
+            val event: KeyPackageEvent,
+            val lastResort: Boolean,
+            val ref: String,
+        )
+
+        val usable =
+            candidates
+                .filterIsInstance<KeyPackageEvent>()
+                .filter { it.pubKey == author }
+                // One current publication per slot: the newest, ties to the lower id.
+                .groupBy { it.dTag() }
+                .mapNotNull { (_, slot) -> slot.sortedWith(compareByDescending<KeyPackageEvent> { it.createdAt }.thenBy { it.id }).first() }
+                .filter { !deleted(it) && isCryptographicallyValid(it, nowSeconds) }
+                .mapNotNull { event ->
+                    val keyPackage =
+                        try {
+                            decodeKeyPackage(Base64.decode(event.content))
+                        } catch (_: Throwable) {
+                            return@mapNotNull null
+                        }
+                    if (!compatible(keyPackage)) return@mapNotNull null
+                    val lastResort = AppDataDictionary.fromExtensionsOrEmpty(keyPackage.extensions).contains(ComponentsList.LAST_RESORT_KEY_PACKAGE_ID)
+                    Ranked(event, lastResort, event.keyPackageRef().orEmpty().lowercase())
+                }.sortedWith(compareBy<Ranked> { it.lastResort }.thenByDescending { it.event.createdAt }.thenBy { it.ref })
+
+        if (usable.isNotEmpty()) {
+            val fresh = usable.filter { nowSeconds - it.event.createdAt <= FRESH_SECONDS }
+            return if (fresh.isNotEmpty()) fresh.take(MAX_PER_ACCOUNT).map { it.event } else listOf(usable.first().event)
+        }
+        return listOfNotNull(
+            newestValid(candidates.filterIsInstance<LegacyKeyPackageEvent>().filter { it.pubKey == author }, nowSeconds)?.takeIf { legacy ->
+                try {
+                    compatible(decodeKeyPackage(Base64.decode(legacy.content)))
+                } catch (_: Throwable) {
+                    false
+                }
+            },
+        )
+    }
+
     private fun newestValid(
         candidates: List<PublishedKeyPackage>,
         nowSeconds: Long,

@@ -20,19 +20,28 @@
  */
 package com.vitorpamplona.marmot.client
 
+import com.vitorpamplona.crypto.curve25519.Ed25519
 import com.vitorpamplona.marmot.appComponents.AccountDevicesV1
+import com.vitorpamplona.marmot.appComponents.AppComponentIds
 import com.vitorpamplona.marmot.appComponents.CurrentProfileGroupFactory
 import com.vitorpamplona.marmot.appComponents.GroupProfileV1
+import com.vitorpamplona.marmot.appComponents.accountIdentityProof.AccountIdentityProofV2
+import com.vitorpamplona.marmot.groups.MarmotCapabilities
 import com.vitorpamplona.marmot.groups.MarmotCommitClass
 import com.vitorpamplona.marmot.groups.MarmotGroupPolicy
+import com.vitorpamplona.marmot.mip00KeyPackages.buildCurrentProfileFrom
+import com.vitorpamplona.marmot.mip01Groups.MlsCiphersuite
 import com.vitorpamplona.marmot.protocolCore.MlsCandidateStateEngine
 import com.vitorpamplona.marmot.protocolCore.TipPriority
+import com.vitorpamplona.mls.components.AppDataDictionary
+import com.vitorpamplona.mls.components.ComponentData
 import com.vitorpamplona.mls.components.ComponentsList
 import com.vitorpamplona.mls.group.GroupView
 import com.vitorpamplona.mls.group.MlsGroup
 import com.vitorpamplona.mls.group.PendingProposal
 import com.vitorpamplona.mls.messages.Proposal
 import com.vitorpamplona.mls.tree.Extension
+import com.vitorpamplona.quartz.marmot.mip00KeyPackages.KeyPackageEvent
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
 import com.vitorpamplona.quartz.nip01Core.crypto.KeyPair
 import com.vitorpamplona.quartz.nip01Core.signers.NostrSignerInternal
@@ -42,6 +51,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 /**
@@ -381,6 +391,55 @@ class MarmotAccountDevicesTest {
                 MarmotGroupPolicy.validateJoin(GroupView(plain, plainIds.size, 2, { plainIds.getOrNull(it) }, { null }, { null }), 3, emptyList())
             }
             MarmotGroupPolicy.validateJoin(GroupView(plain, plainIds.size, 2, { plainIds.getOrNull(it) }, { null }, { null }), 0, emptyList())
+        }
+
+    /**
+     * MDK 0.18's linked devices put a device-tag entry (`0x800f`) in every
+     * LeafNode and KeyPackage dictionary. It is a component we do not know, so
+     * its data is carried, never judged: the KeyPackage is invited, the member
+     * joins and the group carries on.
+     */
+    @Test
+    fun aDeviceTaggedKeyPackageIsInvitedAndJoins() =
+        runBlocking<Unit> {
+            val alice = Device()
+            val bob = Device()
+            found(alice, listOf(bob))
+
+            val carolSigner = NostrSignerInternal(KeyPair())
+            val leafKeys = Ed25519.generateKeyPair()
+            val proof = AccountIdentityProofV2.create(carolSigner, MlsCiphersuite.DEFAULT, leafKeys.publicKey)
+            val deviceTag = 0x800f
+            val leaf =
+                AppDataDictionary(
+                    listOf(
+                        ComponentData(ComponentsList.APP_COMPONENTS_ID, ComponentsList.encode(CurrentProfileGroupFactory.SUPPORTED_COMPONENTS)),
+                        ComponentData(ComponentsList.SAFE_AAD_ID, ComponentsList.encode(emptyList())),
+                        ComponentData(AppComponentIds.ACCOUNT_IDENTITY_PROOF_V2, proof.encode()),
+                        ComponentData(deviceTag, ByteArray(16) { 7 }),
+                    ),
+                )
+            val bundle =
+                MlsGroup.createKeyPackage(
+                    identity = carolSigner.pubKey.hexToByteArray(),
+                    policy = MarmotGroupPolicy,
+                    leafSignatureKeyPair = leafKeys,
+                    leafExtensions = listOf(leaf.toExtension()),
+                    capabilities = MarmotCapabilities.currentProfileLeaf(),
+                    keyPackageExtensions =
+                        listOf(
+                            AppDataDictionary(
+                                listOf(ComponentData(ComponentsList.LAST_RESORT_KEY_PACKAGE_ID, ByteArray(0)), ComponentData(deviceTag, ByteArray(4) { 1 })),
+                            ).toExtension(),
+                        ),
+                )
+            val event = carolSigner.sign(KeyPackageEvent.buildCurrentProfileFrom(bundle.keyPackage, "f".repeat(64)))
+
+            val (commit, welcome) = alice.manager.addMember(nostrGroupId, event, emptyList())
+            assertIs<MarmotIngestResult.Commit>(bob.manager.ingest(commit!!.signedEvent))
+            assertEquals(3, bob.manager.memberCount(nostrGroupId))
+            assertTrue(bob.manager.requiresAccountDevices(nostrGroupId))
+            assertNotNull(welcome)
         }
 
     private fun classifyRemoves(

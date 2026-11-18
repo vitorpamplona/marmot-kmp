@@ -21,8 +21,10 @@
 package com.vitorpamplona.marmot.mip00KeyPackages
 
 import com.vitorpamplona.marmot.MarmotFilters
+import com.vitorpamplona.mls.messages.MlsKeyPackage
 import com.vitorpamplona.quartz.marmot.mip00KeyPackages.KeyPackageEvent
 import com.vitorpamplona.quartz.marmot.mip00KeyPackages.PublishedKeyPackage
+import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.core.HexKey
 import com.vitorpamplona.quartz.nip01Core.crypto.verify
 import com.vitorpamplona.quartz.nip01Core.relay.client.INostrClient
@@ -104,7 +106,7 @@ object KeyPackageFetcher {
         settleAfterFirstMs: Long = 3_000,
     ): KeyPackageEvent? {
         if (relays.isEmpty()) return null
-        return drain<KeyPackageEvent>(client, MarmotFilters.keyPackagesByAuthor(targetPubKey), targetPubKey, relays, idleTimeoutMs, settleAfterFirstMs) { true }
+        return drain<KeyPackageEvent>(client, listOf(MarmotFilters.keyPackagesByAuthor(targetPubKey)), targetPubKey, relays, idleTimeoutMs, settleAfterFirstMs) { true }
             .maxByOrNull { it.createdAt }
     }
 
@@ -134,20 +136,56 @@ object KeyPackageFetcher {
         nowSeconds: Long = TimeUtils.now(),
     ): PublishedKeyPackage? {
         if (relays.isEmpty()) return null
-        val found = drain<PublishedKeyPackage>(client, MarmotFilters.keyPackagesMigration(targetPubKey), targetPubKey, relays, idleTimeoutMs, settleAfterFirstMs) { it is KeyPackageEvent }
+        val found = drain<PublishedKeyPackage>(client, listOf(MarmotFilters.keyPackagesMigration(targetPubKey)), targetPubKey, relays, idleTimeoutMs, settleAfterFirstMs) { it is KeyPackageEvent }
         return KeyPackageUtils.selectForInvite(found, targetPubKey, nowSeconds)
+    }
+
+    /**
+     * Every KeyPackage to invite [targetPubKey] with: one per device, as
+     * [KeyPackageUtils.selectAllForInvite] chooses them.
+     *
+     * Fetches the account's kind-5 slot deletions in the same pass
+     * ([MarmotFilters.keyPackageSlotDeletions]), so a slot a device withdrew at
+     * sign-out is never selected (`transports/nostr.md`, "Slot deletion").
+     * [compatible] says whether a KeyPackage supports everything the group will
+     * require; an incompatible one is never selected, whatever its age.
+     */
+    suspend fun fetchKeyPackagesForInvite(
+        client: INostrClient,
+        targetPubKey: HexKey,
+        relays: Set<NormalizedRelayUrl>,
+        idleTimeoutMs: Long = 30_000,
+        settleAfterFirstMs: Long = 3_000,
+        nowSeconds: Long = TimeUtils.now(),
+        compatible: (MlsKeyPackage) -> Boolean = { true },
+    ): List<PublishedKeyPackage> {
+        if (relays.isEmpty()) return emptyList()
+        val found =
+            drain<Event>(
+                client,
+                listOf(MarmotFilters.keyPackagesMigration(targetPubKey), MarmotFilters.keyPackageSlotDeletions(targetPubKey)),
+                targetPubKey,
+                relays,
+                idleTimeoutMs,
+                settleAfterFirstMs,
+            ) { it is KeyPackageEvent }
+        return KeyPackageUtils.selectAllForInvite(found, targetPubKey, nowSeconds, compatible)
     }
 
     /**
      * What [fetchForInvite] found, and the relays it asked.
      *
-     * [relays] is reported even when [keyPackage] is null, so a caller can say where it looked;
-     * an empty set means there was nowhere to look at all.
+     * [keyPackages] holds one KeyPackage per device to invite; [keyPackage] is
+     * the first of them, for a caller that invites one. [relays] is reported
+     * even when nothing was found, so a caller can say where it looked; an
+     * empty set means there was nowhere to look at all.
      */
     class InviteLookup(
-        val keyPackage: PublishedKeyPackage?,
+        val keyPackages: List<PublishedKeyPackage>,
         val relays: Set<NormalizedRelayUrl>,
-    )
+    ) {
+        val keyPackage: PublishedKeyPackage? get() = keyPackages.firstOrNull()
+    }
 
     /**
      * The whole lookup an invite needs: [fetchRelaysFor] over the target's relay lists and ours,
@@ -157,7 +195,8 @@ object KeyPackageFetcher {
      * how to combine them and which KeyPackage to invite with is the protocol's, so every client
      * asks the same relays and picks the same package. The result is always a valid package or
      * null: [KeyPackageUtils.selectForInvite] already refuses empty content, a bad signature and
-     * a stale or malformed package.
+     * a stale or malformed package. It selects every device's KeyPackage
+     * ([fetchKeyPackagesForInvite]); [compatible] is the group's requirement.
      */
     suspend fun fetchForInvite(
         client: INostrClient,
@@ -168,10 +207,11 @@ object KeyPackageFetcher {
         idleTimeoutMs: Long = 30_000,
         settleAfterFirstMs: Long = 3_000,
         nowSeconds: Long = TimeUtils.now(),
+        compatible: (MlsKeyPackage) -> Boolean = { true },
     ): InviteLookup {
         val relays = fetchRelaysFor(targetOutbox, myOutbox, targetKeyPackageRelays)
-        val keyPackage = fetchKeyPackageForInvite(client, targetPubKey, relays, idleTimeoutMs, settleAfterFirstMs, nowSeconds)
-        return InviteLookup(keyPackage, relays)
+        val keyPackages = fetchKeyPackagesForInvite(client, targetPubKey, relays, idleTimeoutMs, settleAfterFirstMs, nowSeconds, compatible)
+        return InviteLookup(keyPackages, relays)
     }
 
     /**
@@ -185,9 +225,9 @@ object KeyPackageFetcher {
      * package to [author]; without it a relay could serve its own package under the target's
      * pubkey and receive the Welcome.
      */
-    private suspend inline fun <reified T : PublishedKeyPackage> drain(
+    private suspend inline fun <reified T : Any> drain(
         client: INostrClient,
-        filter: Filter,
+        filters: List<Filter>,
         author: HexKey,
         relays: Set<NormalizedRelayUrl>,
         idleTimeoutMs: Long,
@@ -201,7 +241,7 @@ object KeyPackageFetcher {
         coroutineScope {
             val fetch =
                 launch {
-                    client.fetchAllWithHooks(filters = relays.associateWith { listOf(filter) }, idleTimeoutMs = idleTimeoutMs) { _, event ->
+                    client.fetchAllWithHooks(filters = relays.associateWith { filters }, idleTimeoutMs = idleTimeoutMs) { _, event ->
                         if (event is T && event.pubKey == author && event.verify()) {
                             found.add(event)
                             if (startsSettle(event)) firstArrived.complete(Unit)

@@ -76,6 +76,7 @@ import com.vitorpamplona.marmot.protocolCore.MarmotPublishObligation
 import com.vitorpamplona.marmot.protocolCore.MarmotPublishObligationStore
 import com.vitorpamplona.marmot.protocolCore.PublishOutcome
 import com.vitorpamplona.mls.components.AppDataDictionary
+import com.vitorpamplona.mls.components.ComponentsList
 import com.vitorpamplona.mls.group.MlsGroup
 import com.vitorpamplona.mls.messages.CommitResult
 import com.vitorpamplona.mls.messages.MlsKeyPackage
@@ -2454,6 +2455,19 @@ class MarmotManager(
         return commitAndPublish(nostrGroupId, relays) {
             groupManager.stageRemoveMembers(nostrGroupId, leafIndices)
         }.event
+    }
+
+    /**
+     * Whether a KeyPackage can join [nostrGroupId] as it stands: it advertises
+     * every app component the group requires (`foundation/key-packages.md`,
+     * "Selection and lifecycle": an inviter MUST NOT select an incompatible
+     * candidate). Pass it to `KeyPackageFetcher.fetchForInvite`. A group this
+     * client does not hold accepts everything; the Add itself checks again.
+     */
+    fun inviteCompatibility(nostrGroupId: HexKey): (MlsKeyPackage) -> Boolean {
+        val group = groupManager.getGroup(nostrGroupId) ?: return { true }
+        val required = ComponentsList.supportedOrRequired(group.appDataDictionary()).toSet()
+        return { keyPackage -> AccountDevicesV1.advertised(keyPackage.leafNode.extensions).containsAll(required) }
     }
 
     /** Whether [nostrGroupId] requires `marmot.group.account-devices.v1`. */

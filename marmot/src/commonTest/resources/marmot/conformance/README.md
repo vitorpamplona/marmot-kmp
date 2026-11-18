@@ -8,6 +8,7 @@ so a local "fix" to make a test pass would delete the only thing they prove.
 |---|---|
 | `imeta-v1.json`, `imeta-v2.json` | `fixtures/encrypted-media/` |
 | `nostr-routing-v1-*.v1.json` | `crates/cgka-conformance-simulator/vectors/byte-fixtures/` |
+| `nostr-welcome-nip44-extended-length.v1.json` | `crates/cgka-conformance-simulator/vectors/byte-fixtures/` (MDK v0.15+) |
 
 Upstream is MDK (`marmot-protocol/mdk`), at the commit `marmot/src/jvmTest/resources/marmot/vectors/README.md`
 names. To refresh, from this repo's root:
@@ -18,7 +19,7 @@ git clone --quiet https://github.com/marmot-protocol/mdk.git "$MDK"
 git -C "$MDK" checkout <the commit from vectors/README.md>
 cp $MDK/fixtures/encrypted-media/imeta-v{1,2}.json \
    marmot/src/commonTest/resources/marmot/conformance/
-cp $MDK/crates/cgka-conformance-simulator/vectors/byte-fixtures/nostr-routing-v1-*.v1.json \
+cp $MDK/crates/cgka-conformance-simulator/vectors/byte-fixtures/nostr-{routing-v1-*,welcome-nip44-extended-length}.v1.json \
    marmot/src/commonTest/resources/marmot/conformance/
 ```
 
