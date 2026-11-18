@@ -1,9 +1,10 @@
 # Marmot KMP
 
 Marmot (MLS group messaging over Nostr, the `MIP-00`…`MIP-05` specs) as a Kotlin Multiplatform
-library for JVM, Android, iOS, macOS and Linux, published to Maven Central as
-`com.vitorpamplona.marmot:marmot`. It is built on [Quartz](https://github.com/vitorpamplona/quartz)
-(events, signers, NIP-44/NIP-59, the relay client) and the RFC 9420 engine
+library for JVM, Android, iOS, macOS and Linux, published as `com.vitorpamplona.marmot:marmot` on
+Nostr + Blossom through [Magpie](https://github.com/vitorpamplona/magpie) (Maven Central up to
+2.2.1). It is built on [Quartz](https://github.com/vitorpamplona/quartz) (events, signers,
+NIP-44/NIP-59, the relay client) and the RFC 9420 engine
 [mls-kmp](https://github.com/vitorpamplona/mls-kmp), and is used by
 [Amethyst](https://github.com/vitorpamplona/amethyst), its desktop app and the `amy` CLI.
 
@@ -152,6 +153,8 @@ asks, and before opening, revising or merging one by either path, use the `ngit-
 
 Release Quartz first if this version needs a new one. Bump `VERSION_NAME` in `gradle.properties`,
 then push a `v<version>` tag. `create-release.yml` refuses to publish against an unpublished Quartz,
-runs the Apple tests on macOS, then the checks, publishes to Maven Central and opens the GitHub
-release. It needs `SONATYPE_USERNAME`, `SONATYPE_PASSWORD`, `SIGNING_PRIVATE_KEY` and
-`SIGNING_PASSWORD`, the same secrets as Quartz.
+runs the Apple tests on macOS, then the checks, publishes `marmot` and `marmot-quic` to Nostr +
+Blossom with Magpie's `publishToNostr` (one signed release each) and opens the GitHub release. It
+needs `MAGPIE_BUNKER`, a NIP-46 `bunker://` URI for the release key that
+`vitorpamplona.com/.well-known/nostr.json` names as `releases`; the signer approves each release,
+and a version already on Nostr fails the job.

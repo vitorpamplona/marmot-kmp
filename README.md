@@ -2,8 +2,7 @@
 
 [![GitHub downloads](https://img.shields.io/github/downloads/vitorpamplona/marmot-kmp/total?label=Downloads&labelColor=27303D&color=0D1117&logo=github&logoColor=FFFFFF&style=flat)](https://github.com/vitorpamplona/marmot-kmp/releases)
 [![Last Version](https://img.shields.io/github/release/vitorpamplona/marmot-kmp.svg?maxAge=3600&label=Stable&labelColor=06599d&color=043b69)](https://github.com/vitorpamplona/marmot-kmp/releases/latest)
-[![Maven Central](https://img.shields.io/maven-central/v/com.vitorpamplona.marmot/marmot?label=Maven%20Central&labelColor=27303D&color=0877d2)](https://central.sonatype.com/artifact/com.vitorpamplona.marmot/marmot)
-[![Maven Central](https://img.shields.io/maven-central/v/com.vitorpamplona.marmot/marmot-quic?label=marmot-quic%20%28Maven%20Central%29&labelColor=27303D&color=0877d2)](https://central.sonatype.com/artifact/com.vitorpamplona.marmot/marmot-quic)
+[![Magpie](https://img.shields.io/github/v/release/vitorpamplona/marmot-kmp?label=Magpie%20%28Nostr%20%2B%20Blossom%29&labelColor=27303D&color=7a4fd6)](#install)
 [![JitPack snapshots](https://img.shields.io/badge/snapshots-JitPack-27303D?labelColor=27303D&color=0877d2)](https://jitpack.io/#vitorpamplona/marmot-kmp)
 [![CI](https://img.shields.io/github/actions/workflow/status/vitorpamplona/marmot-kmp/build.yml?labelColor=27303D)](https://github.com/vitorpamplona/marmot-kmp/actions/workflows/build.yml)
 [![License: MIT](https://img.shields.io/github/license/vitorpamplona/marmot-kmp?labelColor=27303D&color=0877d2)](LICENSE)
@@ -18,6 +17,26 @@ profile on top of [Quartz](https://github.com/vitorpamplona/quartz) and the RFC 
 It is the Marmot layer of [Amethyst](https://github.com/vitorpamplona/amethyst), its desktop app
 and the `amy` CLI, and is tested against [MDK](https://github.com/marmot-protocol/mdk), the
 reference implementation.
+
+## Install
+
+Releases are published on Nostr and Blossom with [Magpie](https://github.com/vitorpamplona/magpie),
+not on Maven Central (versions up to 2.2.1 are on Central). Magpie's settings plugin serves them to
+Gradle, accepting only releases signed by the key `vitorpamplona.com/.well-known/nostr.json` names
+as `releases`. In `settings.gradle.kts`:
+
+```kotlin
+plugins {
+    id("com.vitorpamplona.magpie") version "0.2.0"
+}
+
+magpie {
+    group("com.vitorpamplona.marmot")
+}
+```
+
+Then depend on it as usual, and commit the `gradle/magpie.lock` the first build writes. Gradle has
+to run on Java 21 or newer.
 
 ```kotlin
 dependencies {

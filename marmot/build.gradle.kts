@@ -8,6 +8,8 @@ plugins {
     alias(libs.plugins.androidKotlinMultiplatformLibrary)
     alias(libs.plugins.serialization)
     alias(libs.plugins.vanniktech.mavenPublish)
+    // Releases go to Nostr + Blossom: publishToNostr. Its relays come from gradle.properties (magpie.*).
+    alias(libs.plugins.magpiePublish)
 }
 
 kotlin {
@@ -127,13 +129,9 @@ mavenPublishing {
     // groupId, artifactId, and version are configured via gradle.properties
     // (GROUP, POM_ARTIFACT_ID, VERSION_NAME) so CI can override VERSION_NAME
     // via ORG_GRADLE_PROJECT_VERSION_NAME without conflicting with a hardcoded value.
-    publishToMavenCentral(automaticRelease = true)
-
-    // CI provides the key (ORG_GRADLE_PROJECT_signingInMemoryKey); without one,
-    // publishToMavenLocal still works for testing a local build in a consumer.
-    if (providers.gradleProperty("signingInMemoryKey").isPresent) {
-        signAllPublications()
-    }
+    // Releases go to Nostr + Blossom only, through Magpie's publishToNostr (the plugin above): its
+    // signed release event pins every file's hash, so the files carry no GPG signatures. Maven
+    // Central has the releases up to 2.2.1.
 
     pom {
         name = "Marmot: MLS group messaging over Nostr for Kotlin Multiplatform"
