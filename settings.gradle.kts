@@ -6,6 +6,21 @@ pluginManagement {
     }
 }
 
+// Quartz (from 2.19.0), crypto-kmp and libschnorr256k1-kotlin are released on Nostr + Blossom: the
+// Magpie settings plugin serves their groups, trusting only the release key vitorpamplona.com names
+// as `releases`, and gradle/magpie.lock pins that key and every resolved version's files. It also puts
+// the publish plugin (com.vitorpamplona.magpie.publish) on the classpath, so build scripts apply that
+// one by id alone.
+plugins {
+    id("com.vitorpamplona.magpie") version "0.2.0"
+}
+
+magpie {
+    group("com.vitorpamplona.quartz")
+    group("com.vitorpamplona.crypto")
+    group("com.vitorpamplona.schnorr256k1")
+}
+
 dependencyResolutionManagement {
     repositories {
         google()

@@ -7,7 +7,8 @@ on:
 
 jobs:
   # A release must depend only on published artifacts: its POM names the Quartz and mls-kmp
-  # versions it was built against, so those have to be on Maven Central before this one can be.
+  # versions it was built against, so those have to be released (Quartz on Nostr + Blossom from
+  # 2.19.0, mls-kmp on Maven Central) before this one can be.
   check-dependencies:
     runs-on: ubuntu-latest
     steps:
@@ -18,7 +19,7 @@ jobs:
         run: |
           args=$(tools/ci/quartz-args.sh 2>/dev/null || echo missing)
           if [ -n "$args" ]; then
-            echo "::error::The Quartz version in gradle/libs.versions.toml is not on Maven Central. Release Quartz first."
+            echo "::error::The Quartz version in gradle/libs.versions.toml is not released. Release Quartz first."
             exit 1
           fi
 
@@ -121,7 +122,7 @@ jobs:
           generate_release_notes: true
 
   # The same publications on Nostr + Blossom, through Magpie's publishToNostr (the plugin version
-  # is in libs.versions.toml, the relays in gradle.properties), beside the Maven Central job and
+  # is in settings.gradle.kts, the relays in gradle.properties), beside the Maven Central job and
   # independent of it: Central's upload limit can fail one without holding back the other. It runs
   # the same checks first, uploads every file to the release key's Blossom servers (kind 10063)
   # and signs one release event (kind 3071) per published module, sent to the key's own relays
