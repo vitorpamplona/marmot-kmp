@@ -6,8 +6,6 @@ plugins {
     alias(libs.plugins.kotlinMultiplatform)
     alias(libs.plugins.androidKotlinMultiplatformLibrary)
     alias(libs.plugins.vanniktech.mavenPublish)
-    // Releases go to Nostr + Blossom: publishToNostr. Its relays come from gradle.properties (magpie.*).
-    alias(libs.plugins.magpiePublish)
 }
 
 // The raw QUIC binding of agent text stream previews (`transports/quic.md`), on quic-kmp. A module
@@ -94,7 +92,11 @@ mavenPublishing {
 
     // groupId and version come from the root gradle.properties, the artifactId from this
     // module's (marmot-quic), so a release publishes both artifacts at one version.
-    // Releases go to Nostr + Blossom only, through Magpie's publishToNostr (see :marmot).
+    publishToMavenCentral(automaticRelease = true)
+
+    if (providers.gradleProperty("signingInMemoryKey").isPresent) {
+        signAllPublications()
+    }
 
     pom {
         name = "Marmot QUIC: the raw QUIC binding of Marmot agent text streams"
