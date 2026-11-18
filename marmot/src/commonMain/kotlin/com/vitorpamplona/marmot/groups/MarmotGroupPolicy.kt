@@ -20,6 +20,7 @@
  */
 package com.vitorpamplona.marmot.groups
 
+import com.vitorpamplona.marmot.appComponents.AccountDevicesV1
 import com.vitorpamplona.marmot.appComponents.AdminPolicyV1
 import com.vitorpamplona.marmot.appComponents.AppComponentIds
 import com.vitorpamplona.marmot.appComponents.agentTextStream.AgentTextStreamQuicPolicyV1
@@ -91,8 +92,24 @@ object MarmotGroupPolicy : MlsGroupPolicy {
         proposals: List<PendingProposal>,
         committerLeafIndex: Int,
     ) {
+        AccountDevicesV1.validateProposals(group, proposals)
         enforceAuthorizedProposalSet(group, proposals, committerLeafIndex)
         enforceNoAdminDepletion(group, proposals)
+    }
+
+    /**
+     * The rules on what a commit produces: today those of
+     * `marmot.group.account-devices.v1` (never un-required, every leaf
+     * advertises it, at most 20 leaves per account, no `0x800d` data). They run
+     * for every commit, an admin's included, because they are about the state,
+     * not about who made it.
+     */
+    override fun validateResultingState(
+        parentExtensions: List<Extension>,
+        proposals: List<PendingProposal>,
+        resulting: GroupView,
+    ) {
+        AccountDevicesV1.validateResultingState(parentExtensions, proposals, resulting)
     }
 
     /**
@@ -120,6 +137,34 @@ object MarmotGroupPolicy : MlsGroupPolicy {
 
     override fun validateJoin(group: GroupView) {
         requireAgentTextStreamRoles(group)
+    }
+
+    /**
+     * `protocol-core/joining.md`, receiving flow steps 7 and 8: the joined
+     * state must satisfy the required components' invariants, and the Welcome's
+     * author — the GroupInfo signer, the member that committed our Add — must
+     * have been allowed to add us: an active admin of the resulting state, or,
+     * when that state requires `marmot.group.account-devices.v1`, a device of
+     * our own account.
+     *
+     * A group that names no admins at all (the MIP-01 bootstrap state) has no
+     * one to check against and is left open, as [enforceAuthorizedProposalSet]
+     * leaves it.
+     */
+    override fun validateJoin(
+        group: GroupView,
+        groupInfoSigner: Int,
+        groupInfoExtensions: List<Extension>,
+    ) {
+        validateJoin(group)
+        AccountDevicesV1.validateJoinedState(group, groupInfoExtensions)
+        val admins = adminIdentitiesIn(group.extensions)
+        if (admins.isEmpty()) return
+        val author = group.memberIdentityHex(groupInfoSigner)
+        val ownAccount = author != null && author == group.memberIdentityHex(group.myLeafIndex)
+        require(author in admins || (ownAccount && AccountDevicesV1.isRequired(group.extensions))) {
+            "The Welcome's author is not an active admin of the group it invites us to"
+        }
     }
 
     /**
@@ -160,13 +205,14 @@ object MarmotGroupPolicy : MlsGroupPolicy {
     fun isLocalAdmin(group: GroupView): Boolean = isLeafAdmin(group, group.myLeafIndex)
 
     /**
-     * MIP-03: a non-admin may commit only a single self-Update, or a set made
-     * entirely of their own SelfRemoves.
+     * `protocol-core/group-messaging.md`, "Commit authorization": a non-admin
+     * may commit only a self-update, a SelfRemove-only Commit, or — in a group
+     * whose parent state requires `marmot.group.account-devices.v1` — a
+     * same-account Commit; never a mix. [MarmotCommitClass] decides which, the
+     * same answer branch selection reads.
      *
-     * The "self-only" rule is checked against the committer; when the committer
-     * is an admin the rule is skipped entirely so admin-folded inbound proposals
-     * (e.g. another member's `SelfRemove` referenced by an admin's GCE commit)
-     * are accepted.
+     * An active admin may commit anything else its rules allow, including
+     * other members' SelfRemoves referenced into its own commit.
      */
     internal fun enforceAuthorizedProposalSet(
         group: GroupView,
@@ -181,19 +227,13 @@ object MarmotGroupPolicy : MlsGroupPolicy {
         val admins = adminIdentitiesIn(group.extensions)
         if (admins.isEmpty() || isLeafAdmin(group, committerLeafIndex)) return
 
-        val allSelfRemove =
-            proposals.all { it.proposal is Proposal.SelfRemove && it.senderLeafIndex == committerLeafIndex }
-        if (allSelfRemove) return
-
-        val singleSelfUpdate =
-            proposals.size == 1 &&
-                proposals[0].proposal is Proposal.Update &&
-                proposals[0].senderLeafIndex == committerLeafIndex
-        if (singleSelfUpdate) return
+        val commitClass = MarmotCommitClass.of(group, proposals, committerLeafIndex, hasUpdatePath = true)
+        if (!commitClass.requiresAdmin) return
 
         throw IllegalStateException(
-            "MIP-03: non-admin members may only commit a single self-Update or SelfRemove-only " +
-                "proposals; got ${proposals.map { it.proposal::class.simpleName }} from leaf $committerLeafIndex",
+            "MIP-03: non-admin members may only commit a self-update, SelfRemove-only proposals or, " +
+                "where account-devices is required, their own account's devices; got " +
+                "${proposals.map { it.proposal::class.simpleName }} from leaf $committerLeafIndex",
         )
     }
 

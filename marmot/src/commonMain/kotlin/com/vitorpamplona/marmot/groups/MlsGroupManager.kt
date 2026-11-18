@@ -20,6 +20,7 @@
  */
 package com.vitorpamplona.marmot.groups
 
+import com.vitorpamplona.marmot.appComponents.AccountDevicesV1
 import com.vitorpamplona.marmot.appComponents.AdminPolicyV1
 import com.vitorpamplona.marmot.appComponents.CurrentProfileGroupFactory
 import com.vitorpamplona.marmot.appComponents.GroupLifecycleV1
@@ -115,6 +116,12 @@ import kotlinx.coroutines.sync.withLock
  */
 class MlsGroupManager(
     private val store: MlsGroupStateStore,
+    /**
+     * The component ids this client supports, which its leaves advertise. The
+     * default is [CurrentProfileGroupFactory.SUPPORTED_COMPONENTS]; a test
+     * models an older client by passing fewer.
+     */
+    val supportedComponents: List<Int> = CurrentProfileGroupFactory.SUPPORTED_COMPONENTS,
 ) {
     private val mutex = Mutex()
     private val groups = mutableMapOf<HexKey, MlsGroup>()
@@ -459,11 +466,101 @@ class MlsGroupManager(
         keyPackagesBytes: List<ByteArray>,
     ): StagedCommit = stage(nostrGroupId) { it.addMembers(keyPackagesBytes) }
 
+    /**
+     * Stage the founding Add Commit, and — when [requireAccountDevices] — make
+     * the group require `marmot.group.account-devices.v1` in that same commit
+     * (`protocol-core/group-setup.md`: a supporting creator MUST require it
+     * when its own leaf and every founding KeyPackage advertise it).
+     *
+     * Epoch 0 never leaves this device — the founding Add has an empty publish
+     * obligation, and joiners learn epoch 1 from the Welcome — so requiring the
+     * component here is indistinguishable, to every peer, from a group created
+     * requiring it. The activation runs the engine's every-leaf check and the
+     * component's own resulting-state rules like any other.
+     */
+    suspend fun stageFoundingAdd(
+        nostrGroupId: HexKey,
+        keyPackagesBytes: List<ByteArray>,
+        requireAccountDevices: Boolean,
+    ): StagedCommit =
+        stage(nostrGroupId) { clone ->
+            keyPackagesBytes.forEach { clone.proposeAdd(it) }
+            if (requireAccountDevices) {
+                val required = ComponentsList.supportedOrRequired(clone.appDataDictionary()).toMutableSet()
+                required.add(AccountDevicesV1.COMPONENT_ID)
+                clone.proposeAppDataUpdate(ComponentsList.APP_COMPONENTS_ID, ComponentsList.encode(required))
+            }
+            clone.commit()
+        }
+
     /** Stage a Remove. See [StagedCommit] for why this does not apply. */
     suspend fun stageRemoveMember(
         nostrGroupId: HexKey,
         targetLeafIndex: Int,
     ): StagedCommit = stage(nostrGroupId) { it.removeMember(targetLeafIndex) }
+
+    /**
+     * Stage ONE Commit that removes every leaf in [targetLeafIndices], and,
+     * when [admins] is not null, replaces the admin policy with it in the same
+     * commit (the coupling rule in `app-components/admin-policy-v1.md`: a
+     * commit that removes an admin account's last leaf removes its key from
+     * `admins` too).
+     */
+    suspend fun stageRemoveMembers(
+        nostrGroupId: HexKey,
+        targetLeafIndices: Collection<Int>,
+        admins: List<HexKey>? = null,
+    ): StagedCommit {
+        require(targetLeafIndices.isNotEmpty()) { "stageRemoveMembers needs at least one leaf" }
+        return stage(nostrGroupId) { clone ->
+            targetLeafIndices.distinct().sorted().forEach { clone.proposeRemove(it) }
+            if (admins != null) clone.proposeAppDataUpdate(AdminPolicyV1.COMPONENT_ID, AdminPolicyV1.ofHex(admins).encode())
+            clone.commit()
+        }
+    }
+
+    /**
+     * Stage the activation Commit that makes the group require
+     * `marmot.group.account-devices.v1` (`account-devices-v1.md`, "Activation
+     * in an existing group"): it adds `0x800d` to the required list and nothing
+     * else. Only an active admin may commit it; [accountDevicesActivationBlockers]
+     * says why a group cannot take it yet.
+     */
+    suspend fun stageRequireAccountDevices(nostrGroupId: HexKey): StagedCommit {
+        requireAdminForExtensionChange(requireGroup(nostrGroupId))
+        val blocker = accountDevicesActivationBlocker(nostrGroupId)
+        check(blocker == null) { "Cannot require account-devices: $blocker" }
+        return stage(nostrGroupId) { clone ->
+            val required = ComponentsList.supportedOrRequired(clone.appDataDictionary()).toMutableSet()
+            required.add(AccountDevicesV1.COMPONENT_ID)
+            clone.proposeAppDataUpdate(ComponentsList.APP_COMPONENTS_ID, ComponentsList.encode(required))
+            clone.commit()
+        }
+    }
+
+    /**
+     * Why [nostrGroupId] cannot activate account-devices now, or null when it
+     * can: it already requires it, it is not a current-profile group, a leaf
+     * does not advertise it or carries a `0x800d` entry, the GroupContext
+     * carries one, or an account holds more leaves than the limit. Describes
+     * the group as a whole, never which member holds it back.
+     */
+    fun accountDevicesActivationBlocker(nostrGroupId: HexKey): String? {
+        val group = requireGroup(nostrGroupId)
+        val view = group.view()
+        if (AccountDevicesV1.isRequired(view.extensions)) return "the group already requires it"
+        if (!group.currentGroupState().isCurrentProfile) return "the group is not on the current profile"
+        if (group.appDataDictionary().contains(AccountDevicesV1.COMPONENT_ID)) return "the group carries 0x800d data"
+        val perAccount = mutableMapOf<HexKey, Int>()
+        for ((_, leaf) in group.members()) {
+            if (!AccountDevicesV1.isAdvertisedBy(leaf)) return "a member does not advertise it"
+            if (AppDataDictionary.fromExtensionsOrEmpty(leaf.extensions).contains(AccountDevicesV1.COMPONENT_ID)) return "a member's leaf carries 0x800d data"
+            val account = AccountDevicesV1.accountOf(leaf) ?: continue
+            perAccount[account] = (perAccount[account] ?: 0) + 1
+        }
+        if (perAccount.values.any { it > AccountDevicesV1.MAX_LEAVES_PER_ACCOUNT }) return "an account has more than ${AccountDevicesV1.MAX_LEAVES_PER_ACCOUNT} devices in it"
+        return null
+    }
 
     /**
      * Refuse a GroupContextExtensions change from a non-admin.
@@ -591,7 +688,7 @@ class MlsGroupManager(
         if (!group.currentGroupState().isCurrentProfile) return emptySet()
         val mine = group.members().firstOrNull { it.first == group.leafIndex }?.second ?: return emptySet()
         val advertised = leafSupportedComponents(mine)
-        return CurrentProfileGroupFactory.SUPPORTED_COMPONENTS.filterNot { it in advertised }.toSet()
+        return supportedComponents.filterNot { it in advertised }.toSet()
     }
 
     /**
@@ -612,7 +709,7 @@ class MlsGroupManager(
             val refreshed =
                 dictionary.with(
                     ComponentsList.APP_COMPONENTS_ID,
-                    ComponentsList.encode((leafSupportedComponents(mine) + CurrentProfileGroupFactory.SUPPORTED_COMPONENTS).toList()),
+                    ComponentsList.encode((leafSupportedComponents(mine) + supportedComponents).toList()),
                 )
             val extensions =
                 mine.extensions.filterNot { it.extensionType == AppDataDictionary.EXTENSION_TYPE } + refreshed.toExtension()

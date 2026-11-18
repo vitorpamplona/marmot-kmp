@@ -48,6 +48,18 @@ class ScenarioVector(
     val pendingResolutions: List<PendingResolution> = emptyList(),
     val quiescentClients: List<String> = emptyList(),
     val unmodelledOutcomes: List<UnmodelledOutcome> = emptyList(),
+    /** `account_devices_state`: whether each client's group requires `0x800d`. */
+    val accountDevicesStates: List<AccountDevicesState> = emptyList(),
+    /** `clients_exactly_equivalent`: sets of clients that must hold the very same epoch state. */
+    val equivalentClients: List<List<String>> = emptyList(),
+    /** `expected_error`: an operation a step expects to be refused, and why. */
+    val expectedErrors: List<ExpectedError> = emptyList(),
+    /**
+     * Client -> account, from `scenario.topology.devices`. Two clients of one
+     * account are two devices sharing the account key. A client the topology
+     * does not list is its own account.
+     */
+    val accountOf: Map<String, String> = emptyMap(),
 ) {
     class Step(
         val type: String,
@@ -56,6 +68,8 @@ class ScenarioVector(
         fun string(key: String): String? = (raw[key] as? JsonPrimitive)?.takeIf { it.isString }?.content
 
         fun int(key: String): Int? = (raw[key] as? JsonPrimitive)?.content?.toIntOrNull()
+
+        fun bool(key: String): Boolean? = (raw[key] as? JsonPrimitive)?.takeIf { !it.isString }?.content?.toBooleanStrictOrNull()
 
         fun strings(key: String): List<String> =
             (raw[key] as? JsonArray)
@@ -128,6 +142,18 @@ class ScenarioVector(
         val resolution: String,
     )
 
+    class AccountDevicesState(
+        val client: String,
+        val required: Boolean,
+    )
+
+    class ExpectedError(
+        val stepIndex: Int,
+        val client: String,
+        val operation: String,
+        val error: String,
+    )
+
     /** The outcome types this runner has no check for, named so it can refuse. */
     class UnmodelledOutcome(
         val type: String,
@@ -160,6 +186,9 @@ class ScenarioVector(
             val resolutions = mutableListOf<PendingResolution>()
             val quiescent = mutableListOf<String>()
             val unmodelled = mutableListOf<UnmodelledOutcome>()
+            val accountDevices = mutableListOf<AccountDevicesState>()
+            val equivalent = mutableListOf<List<String>>()
+            val errors = mutableListOf<ExpectedError>()
 
             outcomes.forEach { element ->
                 val obj = element as JsonObject
@@ -210,6 +239,37 @@ class ScenarioVector(
                             quiescent.add((it as JsonPrimitive).content)
                         }
 
+                    // A joiner may keep the Commit that made the epoch it
+                    // joined at; nothing else may wait. Our joiner retains no
+                    // such Commit, so it is held to plain quiescence.
+                    "no_pending_work_except_retained_join_commit" ->
+                        quiescent.add(obj.getValue("client").jsonPrimitive.content)
+
+                    "account_devices_state" ->
+                        accountDevices.add(
+                            AccountDevicesState(
+                                client = obj.getValue("client").jsonPrimitive.content,
+                                required = obj.getValue("required").jsonPrimitive.content == "true",
+                            ),
+                        )
+
+                    "clients_exactly_equivalent" ->
+                        equivalent.add((obj["clients"] as? JsonArray).orEmpty().map { (it as JsonPrimitive).content })
+
+                    "expected_error" ->
+                        errors.add(
+                            ExpectedError(
+                                stepIndex =
+                                    obj
+                                        .getValue("step_index")
+                                        .jsonPrimitive.content
+                                        .toInt(),
+                                client = obj.getValue("client").jsonPrimitive.content,
+                                operation = obj.getValue("operation").jsonPrimitive.content,
+                                error = obj.getValue("error").jsonPrimitive.content,
+                            ),
+                        )
+
                     else ->
                         unmodelled.add(
                             UnmodelledOutcome((obj["type"] as? JsonPrimitive)?.content.orEmpty()),
@@ -226,6 +286,18 @@ class ScenarioVector(
                 pendingResolutions = resolutions,
                 quiescentClients = quiescent,
                 unmodelledOutcomes = unmodelled,
+                accountDevicesStates = accountDevices,
+                equivalentClients = equivalent,
+                expectedErrors = errors,
+                accountOf =
+                    ((scenario["topology"] as? JsonObject)?.get("devices") as? JsonArray)
+                        .orEmpty()
+                        .mapNotNull { device ->
+                            val obj = device as? JsonObject ?: return@mapNotNull null
+                            val client = (obj["client"] as? JsonPrimitive)?.content ?: return@mapNotNull null
+                            val account = (obj["account"] as? JsonPrimitive)?.content ?: return@mapNotNull null
+                            client to account
+                        }.toMap(),
             )
         }
 

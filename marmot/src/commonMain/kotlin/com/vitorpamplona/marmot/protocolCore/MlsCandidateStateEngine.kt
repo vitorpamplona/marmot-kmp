@@ -21,6 +21,7 @@
 package com.vitorpamplona.marmot.protocolCore
 
 import com.vitorpamplona.crypto.sha2.sha256
+import com.vitorpamplona.marmot.groups.MarmotCommitClass
 import com.vitorpamplona.marmot.groups.MarmotGroupPolicy
 import com.vitorpamplona.marmot.groups.currentAdminIdentities
 import com.vitorpamplona.marmot.groups.currentGroupState
@@ -28,10 +29,12 @@ import com.vitorpamplona.mls.codec.TlsReader
 import com.vitorpamplona.mls.framing.ContentType
 import com.vitorpamplona.mls.framing.MlsMessage
 import com.vitorpamplona.mls.framing.PublicMessage
+import com.vitorpamplona.mls.framing.SenderType
 import com.vitorpamplona.mls.framing.WireFormat
 import com.vitorpamplona.mls.group.MlsGroup
 import com.vitorpamplona.mls.group.MlsGroupPolicy
 import com.vitorpamplona.mls.group.MlsGroupState
+import com.vitorpamplona.mls.messages.Commit
 import com.vitorpamplona.quartz.nip01Core.core.toHexKey
 
 /**
@@ -149,9 +152,14 @@ class MlsCandidateStateEngine(
         return try {
             val group = MlsGroup.restore(parent, policy)
             // Privileged exactly when the rule that applies REQUIRES an active
-            // admin. A commit a non-admin could also have made is ordinary even
-            // when an admin happened to send it.
-            if (group.isSelfOnlyCommit(pubMsg)) TipPriority.ORDINARY else TipPriority.PRIVILEGED
+            // admin. A commit a non-admin could also have made — a self-update,
+            // a SelfRemove-only commit, a same-account commit — is ordinary
+            // even when an admin happened to send it.
+            if (pubMsg.sender.senderType != SenderType.MEMBER) return TipPriority.PRIVILEGED
+            val proposals = group.resolveCommitProposals(pubMsg) ?: return TipPriority.PRIVILEGED
+            val hasUpdatePath = Commit.decodeTls(TlsReader(pubMsg.content)).updatePath != null
+            val commitClass = MarmotCommitClass.of(group.view(), proposals, pubMsg.sender.leafIndex, hasUpdatePath)
+            if (commitClass.isPrivileged) TipPriority.PRIVILEGED else TipPriority.ORDINARY
         } catch (_: Exception) {
             TipPriority.ORDINARY
         }

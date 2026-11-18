@@ -187,6 +187,41 @@ class MarmotScenarioVectorTest {
     }
 
     /**
+     * `marmot.group.account-devices.v1`: founders that all support it get a
+     * group that requires it, and a device then removes another device of its
+     * own account without being an admin.
+     */
+    @Test
+    fun accountDevicesFounding() = replay("account-devices-founding.v1.json")
+
+    /** An admin activates it in an existing group once every leaf advertises it. */
+    @Test
+    fun accountDevicesActivation() = replay("account-devices-activation.v1.json")
+
+    /** Activation is refused while a member's leaf lacks support, and allowed after its self-update. */
+    @Test
+    fun accountDevicesActivationNeedsSupport() = replay("account-devices-activation-needs-support.v1.json")
+
+    /**
+     * The three account-devices vectors that race two commits conclude with
+     * a `convergence_decision`, which the runner does not model (see
+     * [aConvergenceDecisionIsStillUnmodelled]). What they test — that a
+     * same-account commit is `ordinary` and an admin's removal `privileged` —
+     * is checked directly in `MarmotAccountDevicesTest`.
+     */
+    @Test
+    fun accountDevicesRacesNeedAConvergenceDecision() {
+        listOf(
+            "account-devices-activation-loses-to-unsupported-invite.v1.json",
+            "account-devices-activation-wins-over-unsupported-invite.v1.json",
+            "account-devices-own-device-removal-loses-to-admin-remove.v1.json",
+        ).forEach { name ->
+            val thrown = assertFailsWith<UnsupportedScenarioOutcome>(name) { runBlocking { MarmotScenarioRunner(load(name)).run() } }
+            assertEquals("convergence_decision", thrown.outcomeType)
+        }
+    }
+
+    /**
      * Every vector must parse to at least one thing to check.
      *
      * Two expectation shapes ship in this set — `expected_trace.observations`
@@ -210,12 +245,12 @@ class MarmotScenarioVectorTest {
     fun theVectorsAreTheOnesTheShippingAppsEmbed() {
         // A vector refreshed from tip would test us against an engine nobody
         // runs. The copies here come from the commit both White Noise clients
-        // pin, and their own `conformance_version` is what says so.
-        val vector = load("three-client-message-exchange.v1.json")
-        assertTrue(
-            vector.conformanceVersion.startsWith("0.9."),
-            "unexpected conformance version ${vector.conformanceVersion}",
-        )
+        // pin (MDK v0.17.0, 4df811ae), and their own `conformance_version` is
+        // what says so.
+        VECTORS.forEach { name ->
+            val vector = load(name)
+            assertEquals("0.17.0", vector.conformanceVersion, "$name has conformance version ${vector.conformanceVersion}")
+        }
     }
 
     private companion object {
@@ -240,6 +275,12 @@ class MarmotScenarioVectorTest {
                 "readd-after-eviction.v1.json",
                 "restart-delivery-faults.v1.json",
                 "leaver-removal-secrecy.v1.json",
+                "account-devices-founding.v1.json",
+                "account-devices-activation.v1.json",
+                "account-devices-activation-needs-support.v1.json",
+                "account-devices-activation-loses-to-unsupported-invite.v1.json",
+                "account-devices-activation-wins-over-unsupported-invite.v1.json",
+                "account-devices-own-device-removal-loses-to-admin-remove.v1.json",
             )
     }
 }

@@ -3,7 +3,9 @@
 Copied verbatim from the reference implementation:
 `marmot-protocol/mdk`, `crates/cgka-conformance-simulator/vectors/`, at the
 commit the shipping White Noise apps embed
-(`2f44f6b65a19f8818644ccd7027618ba91450c33`, `marmotkit-v0.9.20`).
+(`4df811aea99269b437a6023be9446a5141e93cbe`, MDK v0.17.0 / `marmotkit-v0.17.0`).
+Between `marmotkit-v0.9.20` and v0.17.0 the older vectors changed only their
+`conformance_version`; v0.15.0 added the six `account-devices-*` scenarios.
 
 Their `manifest.v1.json` marks 31 artifacts `portable` — meaning they are
 meant to be replayed by an implementation that is not theirs. Three are byte
@@ -16,7 +18,10 @@ These sixteen are the subset whose steps `MarmotScenarioRunner` implements:
 `update_group_data`, `deliver_all`, `tick`, `acknowledge_outbound`, `observe`,
 `in_group`, `assert`, `clear_events`, and the queue faults `omit_message`,
 `duplicate_message`, `reorder_messages`, `withhold_message`,
-`release_withheld`. The rest need `restart_client`, `set_partition`, `leave`,
+`release_withheld`, and the account-devices steps `set_account_devices_support`,
+`self_update`, `require_account_devices`, `expect_require_account_devices_error`
+and `remove_own_account_devices` (clients of one `topology` account share its
+key). The rest need `restart_client`, `set_partition`, `leave`,
 admin-policy steps, or the `convergence_decision` outcome; the runner refuses
 them by name rather than skipping quietly, so adding a step type is what
 widens the set.
@@ -39,8 +44,9 @@ having compared nothing. `MarmotScenarioVectorTest.everyVectorStatesSomethingToC
 exists to make that failure loud rather than invisible.
 
 An outcome type the runner cannot evaluate raises `UnsupportedScenarioOutcome`
-and the vector is refused — `convergence-committer-selected` is refused today
-for exactly that reason.
+and the vector is refused — `convergence-committer-selected` and the three
+account-devices races (`*-loses-to-*`, `*-wins-over-*`) are refused today for
+exactly that reason (`convergence_decision`).
 
 ## Refreshing
 

@@ -86,6 +86,12 @@ object CurrentProfileGroupFactory {
             AppComponentIds.ACCOUNT_IDENTITY_PROOF_V2,
             AppComponentIds.GROUP_ENCRYPTED_MEDIA_V2,
             AppComponentIds.GROUP_LIFECYCLE_V1,
+            // `0x800d` account-devices: enforced by `MarmotGroupPolicy` through
+            // `AccountDevicesV1` (same-account commits, the support invariant,
+            // the 20-leaf limit, no data, never un-required). MDK refuses to
+            // invite a KeyPackage without it into a group that requires it, and
+            // every group its users create requires it when they all support it.
+            AppComponentIds.ACCOUNT_DEVICES_V1,
             // `0x8006` agent-text-stream-QUIC is a SUPPORT claim, not a
             // running service. Nothing in the app dials a broker — see
             // `marmotQuic/README.md` — but the reference client puts this
@@ -200,9 +206,11 @@ object CurrentProfileGroupFactory {
         encryptedMedia: EncryptedMediaPolicyV2? = null,
         agentTextStream: AgentTextStreamQuicPolicyV1? = null,
         ciphersuite: MlsCiphersuite = MlsCiphersuite.DEFAULT,
+        /** The component ids the creator's leaf advertises. */
+        supportedComponents: List<Int> = SUPPORTED_COMPONENTS,
     ): MlsGroup {
         val identity = signer.pubKey.hexToByteArray()
-        val leaf = newLeafIdentity(signer, ciphersuite)
+        val leaf = newLeafIdentity(signer, ciphersuite, supportedComponents)
 
         val dictionary =
             MarmotGroupState.buildDictionary(

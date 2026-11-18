@@ -69,6 +69,8 @@ import kotlinx.coroutines.sync.withLock
  */
 class KeyPackageRotationManager(
     private val store: KeyPackageBundleStore? = null,
+    /** The component ids the KeyPackages this manager mints advertise. */
+    private val supportedComponents: List<Int> = CurrentProfileGroupFactory.SUPPORTED_COMPONENTS,
 ) {
     private val mutex = Mutex()
     private val activeBundles = mutableMapOf<String, KeyPackageBundle>()
@@ -485,7 +487,7 @@ class KeyPackageRotationManager(
         dTagSlot: String = KeyPackageUtils.PRIMARY_SLOT,
         ciphersuite: MlsCiphersuite = MlsCiphersuite.DEFAULT,
     ): KeyPackageBundle {
-        val bundle = CurrentProfileGroupFactory.createKeyPackage(signer, ciphersuite = ciphersuite)
+        val bundle = CurrentProfileGroupFactory.createKeyPackage(signer, ciphersuite = ciphersuite, supportedComponents = supportedComponents)
         mutex.withLock {
             installIntoSlotUnlocked(dTagSlot, bundle)
             persistUnlocked()

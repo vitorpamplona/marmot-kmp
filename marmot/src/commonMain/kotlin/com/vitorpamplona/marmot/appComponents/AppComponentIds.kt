@@ -115,6 +115,9 @@ object AppComponentIds {
     /** `marmot.group.lifecycle.v1` — active/disbanded. */
     const val GROUP_LIFECYCLE_V1 = 0x800c
 
+    /** `marmot.group.account-devices.v1` — same-account Adds and Removes; carries no data. See `AccountDevicesV1`. */
+    const val ACCOUNT_DEVICES_V1 = 0x800d
+
     /**
      * The `0x` + four-lowercase-hex-digit rendering used wherever a component
      * id appears as text: the kind-30443 `app_components` tag values, and the
