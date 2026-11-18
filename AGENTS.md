@@ -154,4 +154,8 @@ Release Quartz first if this version needs a new one. Bump `VERSION_NAME` in `gr
 then push a `v<version>` tag. `create-release.yml` refuses to publish against an unpublished Quartz,
 runs the Apple tests on macOS, then the checks, publishes to Maven Central and opens the GitHub
 release. It needs `SONATYPE_USERNAME`, `SONATYPE_PASSWORD`, `SIGNING_PRIVATE_KEY` and
-`SIGNING_PASSWORD`, the same secrets as Quartz.
+`SIGNING_PASSWORD`, the same secrets as Quartz. The workflow's `nostr` job publishes the same files to Nostr + Blossom with Magpie's
+`publishToNostr`, independently of Maven Central, so either can be re-run alone. It needs the
+signing secrets and `MAGPIE_BUNKER`, a NIP-46 `bunker://` URI for the release key that
+`vitorpamplona.com/.well-known/nostr.json` names as `releases`; the signer approves each release,
+and a version already on Nostr fails the job.
