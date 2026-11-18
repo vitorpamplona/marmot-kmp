@@ -10,6 +10,7 @@ kotlin = "2.4.21"
 kotlinxCoroutines = "1.11.0"
 kotlinxSerialization = "1.12.0"
 mavenPublish = "0.37.0"
+magpie = "0.2.0"
 # RFC 9420 MLS engine (vitorpamplona/mls-kmp). Quartz no longer depends on it (2.3.0 dropped the
 # Marmot engine), so it moves on its own. 1.3.0 is its next release; until that is on Maven
 # Central, build against a checkout with -PmlsKmpDir=../mls-kmp (tools/ci/mls-kmp-args.sh does
@@ -47,3 +48,4 @@ kotlinJvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
 kotlinMultiplatform = { id = "org.jetbrains.kotlin.multiplatform", version.ref = "kotlin" }
 serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
 vanniktech-mavenPublish = { id = "com.vanniktech.maven.publish", version.ref = "mavenPublish" }
+magpiePublish = { id = "com.vitorpamplona.magpie.publish", version.ref = "magpie" }
