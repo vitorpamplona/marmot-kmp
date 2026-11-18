@@ -5,12 +5,11 @@ android-minSdk = "26"
 composeRuntimeAnnotation = "1.12.1"
 # SHA, HMAC, HKDF, AES, ChaCha20, X25519, Ed25519 (vitorpamplona/crypto-kmp). Keep it at the newer of
 # the versions Quartz and mls-kmp depend on, which is the one Gradle resolves anyway.
-cryptoKmp = "2.1.0"
+cryptoKmp = "2.1.1"
 kotlin = "2.4.21"
 kotlinxCoroutines = "1.11.0"
 kotlinxSerialization = "1.12.0"
 mavenPublish = "0.37.0"
-magpie = "0.2.0"
 # RFC 9420 MLS engine (vitorpamplona/mls-kmp). Quartz no longer depends on it (2.3.0 dropped the
 # Marmot engine), so it moves on its own. 1.3.0 is its next release; until that is on Maven
 # Central, build against a checkout with -PmlsKmpDir=../mls-kmp (tools/ci/mls-kmp-args.sh does
@@ -18,7 +17,8 @@ magpie = "0.2.0"
 mlsKmp = "1.3.0"
 # The Nostr protocol library (vitorpamplona/quartz). 2.3.0 is the first release without the Marmot engine;
 # until it is on Maven Central, build against a checkout with -PquartzDir=../quartz.
-quartzKmp = "2.7.3"
+# 2.19.0 is the first Quartz on Nostr + Blossom only (settings.gradle.kts).
+quartzKmp = "2.19.0"
 # Pure-Kotlin QUIC client (vitorpamplona/quic-kmp), for :marmot-quic only. JVM and Android only.
 quicKmp = "1.2.0"
 # The JNI bindings tests load must match the secp256k1-kmp version Quartz is built against.
@@ -48,4 +48,3 @@ kotlinJvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
 kotlinMultiplatform = { id = "org.jetbrains.kotlin.multiplatform", version.ref = "kotlin" }
 serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
 vanniktech-mavenPublish = { id = "com.vanniktech.maven.publish", version.ref = "mavenPublish" }
-magpiePublish = { id = "com.vitorpamplona.magpie.publish", version.ref = "magpie" }

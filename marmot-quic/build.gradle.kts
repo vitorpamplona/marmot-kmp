@@ -7,7 +7,7 @@ plugins {
     alias(libs.plugins.androidKotlinMultiplatformLibrary)
     alias(libs.plugins.vanniktech.mavenPublish)
     // Releases also go to Nostr + Blossom: publishToNostr. Its relays come from gradle.properties (magpie.*).
-    alias(libs.plugins.magpiePublish)
+    id("com.vitorpamplona.magpie.publish")
 }
 
 // The raw QUIC binding of agent text stream previews (`transports/quic.md`), on quic-kmp. A module
