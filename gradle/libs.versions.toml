@@ -11,7 +11,9 @@ kotlinxCoroutines = "1.11.0"
 kotlinxSerialization = "1.12.0"
 mavenPublish = "0.37.0"
 # RFC 9420 MLS engine (vitorpamplona/mls-kmp), on Nostr + Blossom from 1.3.1 (settings.gradle.kts).
-mlsKmp = "1.3.1"
+# 1.4.0 adds the policy hooks this branch needs (validateResultingState, the GroupInfo signer in
+# validateJoin); until it is tagged, tools/ci/mls-kmp-args.sh builds against an mls-kmp checkout.
+mlsKmp = "1.4.0"
 # The Nostr protocol library (vitorpamplona/quartz), on Nostr + Blossom only since 2.19.0
 # (settings.gradle.kts).
 quartzKmp = "2.20.0"
