@@ -13,7 +13,7 @@ pluginManagement {
 // the publish plugin (com.vitorpamplona.magpie.publish) on the classpath, so build scripts apply that
 // one by id alone.
 plugins {
-    id("com.vitorpamplona.magpie") version "0.2.2"
+    id("com.vitorpamplona.magpie") version "0.2.3"
 }
 
 magpie {

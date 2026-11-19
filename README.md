@@ -31,7 +31,7 @@ it writes; Gradle has to run on Java 21 or newer:
 
 ```kotlin
 plugins {
-    id("com.vitorpamplona.magpie") version "0.2.2"
+    id("com.vitorpamplona.magpie") version "0.2.3"
 }
 
 magpie {
