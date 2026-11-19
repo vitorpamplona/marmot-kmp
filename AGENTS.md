@@ -1,8 +1,9 @@
 # Marmot KMP
 
 Marmot (MLS group messaging over Nostr, the `MIP-00`…`MIP-05` specs) as a Kotlin Multiplatform
-library for JVM, Android, iOS, macOS and Linux, published to Maven Central as
-`com.vitorpamplona.marmot:marmot`. It is built on [Quartz](https://github.com/vitorpamplona/quartz)
+library for JVM, Android, iOS, macOS and Linux, published as `com.vitorpamplona.marmot:marmot` on
+Nostr + Blossom through [Magpie](https://github.com/vitorpamplona/magpie) (Maven Central up to
+2.2.1). It is built on [Quartz](https://github.com/vitorpamplona/quartz)
 (events, signers, NIP-44/NIP-59, the relay client) and the RFC 9420 engine
 [mls-kmp](https://github.com/vitorpamplona/mls-kmp), and is used by
 [Amethyst](https://github.com/vitorpamplona/amethyst), its desktop app and the `amy` CLI.
@@ -46,8 +47,12 @@ checked against MDK, the reference implementation (<https://github.com/marmot-pr
   Not published.
 - `gradle/kmp-purity.gradle.kts`: the `verifyKmpPurity` task, the same file as Quartz's.
 - `tools/ci/quartz-args.sh`: points the build at a Quartz checkout while the pinned Quartz release is
-  not on Maven Central yet (CI and the pre-push hook call it). `tools/ci/mls-kmp-args.sh` does the
-  same for mls-kmp.
+  not out yet (CI and the pre-push hook call it). `tools/ci/mls-kmp-args.sh` does the same for
+  mls-kmp. Both count a GitHub tag as released.
+- Quartz, mls-kmp, crypto-kmp, negentropy-kmp, libschnorr256k1-kotlin, quic-kmp and this library are
+  released on Nostr + Blossom: the Magpie settings plugin (`settings.gradle.kts`) serves their
+  groups, and `gradle/magpie.lock` pins their release key and files. Commit the lock's changes;
+  a lock failure means a key or a release changed, so ask before editing it.
 
 ## Rules
 
@@ -102,7 +107,7 @@ it before stating it: write the failing case first, watch it fail, then explain.
 ./gradlew :marmot:iosSimulatorArm64Test         # macOS only
 ```
 
-Until the Quartz version in `gradle/libs.versions.toml` is on Maven Central, add
+Until the Quartz version in `gradle/libs.versions.toml` is released, add
 `-PquartzDir=../quartz` (a checkout beside this repo); `-PmlsKmpDir` and `-PcryptoKmpDir` work the
 same way, and so does `-PquicKmpDir`. To try a change in Amethyst, build Amethyst with
 `-PmarmotKmpDir=../marmot-kmp` (it substitutes both `marmot` and `marmot-quic`).
@@ -150,12 +155,11 @@ asks, and before opening, revising or merging one by either path, use the `ngit-
 
 ## Releasing
 
-Release Quartz first if this version needs a new one. Bump `VERSION_NAME` in `gradle.properties`,
-then push a `v<version>` tag. `create-release.yml` refuses to publish against an unpublished Quartz,
-runs the Apple tests on macOS, then the checks, publishes to Maven Central and opens the GitHub
-release. It needs `SONATYPE_USERNAME`, `SONATYPE_PASSWORD`, `SIGNING_PRIVATE_KEY` and
-`SIGNING_PASSWORD`, the same secrets as Quartz. The workflow's `nostr` job publishes the same files to Nostr + Blossom with Magpie's
-`publishToNostr`, independently of Maven Central, so either can be re-run alone. It needs the
-signing secrets and `MAGPIE_BUNKER`, a NIP-46 `bunker://` URI for the release key that
+Release Quartz and mls-kmp first if this version needs new ones. Bump `VERSION_NAME` in
+`gradle.properties`, then push a `v<version>` tag. `create-release.yml` refuses to publish against
+an unreleased Quartz or mls-kmp, runs the Apple tests on macOS, then its `nostr` job runs the
+checks, publishes to Nostr + Blossom with Magpie's `publishToNostr` and opens the GitHub release.
+Releases are on Nostr + Blossom only. It needs `SIGNING_PRIVATE_KEY`, `SIGNING_PASSWORD` and
+`MAGPIE_BUNKER`, a NIP-46 `bunker://` URI for the release key that
 `vitorpamplona.com/.well-known/nostr.json` names as `releases`; the signer approves each release,
 and a version already on Nostr fails the job.
