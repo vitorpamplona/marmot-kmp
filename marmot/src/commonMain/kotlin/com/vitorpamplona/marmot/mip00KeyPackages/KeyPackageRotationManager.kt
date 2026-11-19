@@ -72,6 +72,10 @@ class KeyPackageRotationManager(
     /** The component ids the KeyPackages this manager mints advertise. */
     private val supportedComponents: List<Int> = CurrentProfileGroupFactory.SUPPORTED_COMPONENTS,
 ) {
+    /** The 2.x constructor, kept so code compiled against it still links. */
+    @Deprecated("Use the constructor with supportedComponents. Removed in 3.0.0.", level = DeprecationLevel.HIDDEN)
+    constructor(store: KeyPackageBundleStore? = null) : this(store, CurrentProfileGroupFactory.SUPPORTED_COMPONENTS)
+
     private val mutex = Mutex()
     private val activeBundles = mutableMapOf<String, KeyPackageBundle>()
     private val pendingRotations = mutableSetOf<String>()

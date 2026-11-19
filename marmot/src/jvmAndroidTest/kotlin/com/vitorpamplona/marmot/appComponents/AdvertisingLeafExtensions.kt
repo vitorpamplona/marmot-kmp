@@ -24,6 +24,10 @@ import com.vitorpamplona.mls.components.AppDataDictionary
 import com.vitorpamplona.mls.components.ComponentData
 import com.vitorpamplona.mls.components.ComponentsList
 import com.vitorpamplona.mls.tree.Extension
+import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
+import com.vitorpamplona.quartz.nip01Core.crypto.KeyPair
+import com.vitorpamplona.quartz.nip01Core.signers.NostrSignerInternal
+import kotlinx.coroutines.runBlocking
 
 /**
  * A leaf `app_data_dictionary` advertising every component this client supports.
@@ -36,3 +40,16 @@ internal fun advertisingLeafExtensions(): List<Extension> =
             listOf(ComponentData(ComponentsList.APP_COMPONENTS_ID, ComponentsList.encode(CurrentProfileGroupFactory.SUPPORTED_COMPONENTS))),
         ).toExtension(),
     )
+
+/**
+ * A test account with a real key, so the leaves it makes carry a valid account
+ * identity proof (`0x8009`): a current-profile group refuses a leaf without
+ * one, as MDK does.
+ */
+internal class TestAccount {
+    val signer = NostrSignerInternal(KeyPair())
+    val identity: ByteArray = signer.pubKey.hexToByteArray()
+
+    /** A fresh leaf signature key this account authorized, and a leaf dictionary advertising every supported component. */
+    fun provenLeaf(): CurrentProfileGroupFactory.LeafIdentity = runBlocking { CurrentProfileGroupFactory.newLeafIdentity(signer) }
+}

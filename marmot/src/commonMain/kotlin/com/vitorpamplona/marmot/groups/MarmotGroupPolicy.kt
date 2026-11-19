@@ -23,10 +23,13 @@ package com.vitorpamplona.marmot.groups
 import com.vitorpamplona.marmot.appComponents.AccountDevicesV1
 import com.vitorpamplona.marmot.appComponents.AdminPolicyV1
 import com.vitorpamplona.marmot.appComponents.AppComponentIds
+import com.vitorpamplona.marmot.appComponents.MarmotProtocolProfile
+import com.vitorpamplona.marmot.appComponents.accountIdentityProof.AccountIdentityProofV2
 import com.vitorpamplona.marmot.appComponents.agentTextStream.AgentTextStreamQuicPolicyV1
 import com.vitorpamplona.marmot.groups.MarmotCapabilities
 import com.vitorpamplona.marmot.mip01Groups.MarmotGroupData
 import com.vitorpamplona.mls.components.AppDataDictionary
+import com.vitorpamplona.mls.components.ComponentsList
 import com.vitorpamplona.mls.group.GroupView
 import com.vitorpamplona.mls.group.MlsExporterLabel
 import com.vitorpamplona.mls.group.MlsGroupPolicy
@@ -93,23 +96,121 @@ object MarmotGroupPolicy : MlsGroupPolicy {
         committerLeafIndex: Int,
     ) {
         AccountDevicesV1.validateProposals(group, proposals)
+        rejectAdminSelfRemoves(group, proposals)
         enforceAuthorizedProposalSet(group, proposals, committerLeafIndex)
         enforceNoAdminDepletion(group, proposals)
     }
 
     /**
-     * The rules on what a commit produces: today those of
-     * `marmot.group.account-devices.v1` (never un-required, every leaf
-     * advertises it, at most 20 leaves per account, no `0x800d` data). They run
-     * for every commit, an admin's included, because they are about the state,
-     * not about who made it.
+     * The rules on what a commit produces. They run for every commit, an
+     * admin's included, because they are about the state, not about who made
+     * it:
+     *
+     * - `marmot.group.account-devices.v1` (never un-required, every leaf
+     *   advertises it, at most 20 leaves per account, no `0x800d` data);
+     * - the account identity proof (`0x8009`) of every leaf the commit
+     *   introduces, in a current-profile group, and that the group stays on
+     *   that profile;
+     * - the admin–leaf coupling of `app-components/admin-policy-v1.md`: every
+     *   admin the resulting state names still holds a leaf.
      */
     override fun validateResultingState(
         parentExtensions: List<Extension>,
         proposals: List<PendingProposal>,
+        committerLeafIndex: Int,
         resulting: GroupView,
     ) {
         AccountDevicesV1.validateResultingState(parentExtensions, proposals, resulting)
+        validateIntroducedLeafProofs(parentExtensions, proposals, committerLeafIndex, resulting)
+        validateAdminLeafCoupling(parentExtensions, resulting)
+    }
+
+    /**
+     * `foundation/identity.md`, as MDK's `validate_staged_commit_account_identity_proofs`
+     * applies it on every send, ingest and convergence replay: in a
+     * current-profile group every LeafNode a commit introduces carries a valid
+     * `marmot.member.account-identity-proof.v2` bound to its credential and
+     * signature key. That is each Add's KeyPackage leaf, each Update's leaf and
+     * the committer's leaf (its UpdatePath leaf, or an external joiner's).
+     *
+     * Without it the credential identity is only a claim: a member holding a
+     * leaf's MLS signing key could add a leaf naming any account, and since a
+     * same-account Add needs no admin, a leaf of account A could add a rogue
+     * "A" that every MDK member refuses and we would accept.
+     */
+    private fun validateIntroducedLeafProofs(
+        parentExtensions: List<Extension>,
+        proposals: List<PendingProposal>,
+        committerLeafIndex: Int,
+        resulting: GroupView,
+    ) {
+        if (!MarmotProtocolProfile.isCurrent(parentExtensions)) return
+        check(MarmotProtocolProfile.isCurrent(resulting.extensions)) { "A commit may not take a group off the current profile" }
+        for (pending in proposals) {
+            when (val proposal = pending.proposal) {
+                is Proposal.Add -> {
+                    val keyPackage = proposal.keyPackage
+                    val ciphersuite = AccountIdentityProofV2.ciphersuiteOf(keyPackage) ?: throw IllegalStateException("An added KeyPackage uses an unknown ciphersuite")
+                    AccountIdentityProofV2.leafProblem(keyPackage.leafNode, ciphersuite)?.let { throw IllegalStateException("Add proposal: $it") }
+                }
+
+                is Proposal.Update -> {
+                    AccountIdentityProofV2.leafProblem(proposal.leafNode)?.let { throw IllegalStateException("Update proposal: $it") }
+                }
+
+                else -> {}
+            }
+        }
+        val committerLeaf = resulting.leafNode(committerLeafIndex) ?: throw IllegalStateException("The committer holds no leaf in the resulting state")
+        AccountIdentityProofV2.leafProblem(committerLeaf)?.let { throw IllegalStateException("Committer leaf: $it") }
+    }
+
+    /**
+     * `app-components/admin-policy-v1.md`, MDK's
+     * `validate_admin_leaf_coupling_for_staged_commit`: every admin key of the
+     * resulting state belongs to an account that still holds a leaf. A commit
+     * that removes an admin account's last leaf must drop it from `admins` in
+     * the same commit. The resulting admin set is the resulting `0x8003`, or the
+     * parent's carried forward; a group without one has nothing to couple.
+     */
+    private fun validateAdminLeafCoupling(
+        parentExtensions: List<Extension>,
+        resulting: GroupView,
+    ) {
+        val admins = currentProfileAdmins(resulting.extensions) ?: currentProfileAdmins(parentExtensions) ?: return
+        if (admins.isEmpty()) return
+        val accounts = HashSet<String>()
+        for (i in 0 until resulting.leafCount) resulting.memberIdentityHex(i)?.let { accounts.add(it) }
+        val orphaned = admins.firstOrNull { it !in accounts }
+        check(orphaned == null) { "The commit leaves admin ${orphaned?.take(8)}… without a leaf in the group" }
+    }
+
+    /**
+     * The admins named by the `marmot.group.admin-policy.v1` component
+     * (`0x8003`) in [extensions], or null when there is none. The rules MDK
+     * reads from that component alone (admin SelfRemove, coupling) read it
+     * through here, so a legacy group, whose admins live in `0xF2EE`, keeps the
+     * rules it had.
+     */
+    private fun currentProfileAdmins(extensions: List<Extension>): Set<String>? = AppDataDictionary.fromExtensionsOrEmpty(extensions)[AdminPolicyV1.COMPONENT_ID]?.let { AdminPolicyV1.decode(it).adminHexKeys.toSet() }
+
+    /**
+     * MDK's `reject_admin_self_remove_proposals`, run for every commit: an
+     * admin must step down before it leaves, so a SelfRemove whose sender is an
+     * admin is refused, and so is the commit carrying it. A sender that does
+     * not resolve to an account fails closed.
+     */
+    private fun rejectAdminSelfRemoves(
+        group: GroupView,
+        proposals: List<PendingProposal>,
+    ) {
+        val admins = currentProfileAdmins(group.extensions) ?: return
+        if (admins.isEmpty()) return
+        for (pending in proposals) {
+            if (pending.proposal !is Proposal.SelfRemove) continue
+            val sender = group.memberIdentityHex(pending.senderLeafIndex)
+            check(sender != null && sender !in admins) { "An admin cannot SelfRemove: it steps down first (MIP-03)" }
+        }
     }
 
     /**
@@ -127,6 +228,9 @@ object MarmotGroupPolicy : MlsGroupPolicy {
         require(proposal.proposal is Proposal.SelfRemove) {
             "Only SelfRemove may be sent as a standalone proposal (MIP-03), not ${proposal.proposal::class.simpleName}"
         }
+        // Refused on arrival as MDK does, so it never sits in the pool where
+        // every later commit that swept it would be refused.
+        rejectAdminSelfRemoves(group, listOf(proposal))
     }
 
     override fun authorizeSelfRemove(group: GroupView) {
@@ -147,9 +251,14 @@ object MarmotGroupPolicy : MlsGroupPolicy {
      * when that state requires `marmot.group.account-devices.v1`, a device of
      * our own account.
      *
-     * A group that names no admins at all (the MIP-01 bootstrap state) has no
-     * one to check against and is left open, as [enforceAuthorizedProposalSet]
-     * leaves it.
+     * A group that names no admins at all has no one who could have added us,
+     * and is refused, as MDK's `require_admin` refuses it; only a MIP-era group
+     * of this client's (on neither proof profile, which MDK cannot join at all)
+     * is still let through in its bootstrap state.
+     *
+     * In a current-profile group, as MDK's join does (steps 5b and 5e), every
+     * leaf of the joined tree must carry a valid account identity proof and
+     * every admin must hold a leaf.
      */
     override fun validateJoin(
         group: GroupView,
@@ -158,13 +267,32 @@ object MarmotGroupPolicy : MlsGroupPolicy {
     ) {
         validateJoin(group)
         AccountDevicesV1.validateJoinedState(group, groupInfoExtensions)
+        if (MarmotProtocolProfile.isCurrent(group.extensions)) {
+            for (i in 0 until group.leafCount) {
+                val leaf = group.leafNode(i) ?: continue
+                AccountIdentityProofV2.leafProblem(leaf)?.let { throw IllegalStateException("Joined tree, leaf $i: $it") }
+            }
+            validateAdminLeafCoupling(group.extensions, group)
+        }
         val admins = adminIdentitiesIn(group.extensions)
-        if (admins.isEmpty()) return
+        if (admins.isEmpty()) {
+            // Only this client's own MIP-era groups (0xF2EE, neither proof
+            // profile) may still be bootstrapping with no admin set; MDK cannot
+            // join those at all, so there is nothing to agree with.
+            check(isMipEra(group.extensions)) { "The group names no admins, so no one could have invited us" }
+            return
+        }
         val author = group.memberIdentityHex(groupInfoSigner)
         val ownAccount = author != null && author == group.memberIdentityHex(group.myLeafIndex)
         require(author in admins || (ownAccount && AccountDevicesV1.isRequired(group.extensions))) {
             "The Welcome's author is not an active admin of the group it invites us to"
         }
+    }
+
+    /** Whether [extensions] are a MIP-era GroupContext: on neither the current nor the legacy-proof profile. */
+    private fun isMipEra(extensions: List<Extension>): Boolean {
+        val dictionary = AppDataDictionary.fromExtensionsOrEmpty(extensions)
+        return AppComponentIds.ACCOUNT_IDENTITY_PROOF_V2 !in ComponentsList.supportedOrRequired(dictionary) && !MarmotProtocolProfile.requiresLegacyProof(extensions)
     }
 
     /**

@@ -36,7 +36,11 @@ import com.vitorpamplona.mls.messages.Proposal
  * members replaying its commit.
  */
 enum class MarmotCommitClass {
-    /** No proposals, only the committer's UpdatePath; or a single Update from the committer. */
+    /**
+     * No proposals, only the committer's UpdatePath. An Update proposal never
+     * makes one: MLS refuses a committer's own Update, and MDK's classifier
+     * calls any Update admin-required.
+     */
     SELF_UPDATE,
 
     /** At least one SelfRemove and nothing else. */
@@ -74,10 +78,8 @@ enum class MarmotCommitClass {
                 // committer's own (inline) SelfRemove is refused by MLS itself.
                 return SELF_REMOVE_ONLY
             }
-            if (proposals.size == 1 && proposals[0].proposal is Proposal.Update && proposals[0].senderLeafIndex == committer) {
-                return SELF_UPDATE
-            }
-            if (proposals.all { AccountDevicesV1.isSameAccountOperation(parent, committer, it) } &&
+            val account = parent.memberIdentityHex(committer)
+            if (proposals.all { AccountDevicesV1.isSameAccountOperation(parent, committer, account, it) } &&
                 AccountDevicesV1.isRequired(parent.extensions)
             ) {
                 return SAME_ACCOUNT

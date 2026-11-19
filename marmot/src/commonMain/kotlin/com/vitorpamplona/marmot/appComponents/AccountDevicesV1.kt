@@ -63,8 +63,14 @@ object AccountDevicesV1 {
      */
     const val MAX_LEAVES_PER_ACCOUNT = 20
 
-    /** Whether the GroupContext [extensions] list `0x800d` in their required `app_components`. */
-    fun isRequired(extensions: List<Extension>): Boolean = COMPONENT_ID in ComponentsList.supportedOrRequired(AppDataDictionary.fromExtensionsOrEmpty(extensions))
+    /**
+     * Whether the GroupContext [extensions] require `0x800d`: they list it in
+     * their required `app_components` AND put the group on the current
+     * profile. MDK's `group_requires_account_devices`: the id in a legacy
+     * group's list changes nothing, as for clients that predate the
+     * component, so a same-account Commit there still needs an admin.
+     */
+    fun isRequired(extensions: List<Extension>): Boolean = COMPONENT_ID in ComponentsList.supportedOrRequired(AppDataDictionary.fromExtensionsOrEmpty(extensions)) && MarmotProtocolProfile.isCurrent(extensions)
 
     /** Whether [leaf] advertises `0x800d` in its own `app_components` list. */
     fun isAdvertisedBy(leaf: LeafNode): Boolean = COMPONENT_ID in advertised(leaf.extensions)
@@ -89,9 +95,16 @@ object AccountDevicesV1 {
         parent: GroupView,
         committer: Int,
         pending: PendingProposal,
+    ): Boolean = isSameAccountOperation(parent, committer, parent.memberIdentityHex(committer), pending)
+
+    /** [isSameAccountOperation] with the committer's [account] read once for a whole commit. */
+    fun isSameAccountOperation(
+        parent: GroupView,
+        committer: Int,
+        account: HexKey?,
+        pending: PendingProposal,
     ): Boolean {
-        if (pending.authenticatedContentBytes != null || !pending.isFrom(committer)) return false
-        val account = parent.memberIdentityHex(committer) ?: return false
+        if (account == null || pending.authenticatedContentBytes != null || !pending.isFrom(committer)) return false
         return when (val proposal = pending.proposal) {
             is Proposal.Add -> accountOf(proposal.keyPackage.leafNode) == account
             is Proposal.Remove -> proposal.removedLeafIndex != committer && parent.memberIdentityHex(proposal.removedLeafIndex) == account
@@ -160,8 +173,10 @@ object AccountDevicesV1 {
         val leavesPerAccount = mutableMapOf<HexKey, Int>()
         for (i in 0 until state.leafCount) {
             val leaf = state.leafNode(i) ?: continue
-            check(isAdvertisedBy(leaf)) { "account-devices: leaf $i does not advertise 0x800d" }
-            check(!AppDataDictionary.fromExtensionsOrEmpty(leaf.extensions).contains(COMPONENT_ID)) {
+            // One decode per leaf serves both checks.
+            val dictionary = AppDataDictionary.fromExtensionsOrEmpty(leaf.extensions)
+            check(COMPONENT_ID in ComponentsList.supportedOrRequired(dictionary)) { "account-devices: leaf $i does not advertise 0x800d" }
+            check(!dictionary.contains(COMPONENT_ID)) {
                 "account-devices: leaf $i carries a 0x800d dictionary entry"
             }
             val account = accountOf(leaf) ?: continue

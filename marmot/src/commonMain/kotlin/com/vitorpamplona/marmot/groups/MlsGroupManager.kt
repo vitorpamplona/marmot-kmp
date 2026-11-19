@@ -24,6 +24,7 @@ import com.vitorpamplona.marmot.appComponents.AccountDevicesV1
 import com.vitorpamplona.marmot.appComponents.AdminPolicyV1
 import com.vitorpamplona.marmot.appComponents.CurrentProfileGroupFactory
 import com.vitorpamplona.marmot.appComponents.GroupLifecycleV1
+import com.vitorpamplona.marmot.appComponents.MarmotProtocolProfile
 import com.vitorpamplona.marmot.groups.MlsGroupManager.Companion.EPOCH_RETENTION_WINDOW
 import com.vitorpamplona.marmot.groups.currentAdminIdentities
 import com.vitorpamplona.marmot.groups.currentNostrGroupId
@@ -123,6 +124,10 @@ class MlsGroupManager(
      */
     val supportedComponents: List<Int> = CurrentProfileGroupFactory.SUPPORTED_COMPONENTS,
 ) {
+    /** The 2.x constructor, kept so code compiled against it still links. */
+    @Deprecated("Use the constructor with supportedComponents. Removed in 3.0.0.", level = DeprecationLevel.HIDDEN)
+    constructor(store: MlsGroupStateStore) : this(store, CurrentProfileGroupFactory.SUPPORTED_COMPONENTS)
+
     private val mutex = Mutex()
     private val groups = mutableMapOf<HexKey, MlsGroup>()
     private val retainedEpochs = mutableMapOf<HexKey, MutableList<RetainedEpochSecrets>>()
@@ -441,18 +446,48 @@ class MlsGroupManager(
      * The clone's pre-commit exporter secret equals the live group's, so the
      * outbound kind:445 is outer-encrypted with the same epoch-N key it would
      * have been either way.
+     *
+     * The clone commits the pending proposal pool along with whatever
+     * [prepare] proposes, unless [sweepPool] is false: a same-account Commit
+     * and the account-devices activation must carry exactly their own
+     * proposals (MDK's builders never read the proposal store), and a peer's
+     * pooled SelfRemove swept into either would make it admin-required. Only
+     * the clone loses the pool; the live group keeps it until the epoch moves.
      */
     private suspend fun stage(
         nostrGroupId: HexKey,
+        sweepPool: Boolean = true,
         prepare: (MlsGroup) -> CommitResult,
     ): StagedCommit =
         mutex.withLock {
             val live = requireGroup(nostrGroupId)
             val priorState = live.saveState()
-            val clone = MlsGroup.restore(priorState, MarmotGroupPolicy)
+            val clone = MlsGroup.restore(stagingState(live, priorState, sweepPool), MarmotGroupPolicy)
             val result = prepare(clone)
             StagedCommit(result, priorState, clone.saveState())
         }
+
+    /**
+     * The state a commit is staged on: [priorState] without the pool when
+     * [sweepPool] is false, and otherwise without any pooled peer proposal the
+     * policy now refuses. A proposal pooled before a receipt rule existed (an
+     * admin's SelfRemove, say) would make every commit that swept it fail, and
+     * MLS lets a committer leave out a proposal it cannot validly commit.
+     */
+    private fun stagingState(
+        live: MlsGroup,
+        priorState: MlsGroupState,
+        sweepPool: Boolean,
+    ): MlsGroupState {
+        if (priorState.pendingProposals.isEmpty()) return priorState
+        if (!sweepPool) return priorState.copy(pendingProposals = emptyList())
+        val view = live.view()
+        val kept =
+            priorState.pendingProposals.filter { pending ->
+                pending.isFrom(live.leafIndex) || runCatching { MarmotGroupPolicy.authorizeProposal(view, pending) }.isSuccess
+            }
+        return if (kept.size == priorState.pendingProposals.size) priorState else priorState.copy(pendingProposals = kept)
+    }
 
     /** Stage an Add. See [StagedCommit] for why this does not apply. */
     suspend fun stageAddMember(
@@ -510,9 +545,27 @@ class MlsGroupManager(
         nostrGroupId: HexKey,
         targetLeafIndices: Collection<Int>,
         admins: List<HexKey>? = null,
+    ): StagedCommit = stageLeafRemovals(nostrGroupId, targetLeafIndices, admins, sweepPool = true)
+
+    /**
+     * Stage ONE same-account Commit that removes [targetLeafIndices], other
+     * leaves of our own account, and nothing else
+     * (`app-components/account-devices-v1.md`): the pending pool stays out of
+     * it, so a peer's pooled SelfRemove cannot turn it admin-required.
+     */
+    suspend fun stageRemoveOwnAccountDevices(
+        nostrGroupId: HexKey,
+        targetLeafIndices: Collection<Int>,
+    ): StagedCommit = stageLeafRemovals(nostrGroupId, targetLeafIndices, admins = null, sweepPool = false)
+
+    private suspend fun stageLeafRemovals(
+        nostrGroupId: HexKey,
+        targetLeafIndices: Collection<Int>,
+        admins: List<HexKey>?,
+        sweepPool: Boolean,
     ): StagedCommit {
         require(targetLeafIndices.isNotEmpty()) { "stageRemoveMembers needs at least one leaf" }
-        return stage(nostrGroupId) { clone ->
+        return stage(nostrGroupId, sweepPool) { clone ->
             targetLeafIndices.distinct().sorted().forEach { clone.proposeRemove(it) }
             if (admins != null) clone.proposeAppDataUpdate(AdminPolicyV1.COMPONENT_ID, AdminPolicyV1.ofHex(admins).encode())
             clone.commit()
@@ -522,18 +575,22 @@ class MlsGroupManager(
     /**
      * Stage the activation Commit that makes the group require
      * `marmot.group.account-devices.v1` (`account-devices-v1.md`, "Activation
-     * in an existing group"): it adds `0x800d` to the required list and nothing
-     * else. Only an active admin may commit it; [accountDevicesActivationBlockers]
-     * says why a group cannot take it yet.
+     * in an existing group"): it adds `0x800d` to the required list and, when
+     * the GroupContext still carries a `0x800d` entry only an earlier client
+     * could have left there, removes it in the same commit ("Data"), as MDK
+     * does. Nothing else: the pending pool stays out of it. Only an active
+     * admin may commit it; [accountDevicesActivationBlocker] says why a group
+     * cannot take it yet.
      */
     suspend fun stageRequireAccountDevices(nostrGroupId: HexKey): StagedCommit {
         requireAdminForExtensionChange(requireGroup(nostrGroupId))
         val blocker = accountDevicesActivationBlocker(nostrGroupId)
         check(blocker == null) { "Cannot require account-devices: $blocker" }
-        return stage(nostrGroupId) { clone ->
+        return stage(nostrGroupId, sweepPool = false) { clone ->
             val required = ComponentsList.supportedOrRequired(clone.appDataDictionary()).toMutableSet()
             required.add(AccountDevicesV1.COMPONENT_ID)
             clone.proposeAppDataUpdate(ComponentsList.APP_COMPONENTS_ID, ComponentsList.encode(required))
+            if (clone.appDataDictionary().contains(AccountDevicesV1.COMPONENT_ID)) clone.proposeAppDataRemoval(AccountDevicesV1.COMPONENT_ID)
             clone.commit()
         }
     }
@@ -541,16 +598,16 @@ class MlsGroupManager(
     /**
      * Why [nostrGroupId] cannot activate account-devices now, or null when it
      * can: it already requires it, it is not a current-profile group, a leaf
-     * does not advertise it or carries a `0x800d` entry, the GroupContext
-     * carries one, or an account holds more leaves than the limit. Describes
+     * does not advertise it or carries a `0x800d` entry, or an account holds
+     * more leaves than the limit. A GroupContext `0x800d` entry is no blocker:
+     * the activation commit removes it. Describes
      * the group as a whole, never which member holds it back.
      */
     fun accountDevicesActivationBlocker(nostrGroupId: HexKey): String? {
         val group = requireGroup(nostrGroupId)
         val view = group.view()
         if (AccountDevicesV1.isRequired(view.extensions)) return "the group already requires it"
-        if (!group.currentGroupState().isCurrentProfile) return "the group is not on the current profile"
-        if (group.appDataDictionary().contains(AccountDevicesV1.COMPONENT_ID)) return "the group carries 0x800d data"
+        if (!MarmotProtocolProfile.isCurrent(view.extensions)) return "the group is not on the current profile"
         val perAccount = mutableMapOf<HexKey, Int>()
         for ((_, leaf) in group.members()) {
             if (!AccountDevicesV1.isAdvertisedBy(leaf)) return "a member does not advertise it"

@@ -174,6 +174,28 @@ object CurrentProfileGroupFactory {
         )
     }
 
+    /** The 2.x signature, kept so code compiled against it still links. */
+    @Deprecated("Use the overload with supportedComponents. Removed in 3.0.0.", level = DeprecationLevel.HIDDEN)
+    suspend fun createKeyPackage(
+        signer: NostrSigner,
+        lastResort: Boolean = true,
+        ciphersuite: MlsCiphersuite = MlsCiphersuite.DEFAULT,
+    ): KeyPackageBundle = createKeyPackage(signer, lastResort, ciphersuite, SUPPORTED_COMPONENTS)
+
+    /** The 2.x signature, kept so code compiled against it still links. */
+    @Deprecated("Use the overload with supportedComponents. Removed in 3.0.0.", level = DeprecationLevel.HIDDEN)
+    suspend fun createGroup(
+        signer: NostrSigner,
+        nostrGroupId: ByteArray,
+        relays: List<String>,
+        profile: GroupProfileV1? = null,
+        additionalAdmins: List<ByteArray> = emptyList(),
+        retention: MessageRetentionV1? = null,
+        encryptedMedia: EncryptedMediaPolicyV2? = null,
+        agentTextStream: AgentTextStreamQuicPolicyV1? = null,
+        ciphersuite: MlsCiphersuite = MlsCiphersuite.DEFAULT,
+    ): MlsGroup = createGroup(signer, nostrGroupId, relays, profile, additionalAdmins, retention, encryptedMedia, agentTextStream, ciphersuite, SUPPORTED_COMPONENTS)
+
     /**
      * Create a current-profile group with [signer]'s account as its sole
      * initial admin.

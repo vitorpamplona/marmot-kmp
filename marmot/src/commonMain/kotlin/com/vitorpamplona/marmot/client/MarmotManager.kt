@@ -41,6 +41,7 @@ import com.vitorpamplona.marmot.appComponents.GroupBlossomImageV1
 import com.vitorpamplona.marmot.appComponents.GroupLifecycleV1
 import com.vitorpamplona.marmot.appComponents.GroupProfileV1
 import com.vitorpamplona.marmot.appComponents.MarmotGroupState
+import com.vitorpamplona.marmot.appComponents.MarmotProtocolProfile
 import com.vitorpamplona.marmot.appComponents.MessageRetentionV1
 import com.vitorpamplona.marmot.appComponents.agentTextStream.AgentTextStreamCrypto
 import com.vitorpamplona.marmot.appComponents.agentTextStream.AgentTextStreamFinal
@@ -75,7 +76,6 @@ import com.vitorpamplona.marmot.protocolCore.MarmotPublishGate
 import com.vitorpamplona.marmot.protocolCore.MarmotPublishObligation
 import com.vitorpamplona.marmot.protocolCore.MarmotPublishObligationStore
 import com.vitorpamplona.marmot.protocolCore.PublishOutcome
-import com.vitorpamplona.mls.components.AppDataDictionary
 import com.vitorpamplona.mls.components.ComponentsList
 import com.vitorpamplona.mls.group.MlsGroup
 import com.vitorpamplona.mls.messages.CommitResult
@@ -171,6 +171,19 @@ class MarmotManager(
      */
     val supportedComponents: List<Int> = CurrentProfileGroupFactory.SUPPORTED_COMPONENTS,
 ) {
+    /** The 2.x constructor, kept so code compiled against it still links. */
+    @Deprecated("Use the constructor with supportedComponents. Removed in 3.0.0.", level = DeprecationLevel.HIDDEN)
+    constructor(
+        signer: NostrSigner,
+        store: MlsGroupStateStore,
+        messageStore: MarmotMessageStore? = null,
+        keyPackageStore: KeyPackageBundleStore? = null,
+        publisher: MarmotPublisher = MarmotPublisher { _, _ -> false },
+        publishObligationStore: MarmotPublishObligationStore? = null,
+        ingestDedupStore: MarmotIngestDedupStore? = null,
+        scope: CoroutineScope? = null,
+    ) : this(signer, store, messageStore, keyPackageStore, publisher, publishObligationStore, ingestDedupStore, scope, CurrentProfileGroupFactory.SUPPORTED_COMPONENTS)
+
     val groupManager = MlsGroupManager(store, supportedComponents)
     val keyPackageRotationManager = KeyPackageRotationManager(keyPackageStore, supportedComponents)
     val subscriptionManager = MarmotSubscriptionManager(signer.pubKey)
@@ -1243,10 +1256,11 @@ class MarmotManager(
     /**
      * `protocol-core/group-setup.md`: a creator that supports
      * `marmot.group.account-devices.v1` MUST require it when its own leaf and
-     * every founding KeyPackage advertise it. Not when that would break the
-     * component's own rules (an account over the leaf limit, a `0x800d` data
-     * entry), which the founding commit would then fail on; and never in a
-     * legacy group.
+     * every founding KeyPackage advertise it; never in a legacy group. When
+     * that founding Add would then break the component's own rules (an account
+     * over the leaf limit, a `0x800d` data entry), the founding commit is
+     * refused before any Welcome exists, as MDK refuses the creation, rather
+     * than quietly founding a group that does not require it.
      */
     private fun foundingRequiresAccountDevices(
         nostrGroupId: HexKey,
@@ -1254,13 +1268,9 @@ class MarmotManager(
     ): Boolean {
         if (AccountDevicesV1.COMPONENT_ID !in supportedComponents) return false
         val group = groupManager.getGroup(nostrGroupId) ?: return false
-        if (!group.currentGroupState().isCurrentProfile) return false
+        if (!MarmotProtocolProfile.isCurrent(group.extensions)) return false
         val leaves = group.members().map { it.second } + keyPackages.map { it.leafNode }
-        if (leaves.any { !AccountDevicesV1.isAdvertisedBy(it) }) return false
-        if (leaves.any { AppDataDictionary.fromExtensionsOrEmpty(it.extensions).contains(AccountDevicesV1.COMPONENT_ID) }) return false
-        if (keyPackages.any { AppDataDictionary.fromExtensionsOrEmpty(it.extensions).contains(AccountDevicesV1.COMPONENT_ID) }) return false
-        val perAccount = leaves.groupingBy { AccountDevicesV1.accountOf(it) }.eachCount()
-        return perAccount.values.all { it <= AccountDevicesV1.MAX_LEAVES_PER_ACCOUNT }
+        return leaves.all { AccountDevicesV1.isAdvertisedBy(it) }
     }
 
     /**
@@ -1310,6 +1320,10 @@ class MarmotManager(
      * The group is built outside the manager because a leaf's identity proof
      * covers its OWN signature key, so the keypair must exist and be authorized
      * by the account signer before the leaf is built.
+     *
+     * Every admin must hold a leaf (the admin–leaf coupling rule every member
+     * checks on each commit), so [additionalAdmins] must be among the founding
+     * invitees; otherwise the founding Add is refused.
      */
     suspend fun createCurrentProfileGroup(
         nostrGroupId: HexKey,
@@ -2453,7 +2467,7 @@ class MarmotManager(
         val own = leafIndicesOf(nostrGroupId, signer.pubKey).toSet() - group.leafIndex
         require(own.containsAll(leafIndices)) { "removeOwnAccountDevices: every leaf must be another device of this account" }
         return commitAndPublish(nostrGroupId, relays) {
-            groupManager.stageRemoveMembers(nostrGroupId, leafIndices)
+            groupManager.stageRemoveOwnAccountDevices(nostrGroupId, leafIndices)
         }.event
     }
 

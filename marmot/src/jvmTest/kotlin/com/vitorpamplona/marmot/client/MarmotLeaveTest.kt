@@ -26,6 +26,7 @@ import com.vitorpamplona.quartz.nip01Core.signers.NostrSignerInternal
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
@@ -109,27 +110,30 @@ class MarmotLeaveTest {
             )
         }
 
+    /**
+     * The admin list cannot name someone who is no longer in the tree: the
+     * admin–leaf coupling rule (`app-components/admin-policy-v1.md`) refuses
+     * the commit that would, as every MDK member does. So a co-admin who "already
+     * left" without stepping down is not a state a current-profile group can
+     * reach; naming a stranger is refused before anything is published.
+     */
     @Test
-    fun `an admin whose co-admin already left still names an heir`() =
+    fun `an admin cannot name an admin who holds no leaf`() =
         runBlocking<Unit> {
-            // The admin list may name someone who is no longer in the tree. Dropping
-            // only ourselves would leave no admin among the members, which every peer
-            // refuses as admin depletion.
             val alice = Member()
             val bob = Member()
             group(alice, bob)
             val stranger = NostrSignerInternal(KeyPair()).pubKey
-            val promote = alice.manager.setGroupAdmins(nostrGroupId, listOf(alice.pubKey, stranger))
-            bob.manager.ingest(promote.signedEvent)
+            val epoch = alice.manager.groupEpoch(nostrGroupId)
 
-            val departure = alice.manager.leave(nostrGroupId)
-            bob.manager.ingest(assertNotNull(departure.stepDown).signedEvent)
+            assertFailsWith<IllegalStateException> { alice.manager.setGroupAdmins(nostrGroupId, listOf(alice.pubKey, stranger)) }
+            assertEquals(epoch, alice.manager.groupEpoch(nostrGroupId))
             assertEquals(
-                setOf(stranger, bob.pubKey),
-                bob.manager
+                listOf(alice.pubKey),
+                alice.manager
                     .groupView(nostrGroupId)
                     ?.adminPubkeys
-                    ?.toSet(),
+                    ?.toList(),
             )
         }
 

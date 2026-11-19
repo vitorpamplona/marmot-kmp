@@ -30,6 +30,9 @@ import com.vitorpamplona.quartz.nip01Core.signers.NostrSignerInternal
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertContains
+import kotlin.test.assertContentEquals
+import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
@@ -100,20 +103,23 @@ class CommitPreservesLeafIdentityTest {
             assertNotNull(decoded[AppComponentIds.ACCOUNT_IDENTITY_PROOF_V2])
         }
 
+    /**
+     * A signing-key rotation would carry the leaf's account identity proof
+     * over to a new signature key it does not name, so in a current-profile
+     * group the commit is refused before it is built, as every MDK member
+     * would refuse it (`validate_staged_commit_account_identity_proofs`). A
+     * current-profile self-update keeps its key (`stageLeafRefresh`).
+     */
     @Test
-    fun aSigningKeyRotationAlsoKeepsTheLeafIdentity() =
+    fun aSigningKeyRotationIsRefusedBecauseTheProofNamesTheOldKey() =
         runBlocking<Unit> {
             val group = aCurrentProfileGroup()
             val before = assertNotNull(group.myLeaf())
 
             group.proposeSigningKeyRotation()
-            group.commit()
+            assertFailsWith<IllegalStateException> { group.commit() }
 
-            val after = assertNotNull(group.myLeaf())
-            assertContains(after.capabilities.extensions, AppDataDictionary.EXTENSION_TYPE)
-            assertTrue(
-                after.extensions.any { it.extensionType == AppDataDictionary.EXTENSION_TYPE },
-            )
-            assertTrue(before.extensions.size <= after.extensions.size)
+            assertEquals(0L, group.epoch)
+            assertContentEquals(before.signatureKey, assertNotNull(group.myLeaf()).signatureKey)
         }
 }
