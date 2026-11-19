@@ -78,7 +78,20 @@ class ConvergenceResolution(
     /** True when selection replaced the state that was canonical when the pass opened. */
     val rewound: Boolean,
     val outcomes: List<CommitOutcome>,
-)
+    /** Which step of branch selection chose the canonical branch over the next one; null with a single branch. */
+    val decisiveRule: BranchSelector.DecisiveRule? = null,
+) {
+    /** The 2.x constructor, kept so code compiled against it still links. */
+    @Deprecated("Use the constructor with decisiveRule. Removed in 3.0.0.", level = DeprecationLevel.HIDDEN)
+    constructor(
+        groupId: HexKey,
+        status: ConvergenceStatus,
+        lifecycle: GroupLifecycleState,
+        canonicalEpoch: Long,
+        rewound: Boolean,
+        outcomes: List<CommitOutcome>,
+    ) : this(groupId, status, lifecycle, canonicalEpoch, rewound, outcomes, null)
+}
 
 /**
  * Runs Marmot convergence for the groups a client holds
@@ -131,6 +144,9 @@ class MarmotConvergenceEngine(
 
         /** Commits that did not extend the tip but did authenticate somewhere retained. */
         val divergent = LinkedHashMap<HexKey, CandidateCommit>()
+
+        /** The last pass that settled a contest between branches. */
+        var lastContested: ConvergenceResolution? = null
 
         /** stateId -> the accounts that sent a validated payload decrypting there. */
         val witnesses = mutableMapOf<String, MutableSet<HexKey>>()
@@ -537,9 +553,12 @@ class MarmotConvergenceEngine(
                 witnesses = inputs.witnesses,
                 canonicalTipEpoch = inputs.tipEpoch,
                 passBaseEpoch = inputs.passBaseEpoch,
+                knownResults = inputs.knownResults,
             )
 
-        val selected = BranchSelector.select(graph.branches, inputs.passBaseEpoch, policy)
+        val ranked = BranchSelector.rank(graph.branches, inputs.passBaseEpoch, policy)
+        val selected = ranked.firstOrNull()
+        val decisiveRule = if (ranked.size >= 2) BranchSelector.decisiveRule(ranked[0], ranked[1], policy) else null
         val selectedTipId = selected?.let { graph.branchTips[it.tipDigestHex] }
         val rewound = selectedTipId != null && selectedTipId != inputs.tipId
 
@@ -600,7 +619,8 @@ class MarmotConvergenceEngine(
                 canonicalEpoch = epoch,
                 rewound = rewound,
                 outcomes = graph.outcomes,
-            )
+                decisiveRule = decisiveRule,
+            ).also { ctx.lastContested = it }
         }
     }
 
@@ -640,6 +660,13 @@ class MarmotConvergenceEngine(
             )
         }
 
+    /**
+     * The last pass of [groupId] that settled a contest between branches, or
+     * null. A pass usually settles inside the ingest that makes it due, so
+     * this is how a caller learns how it was decided.
+     */
+    suspend fun lastContestedResolution(groupId: HexKey): ConvergenceResolution? = mutex.withLock { contexts[groupId]?.lastContested }
+
     /** Forget everything about [groupId] — used when leaving or deleting a group. */
     suspend fun forget(groupId: HexKey) =
         mutex.withLock {
@@ -663,6 +690,7 @@ class MarmotConvergenceEngine(
         val tipId: String,
         val tipEpoch: Long,
         val passBaseEpoch: Long,
+        val knownResults: Map<HexKey, MlsGroupState>,
     )
 
     /**
@@ -694,8 +722,21 @@ class MarmotConvergenceEngine(
         val ancestry = retained.take(baseIndex + 1).map { stateEngine.stateId(it) }
         // The canonical commits applied at or after the base rebuild the
         // incumbent branch, so it is scored by the same rule as the others
-        // instead of winning by being already applied.
-        val canonicalSuffix = ctx.canonicalCommits.drop(baseIndex)
+        // instead of winning by being already applied. Picked by epoch, not by
+        // position: a commit applied without being recorded (the founding Add
+        // is one) leaves the retained window a state longer than the commit
+        // list, and positional pairing then dropped the incumbent's own commit,
+        // so the creator always yielded to the peer's branch.
+        val baseEpoch = stateEngine.epoch(retained[baseIndex])
+        val canonicalSuffix = ctx.canonicalCommits.filter { it.sourceEpoch >= baseEpoch }
+        // The canonical path holds one state per epoch, and the state each of
+        // those commits produced is already in it, so the graph need not
+        // replay it — and cannot, for a commit we authored.
+        val knownResults =
+            canonicalSuffix
+                .mapNotNull { commit ->
+                    retained.lastOrNull { stateEngine.epoch(it) == commit.sourceEpoch + 1 }?.let { commit.id to it }
+                }.toMap()
 
         return FrozenInputs(
             retained = retained,
@@ -706,6 +747,7 @@ class MarmotConvergenceEngine(
             tipId = tipId,
             tipEpoch = stateEngine.epoch(tip),
             passBaseEpoch = pass.passBaseEpoch,
+            knownResults = knownResults,
         )
     }
 
@@ -731,11 +773,10 @@ class MarmotConvergenceEngine(
             keepStates.add(state)
             if (stateEngine.stateId(state) == baseId) break
         }
-        // Canonical commits run parallel to the states after the first, so the
-        // prefix to keep is one shorter than the retained prefix.
-        repeat(minOf(keepStates.size - 1, ctx.canonicalCommits.size)) {
-            keepCommits.add(ctx.canonicalCommits[it])
-        }
+        // The canonical commits that made the kept prefix: those applied
+        // before the base, by epoch rather than by position (see freezeInputs).
+        val baseEpoch = keepStates.lastOrNull()?.let { stateEngine.epoch(it) }
+        if (baseEpoch != null) ctx.canonicalCommits.filterTo(keepCommits) { it.sourceEpoch < baseEpoch }
         for (stateId in path) {
             keepStates.add(graph.statesById.getValue(stateId))
             graph.producedBy[stateId]?.let { keepCommits.add(it) }

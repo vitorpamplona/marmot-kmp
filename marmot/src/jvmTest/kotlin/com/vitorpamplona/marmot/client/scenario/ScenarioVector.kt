@@ -48,6 +48,8 @@ class ScenarioVector(
     val pendingResolutions: List<PendingResolution> = emptyList(),
     val quiescentClients: List<String> = emptyList(),
     val unmodelledOutcomes: List<UnmodelledOutcome> = emptyList(),
+    /** `convergence_decision`: the branch-selection step that settled a client's fork, and the epoch it landed on. */
+    val convergenceDecisions: List<ConvergenceDecision> = emptyList(),
     /** `account_devices_state`: whether each client's group requires `0x800d`. */
     val accountDevicesStates: List<AccountDevicesState> = emptyList(),
     /** `clients_exactly_equivalent`: sets of clients that must hold the very same epoch state. */
@@ -154,6 +156,12 @@ class ScenarioVector(
         val error: String,
     )
 
+    class ConvergenceDecision(
+        val client: String,
+        val decisiveRule: String,
+        val selectedTipEpoch: Long?,
+    )
+
     /** The outcome types this runner has no check for, named so it can refuse. */
     class UnmodelledOutcome(
         val type: String,
@@ -186,6 +194,7 @@ class ScenarioVector(
             val resolutions = mutableListOf<PendingResolution>()
             val quiescent = mutableListOf<String>()
             val unmodelled = mutableListOf<UnmodelledOutcome>()
+            val decisions = mutableListOf<ConvergenceDecision>()
             val accountDevices = mutableListOf<AccountDevicesState>()
             val equivalent = mutableListOf<List<String>>()
             val errors = mutableListOf<ExpectedError>()
@@ -270,6 +279,21 @@ class ScenarioVector(
                             ),
                         )
 
+                    // Which rule decided is checked; a witness quorum the
+                    // runner has no witnesses for is not.
+                    "convergence_decision" ->
+                        if (obj.containsKey("witness_quorum_met")) {
+                            unmodelled.add(UnmodelledOutcome("convergence_decision"))
+                        } else {
+                            decisions.add(
+                                ConvergenceDecision(
+                                    client = obj.getValue("client").jsonPrimitive.content,
+                                    decisiveRule = obj.getValue("decisive_rule").jsonPrimitive.content,
+                                    selectedTipEpoch = (obj["selected_tip_epoch"] as? JsonPrimitive)?.content?.toLongOrNull(),
+                                ),
+                            )
+                        }
+
                     else ->
                         unmodelled.add(
                             UnmodelledOutcome((obj["type"] as? JsonPrimitive)?.content.orEmpty()),
@@ -286,6 +310,7 @@ class ScenarioVector(
                 pendingResolutions = resolutions,
                 quiescentClients = quiescent,
                 unmodelledOutcomes = unmodelled,
+                convergenceDecisions = decisions,
                 accountDevicesStates = accountDevices,
                 equivalentClients = equivalent,
                 expectedErrors = errors,

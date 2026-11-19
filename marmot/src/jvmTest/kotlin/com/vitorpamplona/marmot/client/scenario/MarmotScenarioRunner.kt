@@ -21,6 +21,7 @@
 package com.vitorpamplona.marmot.client.scenario
 
 import com.vitorpamplona.crypto.random.RandomInstance
+import com.vitorpamplona.crypto.sha2.sha256
 import com.vitorpamplona.marmot.appComponents.AccountDevicesV1
 import com.vitorpamplona.marmot.appComponents.CurrentProfileGroupFactory
 import com.vitorpamplona.marmot.appComponents.GroupProfileV1
@@ -31,6 +32,7 @@ import com.vitorpamplona.marmot.client.SnapshotBundleStore
 import com.vitorpamplona.marmot.client.SnapshotMessageStore
 import com.vitorpamplona.marmot.client.SnapshotStateStore
 import com.vitorpamplona.marmot.client.ingest
+import com.vitorpamplona.marmot.protocolCore.ConvergenceResolution
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.core.HexKey
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
@@ -77,10 +79,17 @@ class MarmotScenarioRunner(
         vector.clients.associateWith {
             VectorClient(
                 name = it,
-                keyPair = accountKeys.getOrPut(vector.accountOf[it] ?: it) { KeyPair() },
+                keyPair = accountKeys.getOrPut(vector.accountOf[it] ?: it) { deterministicKeyPair(vector.accountOf[it] ?: it) },
                 supportsAccountDevices = vector.steps.none { step -> step.type == "set_account_devices_support" },
             )
         }
+
+    /**
+     * The decisive rule of every convergence pass a client settled, in order.
+     * The vectors that race two commits state which step of branch selection
+     * settled each client's fork.
+     */
+    private val decisions = mutableMapOf<String, MutableList<ConvergenceResolution>>()
 
     /** Errors the `expect_*_error` steps observed, by step index. */
     private val observedErrors = mutableMapOf<Int, String>()
@@ -673,6 +682,21 @@ class MarmotScenarioRunner(
             }
         }
 
+        // A fork this batch opened is settled by now or here: the vector's
+        // clock is logical, and every competitor of a race arrives in the same
+        // delivery, so the pass has nothing left to wait for. A pass usually
+        // settles inside the ingest that made it due; either way the last
+        // contested resolution says which rule decided it.
+        client.groups.values.forEach { groupId ->
+            if (groupId in client.manager.inboundProcessor.openConvergencePasses()) {
+                client.manager.inboundProcessor.resolveConvergence(groupId)
+            }
+            client.manager.inboundProcessor.lastContestedResolution(groupId)?.let { resolution ->
+                val seen = decisions.getOrPut(clientName) { mutableListOf() }
+                if (seen.lastOrNull() !== resolution) seen.add(resolution)
+            }
+        }
+
         // A standalone proposal advances nothing on its own. The reference
         // commits what it staged as part of processing, and so must we — a
         // SelfRemove nobody commits leaves the departing member in the tree,
@@ -787,6 +811,20 @@ class MarmotScenarioRunner(
                 }
             }
         }
+        vector.convergenceDecisions.forEach { expected ->
+            val settled = decisions[expected.client].orEmpty().filter { it.decisiveRule != null }
+            if (settled.isEmpty()) {
+                failures.add("${expected.client} settled no contested convergence pass")
+                return@forEach
+            }
+            val got = settled.last()
+            if (got.decisiveRule?.wireName != expected.decisiveRule) {
+                failures.add("${expected.client} settled by ${got.decisiveRule?.wireName}, expected ${expected.decisiveRule}")
+            }
+            expected.selectedTipEpoch?.let { want ->
+                if (got.canonicalEpoch != want) failures.add("${expected.client} settled on epoch ${got.canonicalEpoch}, expected $want")
+            }
+        }
         vector.accountDevicesStates.forEach { expected ->
             val client = clients[expected.client] ?: return@forEach
             client.groups.forEach { (label, groupId) ->
@@ -834,5 +872,28 @@ class MarmotScenarioRunner(
 
         /** The label for a vector that never says `in_group` — most of them. */
         const val DEFAULT_GROUP = "default"
+    }
+}
+
+/**
+ * The account key MDK's conformance simulator gives [label]
+ * (`deterministic_nostr_keys` over `pad32(label)`): SHA-256 of
+ * `"marmot-cgka-conformance-nostr-key-v1" || pad32(label) || counter_be64`,
+ * the first counter that yields a valid secret key. A vector that races two
+ * admins is settled by `tip_committer`, the lower account key, so the replay
+ * has to hold the very keys the vector was recorded with.
+ */
+internal fun deterministicKeyPair(label: String): KeyPair {
+    val seed = ByteArray(32)
+    label.encodeToByteArray().copyInto(seed, endIndex = minOf(label.length, 32))
+    var counter = 0L
+    while (true) {
+        val counterBytes = ByteArray(8) { i -> (counter ushr (56 - 8 * i)).toByte() }
+        val secret = sha256("marmot-cgka-conformance-nostr-key-v1".encodeToByteArray() + seed + counterBytes)
+        try {
+            return KeyPair(privKey = secret)
+        } catch (_: Exception) {
+            counter++
+        }
     }
 }

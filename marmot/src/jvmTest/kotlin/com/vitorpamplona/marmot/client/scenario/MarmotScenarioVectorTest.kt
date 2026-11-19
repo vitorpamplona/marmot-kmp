@@ -203,22 +203,44 @@ class MarmotScenarioVectorTest {
     fun accountDevicesActivationNeedsSupport() = replay("account-devices-activation-needs-support.v1.json")
 
     /**
-     * The three account-devices vectors that race two commits conclude with
-     * a `convergence_decision`, which the runner does not model (see
-     * [aConvergenceDecisionIsStillUnmodelled]). What they test — that a
-     * same-account commit is `ordinary` and an admin's removal `privileged` —
-     * is checked directly in `MarmotAccountDevicesTest`.
+     * The three account-devices vectors that race two commits. Each client
+     * settles its fork as the reference does, and the runner checks the step
+     * of branch selection that decided it (`decisive_rule`): `tip_committer`
+     * between two admins' privileged commits, `tip_priority` when an admin's
+     * removal of another account beats a same-account removal. The account
+     * keys are the reference simulator's, so `tip_committer` compares the
+     * same keys.
      */
     @Test
-    fun accountDevicesRacesNeedAConvergenceDecision() {
-        listOf(
-            "account-devices-activation-loses-to-unsupported-invite.v1.json",
-            "account-devices-activation-wins-over-unsupported-invite.v1.json",
-            "account-devices-own-device-removal-loses-to-admin-remove.v1.json",
-        ).forEach { name ->
-            val thrown = assertFailsWith<UnsupportedScenarioOutcome>(name) { runBlocking { MarmotScenarioRunner(load(name)).run() } }
-            assertEquals("convergence_decision", thrown.outcomeType)
-        }
+    fun accountDevicesActivationLosesToAnUnsupportedInvite() = replay("account-devices-activation-loses-to-unsupported-invite.v1.json")
+
+    @Test
+    fun accountDevicesActivationWinsOverAnUnsupportedInvite() = replay("account-devices-activation-wins-over-unsupported-invite.v1.json")
+
+    /**
+     * Replays to the expected states, but one decision cannot be observed:
+     * alice-phone's own device is what the losing same-account commit removes,
+     * and a commit that removes us replays to a state whose GroupContext has
+     * not moved on (mls-kmp follows no key schedule past our removal), so that
+     * branch has the parent's state id and never becomes a branch. alice-phone
+     * stays on the winning branch with nothing to compare it to, where the
+     * reference reports a `tip_priority` decision. Asserted rather than
+     * skipped, so the day the removed-member branch is modelled this fails and
+     * moves up to [replay].
+     */
+    @Test
+    fun accountDevicesOwnDeviceRemovalLosesToAnAdminRemove() {
+        val thrown =
+            assertFailsWith<IllegalStateException> {
+                runBlocking { MarmotScenarioRunner(load("account-devices-own-device-removal-loses-to-admin-remove.v1.json")).run() }
+            }
+        val divergences =
+            thrown.message
+                .orEmpty()
+                .lines()
+                .drop(1)
+                .map { it.trim() }
+        assertEquals(listOf("alice-phone settled no contested convergence pass"), divergences)
     }
 
     /**

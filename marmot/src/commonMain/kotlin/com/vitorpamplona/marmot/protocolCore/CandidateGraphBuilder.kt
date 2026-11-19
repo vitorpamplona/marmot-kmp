@@ -99,7 +99,8 @@ interface CandidateStateEngine<S> {
 
     /**
      * The commit's authorization class, from the rule that applies to it —
-     * `privileged` exactly when that rule requires an active admin.
+     * `privileged` exactly when that rule requires an active admin. Throws
+     * when the commit cannot be classified; the graph then refuses it.
      */
     fun tipPriority(
         parent: S,
@@ -214,6 +215,12 @@ class CandidateGraphBuilder<S>(
      *   ancestor it shares.
      * @param canonicalTipEpoch the LIVE tip, used for deferred-commit expiry —
      *   deliberately not [passBaseEpoch], which is frozen for eligibility.
+     * @param knownResults the state a commit is already known to produce, by
+     *   commit id: the canonical commits this client applied, whose resulting
+     *   states the retained window holds. A commit this client authored cannot
+     *   be replayed from its parent (MLS encrypts the UpdatePath to everyone but
+     *   its committer), so without this the incumbent branch of a race we are
+     *   half of would drop out and the peer's branch would win by default.
      */
     fun build(
         retainedStates: List<S>,
@@ -223,6 +230,7 @@ class CandidateGraphBuilder<S>(
         witnesses: List<WitnessObservation> = emptyList(),
         canonicalTipEpoch: Long,
         passBaseEpoch: Long,
+        knownResults: Map<HexKey, S> = emptyMap(),
     ): CandidateGraph<S> {
         val statesById = LinkedHashMap<String, S>()
         retainedStates.forEach { statesById[engine.stateId(it)] = it }
@@ -263,7 +271,7 @@ class CandidateGraphBuilder<S>(
                     continue
                 }
 
-                val resulting = engine.replay(parent, commit.bytes)
+                val resulting = knownResults[commit.id] ?: engine.replay(parent, commit.bytes)
                 if (resulting == null || !engine.resultingStateIsValid(resulting)) {
                     // No edge is created. A resulting state that breaks a
                     // component invariant must never become selectable.
@@ -272,12 +280,23 @@ class CandidateGraphBuilder<S>(
                     continue
                 }
 
+                // A commit whose class cannot be read gets no edge, as MDK
+                // refuses it, rather than a guessed priority.
+                val priority =
+                    try {
+                        engine.tipPriority(parent, commit.bytes)
+                    } catch (_: Exception) {
+                        outcomes[commit.id] =
+                            CommitOutcome(commit.id, ConvergenceDisposition.STALE, null, null)
+                        continue
+                    }
+
                 val childId = engine.stateId(resulting)
                 statesById[childId] = resulting
                 parentOf[childId] = engine.stateId(parent)
                 producedBy[childId] = commit
                 engine.committerIdentity(parent, commit.bytes)?.let { committerOf[childId] = it }
-                priorityOf[childId] = engine.tipPriority(parent, commit.bytes)
+                priorityOf[childId] = priority
                 outcomes[commit.id] =
                     CommitOutcome(commit.id, ConvergenceDisposition.ACCEPTED, null, childId)
             }
@@ -321,6 +340,18 @@ class CandidateGraphBuilder<S>(
             branchTips = branchTips,
         )
     }
+
+    /** The 2.x signature, kept so code compiled against it still links. */
+    @Deprecated("Use the overload with knownResults. Removed in 3.0.0.", level = DeprecationLevel.HIDDEN)
+    fun build(
+        retainedStates: List<S>,
+        canonicalStateId: String,
+        canonicalAncestry: List<String>,
+        commits: List<CandidateCommit>,
+        witnesses: List<WitnessObservation> = emptyList(),
+        canonicalTipEpoch: Long,
+        passBaseEpoch: Long,
+    ): CandidateGraph<S> = build(retainedStates, canonicalStateId, canonicalAncestry, commits, witnesses, canonicalTipEpoch, passBaseEpoch, emptyMap())
 
     private fun buildBranches(
         branchTips: MutableMap<HexKey, String>,

@@ -589,6 +589,9 @@ class MarmotInboundProcessor(
      */
     suspend fun settleDueConvergence(): List<ConvergenceResolution> = convergence.settleAllDue()
 
+    /** The last pass of [groupId] that settled a contest between branches, and how. */
+    suspend fun lastContestedResolution(groupId: HexKey): ConvergenceResolution? = convergence.lastContestedResolution(groupId)
+
     /** Groups with an open convergence pass, and the base epoch each snapshotted. */
     suspend fun openConvergencePasses(): Map<HexKey, Long> = convergence.openPasses()
 

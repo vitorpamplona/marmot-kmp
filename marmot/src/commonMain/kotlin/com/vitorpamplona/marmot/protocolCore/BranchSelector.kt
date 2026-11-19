@@ -89,6 +89,38 @@ object BranchSelector {
             .filter { it.isEligible(passBaseEpoch, policy) }
             .minWithOrNull(comparator(policy))
 
+    /**
+     * The step of [comparator] that ranks [winner] ahead of [runnerUp], as
+     * `protocol-core/convergence.md` and the conformance vectors name it
+     * (`decisive_rule`), or null when nothing separates them.
+     */
+    fun decisiveRule(
+        winner: CandidateBranch,
+        runnerUp: CandidateBranch,
+        policy: ConvergencePolicy = ConvergencePolicy.V1,
+    ): DecisiveRule? =
+        when {
+            winner.effectiveCommitDepth(policy) != runnerUp.effectiveCommitDepth(policy) -> DecisiveRule.EFFECTIVE_COMMIT_DEPTH
+            quorumRank(winner, policy) != quorumRank(runnerUp, policy) -> DecisiveRule.WITNESS_QUORUM
+            winner.appWitnessScore(policy) != runnerUp.appWitnessScore(policy) -> DecisiveRule.APP_WITNESS_SCORE
+            winner.tipPriority != runnerUp.tipPriority -> DecisiveRule.TIP_PRIORITY
+            compareUnsigned(winner.tipCommitter, runnerUp.tipCommitter) != 0 -> DecisiveRule.TIP_COMMITTER
+            compareUnsigned(winner.tipDigest, runnerUp.tipDigest) != 0 -> DecisiveRule.TIP_DIGEST
+            else -> null
+        }
+
+    /** The steps of branch selection, in order, by the names the spec and vectors use. */
+    enum class DecisiveRule(
+        val wireName: String,
+    ) {
+        EFFECTIVE_COMMIT_DEPTH("effective_commit_depth"),
+        WITNESS_QUORUM("witness_quorum"),
+        APP_WITNESS_SCORE("app_witness_score"),
+        TIP_PRIORITY("tip_priority"),
+        TIP_COMMITTER("tip_committer"),
+        TIP_DIGEST("tip_digest"),
+    }
+
     /** [branches] ordered most-preferred first, eligible ones only. */
     fun rank(
         branches: Collection<CandidateBranch>,
