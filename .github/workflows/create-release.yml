@@ -7,8 +7,8 @@ on:
 
 jobs:
   # A release must depend only on published artifacts: its POM names the Quartz and mls-kmp
-  # versions it was built against, so those have to be released (Quartz on Nostr + Blossom from
-  # 2.19.0, mls-kmp on Maven Central) before this one can be.
+  # versions it was built against, so those have to be released (both on Nostr + Blossom; a
+  # GitHub tag marks the release) before this one can be.
   check-dependencies:
     runs-on: ubuntu-latest
     steps:
@@ -27,7 +27,7 @@ jobs:
         run: |
           args=$(tools/ci/mls-kmp-args.sh 2>/dev/null || echo missing)
           if [ -n "$args" ]; then
-            echo "::error::The mls-kmp version in gradle/libs.versions.toml is not on Maven Central. Release mls-kmp first."
+            echo "::error::The mls-kmp version in gradle/libs.versions.toml is not released. Release mls-kmp first."
             exit 1
           fi
 
@@ -63,8 +63,17 @@ jobs:
             :marmot:iosSimulatorArm64Test \
             :marmot:compileTestKotlinIosArm64
 
-  # Apple klibs cross-compile on Linux; only Apple test binaries need a Mac.
-  deploy:
+  # Releases go to Nostr + Blossom only, through Magpie's publishToNostr (the plugin version is in
+  # settings.gradle.kts, the relays in gradle.properties); Maven Central has no release since the
+  # one that moved to Quartz 2.19.0, which isn't on Central either. The job runs the checks,
+  # uploads every file to the release key's Blossom servers (kind 10063) and signs one release
+  # event (kind 3071) per published module, sent to the key's own relays (its kind 10002 and
+  # nostr.json). The key never reaches CI: MAGPIE_BUNKER is a NIP-46 bunker URI, so the signer
+  # approves each release (the job waits for it), and vitorpamplona.com/.well-known/nostr.json
+  # must name the key as "releases" or Magpie refuses to sign. A version already on Nostr fails
+  # the job: releases are immutable. Apple klibs cross-compile on Linux; only Apple test binaries
+  # need a Mac.
+  nostr:
     needs: test-apple
     runs-on: ubuntu-latest
     permissions:
@@ -99,63 +108,7 @@ jobs:
       - name: Check
         run: ./gradlew :marmot:jvmTest :marmot:linuxX64Test :marmot-quic:jvmTest
 
-      - name: Build (gradle)
-        run: ./gradlew :marmot:assemble :marmot-quic:assemble
-
       # Tag v1.2.3 publishes version 1.2.3.
-      - name: Set version for tag
-        run: |
-          echo "ORG_GRADLE_PROJECT_VERSION_NAME=${GITHUB_REF_NAME#v}" >> $GITHUB_ENV
-
-      - name: Publish
-        run: ./gradlew :marmot:publishAllPublicationsToMavenCentral :marmot-quic:publishAllPublicationsToMavenCentral --no-configuration-cache
-        env:
-          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.SONATYPE_USERNAME }}
-          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.SONATYPE_PASSWORD }}
-          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_PRIVATE_KEY }}
-          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_PASSWORD }}
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v3
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          generate_release_notes: true
-
-  # The same publications on Nostr + Blossom, through Magpie's publishToNostr (the plugin version
-  # is in settings.gradle.kts, the relays in gradle.properties), beside the Maven Central job and
-  # independent of it: Central's upload limit can fail one without holding back the other. It runs
-  # the same checks first, uploads every file to the release key's Blossom servers (kind 10063)
-  # and signs one release event (kind 3071) per published module, sent to the key's own relays
-  # (its kind 10002 and nostr.json). The key never reaches CI: MAGPIE_BUNKER is a NIP-46 bunker
-  # URI, so the signer approves each release (the job waits for it), and
-  # vitorpamplona.com/.well-known/nostr.json must name the key as "releases" or Magpie refuses to
-  # sign. A version already on Nostr fails the job: releases are immutable.
-  nostr:
-    needs: test-apple
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
-
-      - name: Set up JDK 21
-        uses: actions/setup-java@v6.1.0
-        with:
-          distribution: 'temurin'
-          java-version: 21
-
-      - uses: gradle/actions/setup-gradle@v6
-
-      - name: Cache Kotlin/Native toolchain
-        uses: actions/cache@v6
-        with:
-          path: ~/.konan
-          key: konan-${{ runner.os }}-${{ hashFiles('gradle/libs.versions.toml') }}
-          restore-keys: konan-${{ runner.os }}-
-
-      - name: Check
-        run: ./gradlew :marmot:jvmTest :marmot:linuxX64Test :marmot-quic:jvmTest
-
       - name: Set version for tag
         run: |
           echo "ORG_GRADLE_PROJECT_VERSION_NAME=${GITHUB_REF_NAME#v}" >> $GITHUB_ENV
@@ -166,3 +119,9 @@ jobs:
           ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_PRIVATE_KEY }}
           ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_PASSWORD }}
           MAGPIE_BUNKER: ${{ secrets.MAGPIE_BUNKER }}
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v3
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          generate_release_notes: true
