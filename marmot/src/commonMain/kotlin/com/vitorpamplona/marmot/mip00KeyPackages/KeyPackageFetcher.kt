@@ -163,7 +163,8 @@ object KeyPackageFetcher {
         val found =
             drain<Event>(
                 client,
-                listOf(MarmotFilters.keyPackagesMigration(targetPubKey), MarmotFilters.keyPackageSlotDeletions(targetPubKey)),
+                // Kind 30443 only: the selection never falls back to a legacy 443.
+                listOf(MarmotFilters.keyPackagesByAuthor(targetPubKey), MarmotFilters.keyPackageSlotDeletions(targetPubKey)),
                 targetPubKey,
                 relays,
                 idleTimeoutMs,
@@ -184,6 +185,10 @@ object KeyPackageFetcher {
         val keyPackages: List<PublishedKeyPackage>,
         val relays: Set<NormalizedRelayUrl>,
     ) {
+        /** The 2.x constructor, from when a lookup found one KeyPackage. */
+        @Deprecated("Use the constructor with keyPackages. Removed in 3.0.0.", ReplaceWith("InviteLookup(listOfNotNull(keyPackage), relays)"))
+        constructor(keyPackage: PublishedKeyPackage?, relays: Set<NormalizedRelayUrl>) : this(listOfNotNull(keyPackage), relays)
+
         val keyPackage: PublishedKeyPackage? get() = keyPackages.firstOrNull()
     }
 
@@ -192,10 +197,10 @@ object KeyPackageFetcher {
      * then [fetchKeyPackageForInvite] across that set.
      *
      * Which relay lists to pass stays the caller's (a cache, a network fetch, a bootstrap pool);
-     * how to combine them and which KeyPackage to invite with is the protocol's, so every client
-     * asks the same relays and picks the same package. The result is always a valid package or
-     * null: [KeyPackageUtils.selectForInvite] already refuses empty content, a bad signature and
-     * a stale or malformed package. It selects every device's KeyPackage
+     * how to combine them and which KeyPackages to invite with is the protocol's, so every client
+     * asks the same relays and picks the same packages. Every package returned is valid:
+     * [KeyPackageUtils.selectAllForInvite] already refuses empty content, a bad signature and a
+     * stale or malformed package. It selects every device's KeyPackage
      * ([fetchKeyPackagesForInvite]); [compatible] is the group's requirement.
      */
     suspend fun fetchForInvite(
@@ -213,6 +218,19 @@ object KeyPackageFetcher {
         val keyPackages = fetchKeyPackagesForInvite(client, targetPubKey, relays, idleTimeoutMs, settleAfterFirstMs, nowSeconds, compatible)
         return InviteLookup(keyPackages, relays)
     }
+
+    /** The 2.x signature, kept so code compiled against it still links. */
+    @Deprecated("Use the overload with compatible. Removed in 3.0.0.", level = DeprecationLevel.HIDDEN)
+    suspend fun fetchForInvite(
+        client: INostrClient,
+        targetPubKey: HexKey,
+        targetOutbox: Collection<NormalizedRelayUrl>,
+        myOutbox: Collection<NormalizedRelayUrl>,
+        targetKeyPackageRelays: Collection<NormalizedRelayUrl> = emptySet(),
+        idleTimeoutMs: Long = 30_000,
+        settleAfterFirstMs: Long = 3_000,
+        nowSeconds: Long = TimeUtils.now(),
+    ): InviteLookup = fetchForInvite(client, targetPubKey, targetOutbox, myOutbox, targetKeyPackageRelays, idleTimeoutMs, settleAfterFirstMs, nowSeconds) { true }
 
     /**
      * Collect every [T] signed by [author] that the [filter] returns from [relays], stopping
