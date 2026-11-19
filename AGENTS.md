@@ -162,4 +162,6 @@ checks, publishes to Nostr + Blossom with Magpie's `publishToNostr` and opens th
 Releases are on Nostr + Blossom only. It needs `SIGNING_PRIVATE_KEY`, `SIGNING_PASSWORD` and
 `MAGPIE_BUNKER`, a NIP-46 `bunker://` URI for the release key that
 `vitorpamplona.com/.well-known/nostr.json` names as `releases`; the signer approves each release,
-and a version already on Nostr fails the job.
+and a version already on Nostr fails the job. If a release went out only in part (the signer did not
+answer for one module), re-running the tag's job fails on the module already released: run
+`create-release.yml` by hand from `main` with the tag and only the missing modules instead.

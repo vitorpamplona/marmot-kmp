@@ -4,6 +4,24 @@ on:
   push:
     tags:
     - 'v*' # Push events to matching v*, i.e. v1.0, v20.15.10
+  # Finishes a release that only partly published: a signer that didn't answer for one module
+  # leaves the others released, and a re-run of the tag's job fails on the first module already
+  # on Nostr (releases are immutable). Run it from main with the tag and only the missing modules:
+  # every job checks out the tag, so the files are built from the same commit as the rest.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'The release tag to publish, e.g. v2.3.0'
+        required: true
+      modules:
+        description: 'The modules to publish, separated by spaces (marmot, marmot-quic)'
+        required: true
+        default: 'marmot marmot-quic'
+
+# The tag every job checks out and publishes: the pushed tag, or the one a manual run names.
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+  RELEASE_MODULES: ${{ inputs.modules || 'marmot marmot-quic' }}
 
 jobs:
   # A release must depend only on published artifacts: its POM names the Quartz and mls-kmp
@@ -14,6 +32,21 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Tag and modules are valid
+        run: |
+          if ! [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::$RELEASE_TAG is not a release tag (vX.Y.Z)."
+            exit 1
+          fi
+          for module in $RELEASE_MODULES; do
+            case "$module" in
+              marmot|marmot-quic) ;;
+              *) echo "::error::Unknown module $module (marmot, marmot-quic)."; exit 1 ;;
+            esac
+          done
 
       - name: Quartz release is published
         run: |
@@ -40,6 +73,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Set up JDK 21
         uses: actions/setup-java@v6.1.0
@@ -71,7 +106,8 @@ jobs:
   # nostr.json). The key never reaches CI: MAGPIE_BUNKER is a NIP-46 bunker URI, so the signer
   # approves each release (the job waits for it), and vitorpamplona.com/.well-known/nostr.json
   # must name the key as "releases" or Magpie refuses to sign. A version already on Nostr fails
-  # the job: releases are immutable. Apple klibs cross-compile on Linux; only Apple test binaries
+  # the job: releases are immutable, so when only some modules went out, finish the release with a
+  # manual run of this workflow that names the tag and the missing modules. Apple klibs cross-compile on Linux; only Apple test binaries
   # need a Mac.
   nostr:
     needs: test-apple
@@ -82,6 +118,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Set up JDK 21
         uses: actions/setup-java@v6.1.0
@@ -111,10 +149,13 @@ jobs:
       # Tag v1.2.3 publishes version 1.2.3.
       - name: Set version for tag
         run: |
-          echo "ORG_GRADLE_PROJECT_VERSION_NAME=${GITHUB_REF_NAME#v}" >> $GITHUB_ENV
+          echo "ORG_GRADLE_PROJECT_VERSION_NAME=${RELEASE_TAG#v}" >> $GITHUB_ENV
 
       - name: Publish to Nostr
-        run: ./gradlew :marmot:publishToNostr :marmot-quic:publishToNostr --no-configuration-cache
+        run: |
+          tasks=()
+          for module in $RELEASE_MODULES; do tasks+=(":$module:publishToNostr"); done
+          ./gradlew "${tasks[@]}" --no-configuration-cache
         env:
           ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_PRIVATE_KEY }}
           ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_PASSWORD }}
@@ -124,4 +165,5 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: ${{ env.RELEASE_TAG }}
           generate_release_notes: true
