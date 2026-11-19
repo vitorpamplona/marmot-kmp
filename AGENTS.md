@@ -45,9 +45,13 @@ checked against MDK, the reference implementation (<https://github.com/marmot-pr
 - `marmot-bench/`: marmot-kmp against MDK, operation for operation (`./gradlew :marmot-bench:run`).
   Not published.
 - `gradle/kmp-purity.gradle.kts`: the `verifyKmpPurity` task, the same file as Quartz's.
+- `settings.gradle.kts` applies Magpie's settings plugin: Quartz (since 2.19.0), crypto-kmp and
+  libschnorr256k1-kotlin release on Nostr + Blossom, and `gradle/magpie.lock` pins their release key
+  and files. Commit the lock's changes with a version bump; a lock failure means a key or a release
+  changed, so ask before editing it.
 - `tools/ci/quartz-args.sh`: points the build at a Quartz checkout while the pinned Quartz release is
-  not on Maven Central yet (CI and the pre-push hook call it). `tools/ci/mls-kmp-args.sh` does the
-  same for mls-kmp.
+  neither in `gradle/magpie.lock` nor on Maven Central (CI and the pre-push hook call it).
+  `tools/ci/mls-kmp-args.sh` does the same for mls-kmp.
 
 ## Rules
 
@@ -103,7 +107,7 @@ it before stating it: write the failing case first, watch it fail, then explain.
 ./gradlew :marmot:iosSimulatorArm64Test         # macOS only
 ```
 
-Until the Quartz version in `gradle/libs.versions.toml` is on Maven Central, add
+Until the Quartz version in `gradle/libs.versions.toml` is released (on Magpie since 2.19.0), add
 `-PquartzDir=../quartz` (a checkout beside this repo); `-PmlsKmpDir` and `-PcryptoKmpDir` work the
 same way, and so does `-PquicKmpDir`. To try a change in Amethyst, build Amethyst with
 `-PmarmotKmpDir=../marmot-kmp` (it substitutes both `marmot` and `marmot-quic`).

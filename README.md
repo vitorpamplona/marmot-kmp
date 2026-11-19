@@ -25,6 +25,23 @@ dependencies {
 }
 ```
 
+It depends on [Quartz](https://github.com/vitorpamplona/quartz), which since 2.19.0 releases on
+Nostr + Blossom through [Magpie](https://github.com/vitorpamplona/magpie), along with crypto-kmp and
+libschnorr256k1-kotlin. Add Magpie's settings plugin and commit the `gradle/magpie.lock` it writes;
+Gradle has to run on Java 21 or newer, and JVM apps need Java 21:
+
+```kotlin settings.gradle.kts
+plugins {
+    id("com.vitorpamplona.magpie") version "0.2.0"
+}
+
+magpie {
+    group("com.vitorpamplona.crypto")
+    group("com.vitorpamplona.schnorr256k1")
+    group("com.vitorpamplona.quartz")
+}
+```
+
 The Marmot event classes (`KeyPackageEvent`, `WelcomeEvent`, `GroupEvent`, the push events) are
 part of Quartz, under `com.vitorpamplona.quartz.marmot`, so they parse typed with no setup.
 

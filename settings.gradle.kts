@@ -6,6 +6,21 @@ pluginManagement {
     }
 }
 
+// Quartz (vitorpamplona/quartz, since 2.19.0), crypto-kmp (vitorpamplona/crypto-kmp) and
+// libschnorr256k1-kotlin (vitorpamplona/libschnorr256k1-kotlin) are released on Nostr + Blossom:
+// Magpie serves their groups, trusting only the release key vitorpamplona.com names as `releases`,
+// and gradle/magpie.lock pins that key and every resolved version's files. Magpie verifies
+// signatures inside the Gradle daemon, so Gradle runs on Java 21 or newer.
+plugins {
+    id("com.vitorpamplona.magpie") version "0.2.0"
+}
+
+magpie {
+    group("com.vitorpamplona.crypto")
+    group("com.vitorpamplona.schnorr256k1")
+    group("com.vitorpamplona.quartz")
+}
+
 dependencyResolutionManagement {
     repositories {
         google()
@@ -27,9 +42,9 @@ include(":marmot-quic")
 // marmot-kmp against MDK, head to head. Not published.
 include(":marmot-bench")
 
-// Quartz (vitorpamplona/quartz), mls-kmp (vitorpamplona/mls-kmp), crypto-kmp
-// (vitorpamplona/crypto-kmp) and quic-kmp (vitorpamplona/quic-kmp) come from Maven Central. To
-// change one alongside Marmot, point Gradle at a local checkout and it builds that checkout instead of the published artifact:
+// mls-kmp (vitorpamplona/mls-kmp) and quic-kmp (vitorpamplona/quic-kmp) come from Maven Central,
+// Quartz and crypto-kmp from Magpie (above). To change one alongside Marmot, point Gradle at a
+// local checkout and it builds that checkout instead of the published artifact:
 //   ./gradlew -PquartzDir=../quartz :marmot:jvmTest
 // When this build is itself an included build (Amethyst's -PmarmotKmpDir), the same -P flags reach
 // this file too; the outer build includes those checkouts once for the whole composite, so skip them.
