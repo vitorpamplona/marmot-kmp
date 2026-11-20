@@ -86,6 +86,12 @@ object CurrentProfileGroupFactory {
             AppComponentIds.ACCOUNT_IDENTITY_PROOF_V2,
             AppComponentIds.GROUP_ENCRYPTED_MEDIA_V2,
             AppComponentIds.GROUP_LIFECYCLE_V1,
+            // `0x800d` account-devices: enforced by `MarmotGroupPolicy` through
+            // `AccountDevicesV1` (same-account commits, the support invariant,
+            // the 20-leaf limit, no data, never un-required). MDK refuses to
+            // invite a KeyPackage without it into a group that requires it, and
+            // every group its users create requires it when they all support it.
+            AppComponentIds.ACCOUNT_DEVICES_V1,
             // `0x8006` agent-text-stream-QUIC is a SUPPORT claim, not a
             // running service. Nothing in the app dials a broker — see
             // `marmotQuic/README.md` — but the reference client puts this
@@ -168,6 +174,28 @@ object CurrentProfileGroupFactory {
         )
     }
 
+    /** The 2.x signature, kept so code compiled against it still links. */
+    @Deprecated("Use the overload with supportedComponents. Removed in 3.0.0.", level = DeprecationLevel.HIDDEN)
+    suspend fun createKeyPackage(
+        signer: NostrSigner,
+        lastResort: Boolean = true,
+        ciphersuite: MlsCiphersuite = MlsCiphersuite.DEFAULT,
+    ): KeyPackageBundle = createKeyPackage(signer, lastResort, ciphersuite, SUPPORTED_COMPONENTS)
+
+    /** The 2.x signature, kept so code compiled against it still links. */
+    @Deprecated("Use the overload with supportedComponents. Removed in 3.0.0.", level = DeprecationLevel.HIDDEN)
+    suspend fun createGroup(
+        signer: NostrSigner,
+        nostrGroupId: ByteArray,
+        relays: List<String>,
+        profile: GroupProfileV1? = null,
+        additionalAdmins: List<ByteArray> = emptyList(),
+        retention: MessageRetentionV1? = null,
+        encryptedMedia: EncryptedMediaPolicyV2? = null,
+        agentTextStream: AgentTextStreamQuicPolicyV1? = null,
+        ciphersuite: MlsCiphersuite = MlsCiphersuite.DEFAULT,
+    ): MlsGroup = createGroup(signer, nostrGroupId, relays, profile, additionalAdmins, retention, encryptedMedia, agentTextStream, ciphersuite, SUPPORTED_COMPONENTS)
+
     /**
      * Create a current-profile group with [signer]'s account as its sole
      * initial admin.
@@ -200,9 +228,11 @@ object CurrentProfileGroupFactory {
         encryptedMedia: EncryptedMediaPolicyV2? = null,
         agentTextStream: AgentTextStreamQuicPolicyV1? = null,
         ciphersuite: MlsCiphersuite = MlsCiphersuite.DEFAULT,
+        /** The component ids the creator's leaf advertises. */
+        supportedComponents: List<Int> = SUPPORTED_COMPONENTS,
     ): MlsGroup {
         val identity = signer.pubKey.hexToByteArray()
-        val leaf = newLeafIdentity(signer, ciphersuite)
+        val leaf = newLeafIdentity(signer, ciphersuite, supportedComponents)
 
         val dictionary =
             MarmotGroupState.buildDictionary(

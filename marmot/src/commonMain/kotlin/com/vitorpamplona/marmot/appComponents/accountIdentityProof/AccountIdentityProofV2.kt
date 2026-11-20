@@ -21,8 +21,14 @@
 package com.vitorpamplona.marmot.appComponents.accountIdentityProof
 
 import com.vitorpamplona.marmot.appComponents.AppComponentIds
+import com.vitorpamplona.marmot.appComponents.MarmotProtocolProfile
 import com.vitorpamplona.marmot.foundation.authorizationProofs.MarmotAuthorizationProof
 import com.vitorpamplona.marmot.mip01Groups.MlsCiphersuite
+import com.vitorpamplona.mls.components.AppDataDictionary
+import com.vitorpamplona.mls.components.ComponentsList
+import com.vitorpamplona.mls.messages.MlsKeyPackage
+import com.vitorpamplona.mls.tree.Credential
+import com.vitorpamplona.mls.tree.LeafNode
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.core.HexKey
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
@@ -227,6 +233,35 @@ object AccountIdentityProofV2 {
         }
         return Result.VALID
     }
+
+    /**
+     * Why [leaf], a LeafNode a commit introduces into a current-profile group
+     * (an Add's KeyPackage leaf, an Update, the committer's UpdatePath leaf) or
+     * one a joined tree holds, does not carry a valid proof; null when it does.
+     *
+     * MDK's `validate_leaf_account_identity_proof` on the current profile: a
+     * BasicCredential whose identity is a 32-byte account key, no legacy
+     * `0xf2f1` proof extension beside the component, `0x8009` advertised in
+     * the leaf's own `app_components` list, and a proof over this leaf's
+     * signature key that the credential's account signed under [ciphersuite].
+     */
+    fun leafProblem(
+        leaf: LeafNode,
+        ciphersuite: MlsCiphersuite = MlsCiphersuite.DEFAULT,
+    ): String? {
+        val identity = (leaf.credential as? Credential.Basic)?.identity ?: return "the leaf has no BasicCredential"
+        if (identity.size != MarmotAuthorizationProof.PUBKEY_SIZE) return "the credential identity is not a 32-byte account key"
+        if (leaf.extensions.any { it.extensionType == MarmotProtocolProfile.LEGACY_ACCOUNT_IDENTITY_PROOF_EXTENSION_TYPE }) {
+            return "the leaf mixes the legacy proof extension 0xf2f1 with the current profile"
+        }
+        val dictionary = AppDataDictionary.fromExtensions(leaf.extensions) ?: return "the leaf carries no proof component 0x8009"
+        if (COMPONENT_ID !in ComponentsList.supportedOrRequired(dictionary)) return "the leaf does not advertise 0x8009"
+        val result = validate(dictionary[COMPONENT_ID], identity, leaf.signatureKey, ciphersuite)
+        return if (result == Result.VALID) null else "the leaf's account identity proof is $result"
+    }
+
+    /** The ciphersuite [keyPackage] names, for checking the proof of its leaf; null for one Marmot does not know. */
+    fun ciphersuiteOf(keyPackage: MlsKeyPackage): MlsCiphersuite? = MlsCiphersuite.fromCode(AppComponentIds.toHex(keyPackage.cipherSuite))
 
     /** True only for [Result.VALID]; use [validate] when the reason matters. */
     fun isValid(

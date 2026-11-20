@@ -48,6 +48,7 @@ import com.vitorpamplona.quartz.marmot.mip00KeyPackages.tags.MlsProposalsTag
 import com.vitorpamplona.quartz.marmot.mip00KeyPackages.tags.MlsProtocolVersionTag
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.core.HexKey
+import com.vitorpamplona.quartz.nip01Core.core.fastAny
 import com.vitorpamplona.quartz.nip01Core.core.toHexKey
 import com.vitorpamplona.quartz.nip01Core.relay.normalizer.NormalizedRelayUrl
 import com.vitorpamplona.quartz.nip01Core.signers.EventTemplate
@@ -196,6 +197,111 @@ object KeyPackageUtils {
         val byAuthor = candidates.filter { it.pubKey == author }
         return newestValid(byAuthor.filterIsInstance<KeyPackageEvent>(), nowSeconds)
             ?: newestValid(byAuthor.filterIsInstance<LegacyKeyPackageEvent>(), nowSeconds)
+    }
+
+    /** NIP-09 deletion request kind. */
+    const val DELETION_KIND = 5
+
+    /** `foundation/key-packages.md`: a candidate is fresh when published at most 30 days before selection. */
+    const val FRESH_SECONDS = 2_592_000L
+
+    /** `foundation/key-packages.md`: at most 20 KeyPackages of one account in one Commit. */
+    const val MAX_PER_ACCOUNT = 20
+
+    /**
+     * How far past the selection time a KeyPackage's `created_at` may lie and
+     * still be considered: MDK's directory default (five minutes). A later one
+     * is skipped before its slot is chosen, so it cannot supersede the slot's
+     * current publication.
+     */
+    const val MAX_FUTURE_SKEW_SECONDS = 300L
+
+    /**
+     * Every KeyPackage to invite [author] with — one leaf per device
+     * (`foundation/key-packages.md`, "Selection and lifecycle";
+     * `transports/nostr.md`, "Slot deletion"), as MDK's
+     * `select_key_packages_from_records` chooses them:
+     *
+     * 1. Only [author]'s kind 30443 events count, none dated more than
+     *    [MAX_FUTURE_SKEW_SECONDS] in the future. Each `d` slot's newest
+     *    publication is its candidate (ties to the lower id), and the slot has
+     *    none when that one is deleted or invalid ([isCryptographicallyValid]).
+     *    A deletion is a kind-5 event by [author] that names the candidate by
+     *    `e`, or names its slot by `a` (`30443:<author>:<d>`, the author in any
+     *    case) and is at or after the candidate's `created_at`.
+     * 2. [compatible] must hold — every primitive and component the group
+     *    will require. Freshness never overrides it.
+     * 3. Ranked non-last-resort first, then newest, then lower KeyPackageRef.
+     *    Of candidates sharing a leaf signature key (one device publishing in
+     *    several slots) only the highest-ranked stays: a Commit cannot add two
+     *    leaves with one key, and the second would get a Welcome without its
+     *    secrets. Every candidate published within [FRESH_SECONDS], at most
+     *    [MAX_PER_ACCOUNT]; with none fresh, the single highest-ranked one.
+     *
+     * There is no legacy kind 443 fallback: MDK never selects a legacy
+     * publication, so an account with only those is not invited.
+     */
+    @OptIn(ExperimentalEncodingApi::class)
+    fun selectAllForInvite(
+        candidates: Collection<Event>,
+        author: HexKey,
+        nowSeconds: Long = TimeUtils.now(),
+        compatible: (MlsKeyPackage) -> Boolean = { true },
+    ): List<PublishedKeyPackage> {
+        val deletions = candidates.filter { it.kind == DELETION_KIND && it.pubKey == author }
+
+        fun namesSlot(
+            reference: String,
+            slot: String,
+        ): Boolean {
+            val parts = reference.split(':', limit = 3)
+            return parts.size == 3 && parts[0].toIntOrNull() == KeyPackageEvent.KIND && parts[1].equals(author, ignoreCase = true) && parts[2] == slot
+        }
+
+        fun deleted(event: KeyPackageEvent): Boolean {
+            val slot = event.dTag()
+            return deletions.any { deletion ->
+                deletion.tags.fastAny { it.size >= 2 && it[0] == "e" && it[1].equals(event.id, ignoreCase = true) } ||
+                    (deletion.createdAt >= event.createdAt && deletion.tags.fastAny { it.size >= 2 && it[0] == "a" && namesSlot(it[1], slot) })
+            }
+        }
+
+        class Ranked(
+            val event: KeyPackageEvent,
+            val lastResort: Boolean,
+            val ref: String,
+            val signatureKey: HexKey,
+        )
+
+        val ranked =
+            candidates
+                .filterIsInstance<KeyPackageEvent>()
+                .filter { it.pubKey == author && it.createdAt <= nowSeconds + MAX_FUTURE_SKEW_SECONDS }
+                // One current publication per slot: the newest, ties to the lower id.
+                .groupBy { it.dTag() }
+                .mapNotNull { (_, slot) -> slot.sortedWith(compareByDescending<KeyPackageEvent> { it.createdAt }.thenBy { it.id }).first() }
+                .filter { !deleted(it) && isCryptographicallyValid(it, nowSeconds) }
+                .mapNotNull { event ->
+                    val keyPackage =
+                        try {
+                            decodeKeyPackage(Base64.decode(event.content))
+                        } catch (_: Throwable) {
+                            return@mapNotNull null
+                        }
+                    if (!compatible(keyPackage)) return@mapNotNull null
+                    val lastResort = AppDataDictionary.fromExtensionsOrEmpty(keyPackage.extensions).contains(ComponentsList.LAST_RESORT_KEY_PACKAGE_ID)
+                    Ranked(event, lastResort, event.keyPackageRef().orEmpty().lowercase(), keyPackage.leafNode.signatureKey.toHexKey())
+                }.sortedWith(compareBy<Ranked> { it.lastResort }.thenByDescending { it.event.createdAt }.thenBy { it.ref })
+
+        val hasFresh = ranked.any { nowSeconds - it.event.createdAt <= FRESH_SECONDS }
+        val signatureKeys = HashSet<HexKey>()
+        return ranked
+            .asSequence()
+            .filter { !hasFresh || nowSeconds - it.event.createdAt <= FRESH_SECONDS }
+            .filter { signatureKeys.add(it.signatureKey) }
+            .take(if (hasFresh) MAX_PER_ACCOUNT else 1)
+            .map { it.event }
+            .toList()
     }
 
     private fun newestValid(

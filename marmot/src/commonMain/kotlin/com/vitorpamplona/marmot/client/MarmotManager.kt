@@ -30,6 +30,7 @@ import com.vitorpamplona.marmot.MarmotWelcomeSender
 import com.vitorpamplona.marmot.OutboundGroupEvent
 import com.vitorpamplona.marmot.WelcomeDelivery
 import com.vitorpamplona.marmot.WelcomeResult
+import com.vitorpamplona.marmot.appComponents.AccountDevicesV1
 import com.vitorpamplona.marmot.appComponents.AdminPolicyV1
 import com.vitorpamplona.marmot.appComponents.CurrentProfileGroupFactory
 import com.vitorpamplona.marmot.appComponents.EncryptedMediaPolicyV2
@@ -40,6 +41,7 @@ import com.vitorpamplona.marmot.appComponents.GroupBlossomImageV1
 import com.vitorpamplona.marmot.appComponents.GroupLifecycleV1
 import com.vitorpamplona.marmot.appComponents.GroupProfileV1
 import com.vitorpamplona.marmot.appComponents.MarmotGroupState
+import com.vitorpamplona.marmot.appComponents.MarmotProtocolProfile
 import com.vitorpamplona.marmot.appComponents.MessageRetentionV1
 import com.vitorpamplona.marmot.appComponents.agentTextStream.AgentTextStreamCrypto
 import com.vitorpamplona.marmot.appComponents.agentTextStream.AgentTextStreamFinal
@@ -74,8 +76,10 @@ import com.vitorpamplona.marmot.protocolCore.MarmotPublishGate
 import com.vitorpamplona.marmot.protocolCore.MarmotPublishObligation
 import com.vitorpamplona.marmot.protocolCore.MarmotPublishObligationStore
 import com.vitorpamplona.marmot.protocolCore.PublishOutcome
+import com.vitorpamplona.mls.components.ComponentsList
 import com.vitorpamplona.mls.group.MlsGroup
 import com.vitorpamplona.mls.messages.CommitResult
+import com.vitorpamplona.mls.messages.MlsKeyPackage
 import com.vitorpamplona.mls.tree.Credential
 import com.vitorpamplona.quartz.marmot.mip00KeyPackages.KeyPackageEvent
 import com.vitorpamplona.quartz.marmot.mip00KeyPackages.PublishedKeyPackage
@@ -160,9 +164,28 @@ class MarmotManager(
      * until the next message happens to arrive.
      */
     private val scope: CoroutineScope? = null,
+    /**
+     * The component ids this client supports, advertised in every leaf and
+     * KeyPackage it makes. Defaults to [CurrentProfileGroupFactory.SUPPORTED_COMPONENTS];
+     * the conformance runner passes fewer to play an older client.
+     */
+    val supportedComponents: List<Int> = CurrentProfileGroupFactory.SUPPORTED_COMPONENTS,
 ) {
-    val groupManager = MlsGroupManager(store)
-    val keyPackageRotationManager = KeyPackageRotationManager(keyPackageStore)
+    /** The 2.x constructor, kept so code compiled against it still links. */
+    @Deprecated("Use the constructor with supportedComponents. Removed in 3.0.0.", level = DeprecationLevel.HIDDEN)
+    constructor(
+        signer: NostrSigner,
+        store: MlsGroupStateStore,
+        messageStore: MarmotMessageStore? = null,
+        keyPackageStore: KeyPackageBundleStore? = null,
+        publisher: MarmotPublisher = MarmotPublisher { _, _ -> false },
+        publishObligationStore: MarmotPublishObligationStore? = null,
+        ingestDedupStore: MarmotIngestDedupStore? = null,
+        scope: CoroutineScope? = null,
+    ) : this(signer, store, messageStore, keyPackageStore, publisher, publishObligationStore, ingestDedupStore, scope, CurrentProfileGroupFactory.SUPPORTED_COMPONENTS)
+
+    val groupManager = MlsGroupManager(store, supportedComponents)
+    val keyPackageRotationManager = KeyPackageRotationManager(keyPackageStore, supportedComponents)
     val subscriptionManager = MarmotSubscriptionManager(signer.pubKey)
     val inboundProcessor = MarmotInboundProcessor(groupManager, keyPackageRotationManager)
     val outboundProcessor = MarmotOutboundProcessor(groupManager)
@@ -1072,8 +1095,11 @@ class MarmotManager(
         relays: List<NormalizedRelayUrl>,
     ): Pair<OutboundGroupEvent?, List<WelcomeDelivery>> {
         require(invites.isNotEmpty()) { "addMemberInvites: invites must not be empty" }
-        require(invites.map { it.memberPubKey }.toSet().size == invites.size) {
-            "addMemberInvites: the same member appears twice in one commit"
+        // Several KeyPackages of one account are several devices, and each is
+        // invited (`foundation/key-packages.md`, "Selection and lifecycle"). The
+        // same KeyPackage twice is a mistake.
+        require(invites.map { it.keyPackageEventId }.toSet().size == invites.size) {
+            "addMemberInvites: the same KeyPackage appears twice in one commit"
         }
 
         // Verify that each KeyPackage credential matches the expected member
@@ -1098,7 +1124,16 @@ class MarmotManager(
         val keyPackageBytes = decoded.map { it.toTlsBytes() }
 
         if (isFoundingAdd(nostrGroupId)) {
-            return commitFoundingAdd(nostrGroupId, invites, relays, keyPackageBytes)
+            return commitFoundingAdd(nostrGroupId, invites, relays, keyPackageBytes, decoded)
+        }
+
+        // `account-devices-v1.md`, "Sender rules": a device adds a KeyPackage of
+        // its own account to a group that already has members only once it has
+        // authenticated that KeyPackage as a device its user approved. Anyone
+        // holding the account key can publish one, and this client has no such
+        // authentication, so it never commits a same-account Add after founding.
+        require(invites.none { it.memberPubKey == signer.pubKey }) {
+            "addMemberInvites: this client does not add devices of its own account to an existing group"
         }
 
         // Per RFC 9420 §12.4 (and MDK), the outbound kind:445 MUST be
@@ -1176,13 +1211,16 @@ class MarmotManager(
         invites: List<MemberInvite>,
         relays: List<NormalizedRelayUrl>,
         keyPackageBytes: List<ByteArray>,
+        keyPackages: List<MlsKeyPackage>,
     ): Pair<OutboundGroupEvent?, List<WelcomeDelivery>> {
         requireOutboundAllowed(nostrGroupId, "add the founding members")
+        val requireAccountDevices = foundingRequiresAccountDevices(nostrGroupId, keyPackages)
         Log.d("MarmotManager") {
-            "commitFoundingAdd($nostrGroupId): ${invites.size} founding invitee(s), merging locally"
+            "commitFoundingAdd($nostrGroupId): ${invites.size} founding invitee(s), merging locally" +
+                if (requireAccountDevices) ", requiring account-devices" else ""
         }
 
-        val staged = groupManager.stageAddMembers(nostrGroupId, keyPackageBytes)
+        val staged = groupManager.stageFoundingAdd(nostrGroupId, keyPackageBytes, requireAccountDevices)
 
         // Straight to canonical. No obligation is prepared, so there is no
         // record that could later be retried or resolved — which is the point:
@@ -1213,6 +1251,26 @@ class MarmotManager(
             }
 
         return Pair(null, welcomeDeliveries)
+    }
+
+    /**
+     * `protocol-core/group-setup.md`: a creator that supports
+     * `marmot.group.account-devices.v1` MUST require it when its own leaf and
+     * every founding KeyPackage advertise it; never in a legacy group. When
+     * that founding Add would then break the component's own rules (an account
+     * over the leaf limit, a `0x800d` data entry), the founding commit is
+     * refused before any Welcome exists, as MDK refuses the creation, rather
+     * than quietly founding a group that does not require it.
+     */
+    private fun foundingRequiresAccountDevices(
+        nostrGroupId: HexKey,
+        keyPackages: List<MlsKeyPackage>,
+    ): Boolean {
+        if (AccountDevicesV1.COMPONENT_ID !in supportedComponents) return false
+        val group = groupManager.getGroup(nostrGroupId) ?: return false
+        if (!MarmotProtocolProfile.isCurrent(group.extensions)) return false
+        val leaves = group.members().map { it.second } + keyPackages.map { it.leafNode }
+        return leaves.all { AccountDevicesV1.isAdvertisedBy(it) }
     }
 
     /**
@@ -1262,6 +1320,10 @@ class MarmotManager(
      * The group is built outside the manager because a leaf's identity proof
      * covers its OWN signature key, so the keypair must exist and be authorized
      * by the account signer before the leaf is built.
+     *
+     * Every admin must hold a leaf (the admin–leaf coupling rule every member
+     * checks on each commit), so [additionalAdmins] must be among the founding
+     * invitees; otherwise the founding Add is refused.
      */
     suspend fun createCurrentProfileGroup(
         nostrGroupId: HexKey,
@@ -1279,6 +1341,7 @@ class MarmotManager(
                 profile = profile,
                 additionalAdmins = additionalAdmins,
                 retention = retention,
+                supportedComponents = supportedComponents,
             )
         groupManager.adoptGroup(nostrGroupId, group)
         // Same empty-obligation exception as [createGroup]: a one-member
@@ -2338,7 +2401,11 @@ class MarmotManager(
     var onMessagesExpired: ((nostrGroupId: HexKey, innerEventIds: Set<HexKey>) -> Unit)? = null
 
     /**
-     * Remove a member from a group.
+     * Remove ONE leaf — one device — from a group.
+     *
+     * To remove a person use [removeAccount]: an account with several devices
+     * stays a member through every leaf this leaves behind
+     * (`protocol-core/member-departure.md`, "Accounts with several devices").
      * Returns the commit GroupEvent to publish.
      */
     suspend fun removeMember(
@@ -2348,6 +2415,99 @@ class MarmotManager(
     ): OutboundGroupEvent =
         commitAndPublish(nostrGroupId, relays) {
             groupManager.stageRemoveMember(nostrGroupId, targetLeafIndex)
+        }.event
+
+    /**
+     * Remove an account from a group: a Remove for EVERY current leaf with
+     * that account identity, in one Commit, so the account is never left
+     * partly removed (`protocol-core/member-departure.md`). When the account
+     * is an admin, the same Commit drops it from the admin policy, as the
+     * coupling rule in `app-components/admin-policy-v1.md` requires; a legacy
+     * (MIP-era) group keeps its admin list in `0xF2EE` and is left as it was.
+     *
+     * Returns the commit GroupEvent to publish.
+     */
+    suspend fun removeAccount(
+        nostrGroupId: HexKey,
+        account: HexKey,
+        relays: List<NormalizedRelayUrl> = groupRelays(nostrGroupId),
+    ): OutboundGroupEvent {
+        require(account != signer.pubKey) { "removeAccount: to leave a group use leave()" }
+        val leaves = leafIndicesOf(nostrGroupId, account)
+        require(leaves.isNotEmpty()) { "removeAccount: ${account.take(8)}… is not a member of $nostrGroupId" }
+        val view = groupView(nostrGroupId) ?: throw IllegalStateException("Not a member of group $nostrGroupId")
+        val admins =
+            if (view.isCurrentProfile && account in view.adminPubkeys) {
+                view.adminPubkeys.filter { it != account }
+            } else {
+                null
+            }
+        return commitAndPublish(nostrGroupId, relays) {
+            groupManager.stageRemoveMembers(nostrGroupId, leaves, admins)
+        }.event
+    }
+
+    /**
+     * Remove other devices of THIS account from a group without admin
+     * authority: a same-account Commit (`app-components/account-devices-v1.md`),
+     * allowed only once the group requires `marmot.group.account-devices.v1`.
+     * Use it to carry out the user's decision to drop a device, or a device's
+     * own request (signing out).
+     */
+    suspend fun removeOwnAccountDevices(
+        nostrGroupId: HexKey,
+        leafIndices: Collection<Int>,
+        relays: List<NormalizedRelayUrl> = groupRelays(nostrGroupId),
+    ): OutboundGroupEvent {
+        require(leafIndices.isNotEmpty()) { "removeOwnAccountDevices: no devices named" }
+        val group = groupManager.getGroup(nostrGroupId) ?: throw IllegalStateException("Not a member of group $nostrGroupId")
+        check(AccountDevicesV1.isRequired(group.extensions)) {
+            "removeOwnAccountDevices: the group does not require marmot.group.account-devices.v1"
+        }
+        val own = leafIndicesOf(nostrGroupId, signer.pubKey).toSet() - group.leafIndex
+        require(own.containsAll(leafIndices)) { "removeOwnAccountDevices: every leaf must be another device of this account" }
+        return commitAndPublish(nostrGroupId, relays) {
+            groupManager.stageRemoveOwnAccountDevices(nostrGroupId, leafIndices)
+        }.event
+    }
+
+    /**
+     * Whether a KeyPackage can join [nostrGroupId] as it stands: it advertises
+     * every app component the group requires (`foundation/key-packages.md`,
+     * "Selection and lifecycle": an inviter MUST NOT select an incompatible
+     * candidate). Pass it to `KeyPackageFetcher.fetchForInvite`. A group this
+     * client does not hold accepts everything; the Add itself checks again.
+     */
+    fun inviteCompatibility(nostrGroupId: HexKey): (MlsKeyPackage) -> Boolean {
+        val group = groupManager.getGroup(nostrGroupId) ?: return { true }
+        val required = ComponentsList.supportedOrRequired(group.appDataDictionary()).toSet()
+        return { keyPackage -> AccountDevicesV1.advertised(keyPackage.leafNode.extensions).containsAll(required) }
+    }
+
+    /** Whether [nostrGroupId] requires `marmot.group.account-devices.v1`. */
+    fun requiresAccountDevices(nostrGroupId: HexKey): Boolean = groupManager.getGroup(nostrGroupId)?.let { AccountDevicesV1.isRequired(it.extensions) } == true
+
+    /**
+     * Why the group cannot activate account-devices now, or null when it can
+     * (`account-devices-v1.md`, "Activation in an existing group"). A
+     * non-admin is told only that.
+     */
+    fun accountDevicesActivationBlocker(nostrGroupId: HexKey): String? {
+        if (!isGroupAdmin(nostrGroupId)) return "only an admin can turn it on"
+        return groupManager.accountDevicesActivationBlocker(nostrGroupId)
+    }
+
+    /**
+     * Make the group require `marmot.group.account-devices.v1`, an admin's
+     * explicit decision. Refused, with nothing published, while
+     * [accountDevicesActivationBlocker] names a reason.
+     */
+    suspend fun requireAccountDevices(
+        nostrGroupId: HexKey,
+        relays: List<NormalizedRelayUrl> = groupRelays(nostrGroupId),
+    ): OutboundGroupEvent =
+        commitAndPublish(nostrGroupId, relays) {
+            groupManager.stageRequireAccountDevices(nostrGroupId)
         }.event
 
     /**
@@ -3173,7 +3333,7 @@ class MarmotManager(
      */
     suspend fun replaceStaleKeyPackages(relays: List<NormalizedRelayUrl>): List<KeyPackageEvent> =
         keyPackageRotationManager
-            .slotsAdvertisingLessThan(CurrentProfileGroupFactory.SUPPORTED_COMPONENTS)
+            .slotsAdvertisingLessThan(supportedComponents)
             .map { slot -> mintKeyPackageEventForSlot(slot, relays, currentProfile = true) }
 
     // ── Stale own leaves (`app-components/README.md`, "Advertising support") ──
@@ -3232,6 +3392,17 @@ class MarmotManager(
     }
 
     /**
+     * Commit a self-update in [nostrGroupId] now: fresh path keys, and a leaf
+     * that advertises every component this client supports (the advertisement
+     * [refreshStaleLeaves] makes on its randomized schedule). The only shape a
+     * non-admin may always commit.
+     */
+    suspend fun selfUpdate(
+        nostrGroupId: HexKey,
+        relays: List<NormalizedRelayUrl> = groupRelays(nostrGroupId),
+    ): OutboundGroupEvent = commitAndPublish(nostrGroupId, relays) { groupManager.stageLeafRefresh(nostrGroupId) }.event
+
+    /**
      * Check if KeyPackage rotation is needed.
      */
     suspend fun needsKeyPackageRotation(): Boolean = keyPackageRotationManager.needsRotation()
@@ -3282,7 +3453,8 @@ class MarmotManager(
     // --- Group Info ---
 
     /**
-     * Get the member count for a group.
+     * How many LEAVES the group has, one per member device. An account on two
+     * devices counts twice; use [accountCount] for people.
      */
     fun memberCount(nostrGroupId: HexKey): Int = groupManager.getGroup(nostrGroupId)?.memberCount ?: 0
 
@@ -3335,6 +3507,27 @@ class MarmotManager(
         nostrGroupId: HexKey,
         pubKey: HexKey,
     ): Int? = memberPubkeys(nostrGroupId).firstOrNull { it.pubkey == pubKey }?.leafIndex
+
+    /** Every leaf [pubKey]'s account holds in the group: one per device. */
+    fun leafIndicesOf(
+        nostrGroupId: HexKey,
+        pubKey: HexKey,
+    ): List<Int> = memberPubkeys(nostrGroupId).filter { it.pubkey == pubKey }.map { it.leafIndex }
+
+    /**
+     * The group's members as ACCOUNTS, each with its leaves, in leaf order of
+     * each account's first leaf. Members, member counts, admin counts and
+     * direct-chat detection are per account (`foundation/identity.md`,
+     * "Devices"); [memberPubkeys] lists one row per leaf, so an account on two
+     * devices appears twice there.
+     */
+    fun memberAccounts(nostrGroupId: HexKey): List<GroupAccountInfo> =
+        memberPubkeys(nostrGroupId)
+            .groupBy { it.pubkey }
+            .map { (pubkey, leaves) -> GroupAccountInfo(pubkey, leaves.map { it.leafIndex }) }
+
+    /** How many accounts are members, counting an account on several devices once. */
+    fun accountCount(nostrGroupId: HexKey): Int = memberPubkeys(nostrGroupId).mapTo(HashSet()) { it.pubkey }.size
 
     /**
      * Get the MIP-04 media exporter secret for a group.
@@ -3410,6 +3603,12 @@ class MarmotDeparture(
 data class GroupMemberInfo(
     val leafIndex: Int,
     val pubkey: HexKey,
+)
+
+/** One member account of a group and the leaves (devices) it holds there. */
+data class GroupAccountInfo(
+    val pubkey: HexKey,
+    val leafIndices: List<Int>,
 )
 
 /**

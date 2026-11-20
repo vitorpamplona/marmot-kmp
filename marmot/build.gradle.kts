@@ -8,8 +8,6 @@ plugins {
     alias(libs.plugins.androidKotlinMultiplatformLibrary)
     alias(libs.plugins.serialization)
     alias(libs.plugins.vanniktech.mavenPublish)
-    // Releases also go to Nostr + Blossom: publishToNostr. Its relays come from gradle.properties (magpie.*).
-    id("com.vitorpamplona.magpie.publish")
 }
 
 kotlin {
@@ -17,7 +15,7 @@ kotlin {
         freeCompilerArgs.add("-Xexpect-actual-classes")
     }
 
-    // JVM 17, like Quartz: a library cannot need a newer JVM than its users.
+    // JVM 21, like Quartz: Kotlin will not inline Quartz's functions (built for 21) into older bytecode.
     jvm {
         compilerOptions {
             jvmTarget.set(JvmTarget.JVM_21)

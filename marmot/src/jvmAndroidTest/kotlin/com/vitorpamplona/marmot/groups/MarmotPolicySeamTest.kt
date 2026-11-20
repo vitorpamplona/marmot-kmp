@@ -24,10 +24,9 @@ import com.vitorpamplona.marmot.appComponents.AdminPolicyV1
 import com.vitorpamplona.marmot.appComponents.GroupProfileV1
 import com.vitorpamplona.marmot.appComponents.MarmotGroupState
 import com.vitorpamplona.marmot.appComponents.NostrRoutingV1
-import com.vitorpamplona.marmot.appComponents.advertisingLeafExtensions
+import com.vitorpamplona.marmot.appComponents.TestAccount
 import com.vitorpamplona.mls.group.MlsGroup
 import com.vitorpamplona.mls.group.MlsGroupPolicy
-import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -45,30 +44,38 @@ import kotlin.test.assertTrue
  * without asking.
  */
 class MarmotPolicySeamTest {
-    private val alice = "11".repeat(32).hexToByteArray()
-    private val bob = "22".repeat(32).hexToByteArray()
+    private val aliceKeys = TestAccount()
+    private val bobKeys = TestAccount()
+    private val alice = aliceKeys.identity
+    private val bob = bobKeys.identity
 
-    /** A group created by [creator] whose admin policy names only [admins]. */
-    private fun groupAdminedBy(
-        creator: ByteArray,
-        admins: List<ByteArray>,
-    ): MlsGroup {
+    /**
+     * A group created by alice whose admin policy names only bob. Bob joins in
+     * the same bootstrap commit: an admin must hold a leaf (the admin–leaf
+     * coupling rule), and every leaf carries its account's proof.
+     */
+    private fun groupAdminedByBob(): MlsGroup {
         // A leaf carrying the app_data_dictionary extension must list it in its
         // capabilities (RFC 9420 §7.3): the current-profile leaf set does.
+        val leaf = aliceKeys.provenLeaf()
         val group =
             MlsGroup.create(
-                creator,
-                leafExtensions = advertisingLeafExtensions(),
+                alice,
+                signingKey = leaf.signatureKeyPair.privateKey,
+                leafExtensions = leaf.leafExtensions,
                 capabilities = MarmotCapabilities.currentProfileLeaf(),
                 policy = MarmotGroupPolicy,
             )
+        val bobLeaf = bobKeys.provenLeaf()
+        val bobKeyPackage = group.createKeyPackage(bob, ByteArray(0), leafSignatureKeyPair = bobLeaf.signatureKeyPair, leafExtensions = bobLeaf.leafExtensions, capabilities = MarmotCapabilities.currentProfileLeaf())
         val dictionary =
             MarmotGroupState.buildDictionary(
-                adminPolicy = AdminPolicyV1.of(admins),
+                adminPolicy = AdminPolicyV1.of(listOf(bob)),
                 routing = NostrRoutingV1.of(ByteArray(32) { 0x5a }, listOf("wss://relay.example")),
                 profile = GroupProfileV1("Seam", ""),
             )
         // Bootstrap: installed before any admin is named, which MIP-01 allows.
+        group.proposeAdd(bobKeyPackage.keyPackage.toTlsBytes())
         group.proposeGroupContextExtensions(listOf(dictionary.toExtension()))
         group.commit()
         return group
@@ -76,7 +83,7 @@ class MarmotPolicySeamTest {
 
     @Test
     fun marmotsPolicyRefusesANonAdminExtensionChange() {
-        val group = groupAdminedBy(creator = alice, admins = listOf(bob))
+        val group = groupAdminedByBob()
         assertTrue(!group.isLocalAdmin(), "alice must not be an admin for this to test anything")
 
         group.proposeGroupContextExtensions(group.extensions)
@@ -87,7 +94,7 @@ class MarmotPolicySeamTest {
 
     @Test
     fun theSameCommitIsAcceptedOnceTheGroupCarriesNoPolicy() {
-        val marmot = groupAdminedBy(creator = alice, admins = listOf(bob))
+        val marmot = groupAdminedByBob()
         val epochBefore = marmot.epoch
 
         // Same state, same proposal, no binding AUTHORIZATION rules — but the

@@ -187,6 +187,63 @@ class MarmotScenarioVectorTest {
     }
 
     /**
+     * `marmot.group.account-devices.v1`: founders that all support it get a
+     * group that requires it, and a device then removes another device of its
+     * own account without being an admin.
+     */
+    @Test
+    fun accountDevicesFounding() = replay("account-devices-founding.v1.json")
+
+    /** An admin activates it in an existing group once every leaf advertises it. */
+    @Test
+    fun accountDevicesActivation() = replay("account-devices-activation.v1.json")
+
+    /** Activation is refused while a member's leaf lacks support, and allowed after its self-update. */
+    @Test
+    fun accountDevicesActivationNeedsSupport() = replay("account-devices-activation-needs-support.v1.json")
+
+    /**
+     * The three account-devices vectors that race two commits. Each client
+     * settles its fork as the reference does, and the runner checks the step
+     * of branch selection that decided it (`decisive_rule`): `tip_committer`
+     * between two admins' privileged commits, `tip_priority` when an admin's
+     * removal of another account beats a same-account removal. The account
+     * keys are the reference simulator's, so `tip_committer` compares the
+     * same keys.
+     */
+    @Test
+    fun accountDevicesActivationLosesToAnUnsupportedInvite() = replay("account-devices-activation-loses-to-unsupported-invite.v1.json")
+
+    @Test
+    fun accountDevicesActivationWinsOverAnUnsupportedInvite() = replay("account-devices-activation-wins-over-unsupported-invite.v1.json")
+
+    /**
+     * Replays to the expected states, but one decision cannot be observed:
+     * alice-phone's own device is what the losing same-account commit removes,
+     * and a commit that removes us replays to a state whose GroupContext has
+     * not moved on (mls-kmp follows no key schedule past our removal), so that
+     * branch has the parent's state id and never becomes a branch. alice-phone
+     * stays on the winning branch with nothing to compare it to, where the
+     * reference reports a `tip_priority` decision. Asserted rather than
+     * skipped, so the day the removed-member branch is modelled this fails and
+     * moves up to [replay].
+     */
+    @Test
+    fun accountDevicesOwnDeviceRemovalLosesToAnAdminRemove() {
+        val thrown =
+            assertFailsWith<IllegalStateException> {
+                runBlocking { MarmotScenarioRunner(load("account-devices-own-device-removal-loses-to-admin-remove.v1.json")).run() }
+            }
+        val divergences =
+            thrown.message
+                .orEmpty()
+                .lines()
+                .drop(1)
+                .map { it.trim() }
+        assertEquals(listOf("alice-phone settled no contested convergence pass"), divergences)
+    }
+
+    /**
      * Every vector must parse to at least one thing to check.
      *
      * Two expectation shapes ship in this set — `expected_trace.observations`
@@ -210,12 +267,12 @@ class MarmotScenarioVectorTest {
     fun theVectorsAreTheOnesTheShippingAppsEmbed() {
         // A vector refreshed from tip would test us against an engine nobody
         // runs. The copies here come from the commit both White Noise clients
-        // pin, and their own `conformance_version` is what says so.
-        val vector = load("three-client-message-exchange.v1.json")
-        assertTrue(
-            vector.conformanceVersion.startsWith("0.9."),
-            "unexpected conformance version ${vector.conformanceVersion}",
-        )
+        // pin (MDK v0.17.0, 4df811ae), and their own `conformance_version` is
+        // what says so.
+        VECTORS.forEach { name ->
+            val vector = load(name)
+            assertEquals("0.17.0", vector.conformanceVersion, "$name has conformance version ${vector.conformanceVersion}")
+        }
     }
 
     private companion object {
@@ -240,6 +297,12 @@ class MarmotScenarioVectorTest {
                 "readd-after-eviction.v1.json",
                 "restart-delivery-faults.v1.json",
                 "leaver-removal-secrecy.v1.json",
+                "account-devices-founding.v1.json",
+                "account-devices-activation.v1.json",
+                "account-devices-activation-needs-support.v1.json",
+                "account-devices-activation-loses-to-unsupported-invite.v1.json",
+                "account-devices-activation-wins-over-unsupported-invite.v1.json",
+                "account-devices-own-device-removal-loses-to-admin-remove.v1.json",
             )
     }
 }

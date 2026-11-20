@@ -31,7 +31,6 @@ import com.vitorpamplona.marmot.groups.isLocalAdmin
 import com.vitorpamplona.mls.InternalMlsApi
 import com.vitorpamplona.mls.components.AppDataDictionary
 import com.vitorpamplona.mls.group.MlsGroup
-import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
 import com.vitorpamplona.quartz.nip01Core.core.toHexKey
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -48,21 +47,32 @@ import kotlin.test.assertTrue
  * because the gates only matter if the commit path actually reaches them.
  */
 class CurrentProfileAuthorizationTest {
-    private val aliceAccount = "11".repeat(32).hexToByteArray()
-    private val bobAccount = "22".repeat(32).hexToByteArray()
+    private val aliceKeys = TestAccount()
+    private val bobKeys = TestAccount()
+    private val aliceAccount = aliceKeys.identity
+    private val bobAccount = bobKeys.identity
+
+    /** Bob's KeyPackage: a proven current-profile leaf. */
+    private fun MlsGroup.bobKeyPackage() =
+        bobKeys.provenLeaf().let { leaf ->
+            createKeyPackage(bobAccount, ByteArray(0), leafSignatureKeyPair = leaf.signatureKeyPair, leafExtensions = leaf.leafExtensions, capabilities = MarmotCapabilities.currentProfileLeaf())
+        }
 
     /** A group whose GroupContext carries a current-profile dictionary naming [admins]. */
     private fun currentProfileGroup(
-        creator: ByteArray,
+        creator: TestAccount,
         admins: List<ByteArray>,
     ): MlsGroup {
         // The current-profile leaf set: a leaf carrying the app_data_dictionary
         // extension must list it in its capabilities (RFC 9420 §7.3), and every
         // member must list app_data_update before a commit may carry one (§12.2).
+        // Its account proof covers its own signature key.
+        val leaf = creator.provenLeaf()
         val group =
             MlsGroup.create(
-                creator,
-                leafExtensions = advertisingLeafExtensions(),
+                creator.identity,
+                signingKey = leaf.signatureKeyPair.privateKey,
+                leafExtensions = leaf.leafExtensions,
                 capabilities = MarmotCapabilities.currentProfileLeaf(),
                 policy = MarmotGroupPolicy,
             )
@@ -81,7 +91,7 @@ class CurrentProfileAuthorizationTest {
 
     @Test
     fun theAdminSetIsReadFromTheComponentNotFromMarmotGroupData() {
-        val group = currentProfileGroup(aliceAccount, listOf(aliceAccount))
+        val group = currentProfileGroup(aliceKeys, listOf(aliceAccount))
 
         assertEquals(setOf(aliceAccount.toHexKey()), group.currentAdminIdentities())
         assertTrue(group.isLocalAdmin())
@@ -94,8 +104,8 @@ class CurrentProfileAuthorizationTest {
     fun aNonAdminCannotCommitAComponentChange() {
         // Alice creates the group and names only herself as admin, then adds
         // Bob. Bob is a member but not an admin.
-        val alice = currentProfileGroup(aliceAccount, listOf(aliceAccount))
-        val bobBundle = alice.createKeyPackage(bobAccount, ByteArray(0), leafExtensions = advertisingLeafExtensions(), capabilities = MarmotCapabilities.currentProfileLeaf())
+        val alice = currentProfileGroup(aliceKeys, listOf(aliceAccount))
+        val bobBundle = alice.bobKeyPackage()
         val add = alice.addMember(bobBundle.keyPackage.toTlsBytes())
         val bob = MlsGroup.processWelcome(add.welcomeBytes!!, bobBundle, policy = MarmotGroupPolicy)
 
@@ -113,7 +123,7 @@ class CurrentProfileAuthorizationTest {
 
     @Test
     fun anAdminCanCommitAComponentChange() {
-        val alice = currentProfileGroup(aliceAccount, listOf(aliceAccount))
+        val alice = currentProfileGroup(aliceKeys, listOf(aliceAccount))
         alice.proposeAppDataUpdate(
             AppComponentIds.GROUP_PROFILE_V1,
             GroupProfileV1("renamed", "by an admin").encode(),
@@ -125,8 +135,8 @@ class CurrentProfileAuthorizationTest {
 
     @Test
     fun adminshipCanBeHandedToAnotherMember() {
-        val alice = currentProfileGroup(aliceAccount, listOf(aliceAccount))
-        val bobBundle = alice.createKeyPackage(bobAccount, ByteArray(0), leafExtensions = advertisingLeafExtensions(), capabilities = MarmotCapabilities.currentProfileLeaf())
+        val alice = currentProfileGroup(aliceKeys, listOf(aliceAccount))
+        val bobBundle = alice.bobKeyPackage()
         alice.addMember(bobBundle.keyPackage.toTlsBytes())
 
         // Bob holds a leaf, so promoting him and stepping down is valid: the
@@ -144,7 +154,7 @@ class CurrentProfileAuthorizationTest {
         // account holding a current leaf. Promoting a non-member would create
         // a phantom admin that activates the instant a matching leaf appears,
         // with no commit anyone else observed.
-        val alice = currentProfileGroup(aliceAccount, listOf(aliceAccount))
+        val alice = currentProfileGroup(aliceKeys, listOf(aliceAccount))
         alice.proposeAppDataUpdate(AdminPolicyV1.COMPONENT_ID, AdminPolicyV1.of(listOf(bobAccount)).encode())
 
         assertFailsWith<IllegalStateException> { alice.commit() }
@@ -155,7 +165,7 @@ class CurrentProfileAuthorizationTest {
         // The admin policy is the sole admin authority and must remain present
         // for the group's lifetime, so an AppDataUpdate remove targeting it can
         // never be valid — not even from an admin.
-        val alice = currentProfileGroup(aliceAccount, listOf(aliceAccount))
+        val alice = currentProfileGroup(aliceKeys, listOf(aliceAccount))
         alice.proposeAppDataRemoval(AdminPolicyV1.COMPONENT_ID)
 
         assertFailsWith<IllegalStateException> { alice.commit() }
@@ -166,7 +176,7 @@ class CurrentProfileAuthorizationTest {
         // Authorization reads only 0x8003. A corrupt profile component is a
         // defect worth surfacing where the profile is used, but it must not
         // take the admin check down with it and freeze the group.
-        val alice = currentProfileGroup(aliceAccount, listOf(aliceAccount))
+        val alice = currentProfileGroup(aliceKeys, listOf(aliceAccount))
         val corrupted =
             AppDataDictionary
                 .fromExtensionsOrEmpty(alice.groupContextExtensionsSnapshot())

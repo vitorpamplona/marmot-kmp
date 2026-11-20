@@ -69,7 +69,13 @@ import kotlinx.coroutines.sync.withLock
  */
 class KeyPackageRotationManager(
     private val store: KeyPackageBundleStore? = null,
+    /** The component ids the KeyPackages this manager mints advertise. */
+    private val supportedComponents: List<Int> = CurrentProfileGroupFactory.SUPPORTED_COMPONENTS,
 ) {
+    /** The 2.x constructor, kept so code compiled against it still links. */
+    @Deprecated("Use the constructor with supportedComponents. Removed in 3.0.0.", level = DeprecationLevel.HIDDEN)
+    constructor(store: KeyPackageBundleStore? = null) : this(store, CurrentProfileGroupFactory.SUPPORTED_COMPONENTS)
+
     private val mutex = Mutex()
     private val activeBundles = mutableMapOf<String, KeyPackageBundle>()
     private val pendingRotations = mutableSetOf<String>()
@@ -485,7 +491,7 @@ class KeyPackageRotationManager(
         dTagSlot: String = KeyPackageUtils.PRIMARY_SLOT,
         ciphersuite: MlsCiphersuite = MlsCiphersuite.DEFAULT,
     ): KeyPackageBundle {
-        val bundle = CurrentProfileGroupFactory.createKeyPackage(signer, ciphersuite = ciphersuite)
+        val bundle = CurrentProfileGroupFactory.createKeyPackage(signer, ciphersuite = ciphersuite, supportedComponents = supportedComponents)
         mutex.withLock {
             installIntoSlotUnlocked(dTagSlot, bundle)
             persistUnlocked()

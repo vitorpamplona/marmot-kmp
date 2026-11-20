@@ -143,4 +143,18 @@ object MarmotFilters {
             kinds = KeyPackageUtils.migrationKinds(),
             authors = listOf(pubkey),
         )
+
+    /**
+     * The account's NIP-09 deletion requests for its KeyPackage slots,
+     * `{kinds: [5], authors: [pubkey], #k: ["30443"]}` — fetched with the
+     * KeyPackages so an inviter never selects one a device withdrew
+     * (`transports/nostr.md`, "Slot deletion"). `k` is only the fetch filter;
+     * which slot a request covers is read from its `a` tags.
+     */
+    fun keyPackageSlotDeletions(pubkey: HexKey): Filter =
+        Filter(
+            kinds = listOf(KeyPackageUtils.DELETION_KIND),
+            authors = listOf(pubkey),
+            tags = mapOf("k" to listOf(KeyPackageEvent.KIND.toString())),
+        )
 }

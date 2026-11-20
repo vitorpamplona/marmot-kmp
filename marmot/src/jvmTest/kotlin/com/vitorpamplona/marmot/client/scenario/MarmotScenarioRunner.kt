@@ -21,6 +21,9 @@
 package com.vitorpamplona.marmot.client.scenario
 
 import com.vitorpamplona.crypto.random.RandomInstance
+import com.vitorpamplona.crypto.sha2.sha256
+import com.vitorpamplona.marmot.appComponents.AccountDevicesV1
+import com.vitorpamplona.marmot.appComponents.CurrentProfileGroupFactory
 import com.vitorpamplona.marmot.appComponents.GroupProfileV1
 import com.vitorpamplona.marmot.client.MarmotIngestResult
 import com.vitorpamplona.marmot.client.MarmotManager
@@ -29,6 +32,7 @@ import com.vitorpamplona.marmot.client.SnapshotBundleStore
 import com.vitorpamplona.marmot.client.SnapshotMessageStore
 import com.vitorpamplona.marmot.client.SnapshotStateStore
 import com.vitorpamplona.marmot.client.ingest
+import com.vitorpamplona.marmot.protocolCore.ConvergenceResolution
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.core.HexKey
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
@@ -68,7 +72,27 @@ import com.vitorpamplona.quartz.nip01Core.signers.NostrSignerInternal
 class MarmotScenarioRunner(
     private val vector: ScenarioVector,
 ) {
-    private val clients = vector.clients.associateWith { VectorClient(it) }
+    /** One key per account: the clients of one account are its devices. */
+    private val accountKeys = mutableMapOf<String, KeyPair>()
+
+    private val clients =
+        vector.clients.associateWith {
+            VectorClient(
+                name = it,
+                keyPair = accountKeys.getOrPut(vector.accountOf[it] ?: it) { deterministicKeyPair(vector.accountOf[it] ?: it) },
+                supportsAccountDevices = vector.steps.none { step -> step.type == "set_account_devices_support" },
+            )
+        }
+
+    /**
+     * The decisive rule of every convergence pass a client settled, in order.
+     * The vectors that race two commits state which step of branch selection
+     * settled each client's fork.
+     */
+    private val decisions = mutableMapOf<String, MutableList<ConvergenceResolution>>()
+
+    /** Errors the `expect_*_error` steps observed, by step index. */
+    private val observedErrors = mutableMapOf<Int, String>()
 
     /** Queued outbound events, drained by `deliver_all`. */
     private val inFlight = mutableListOf<Queued>()
@@ -103,8 +127,16 @@ class MarmotScenarioRunner(
 
     private class VectorClient(
         val name: String,
+        keyPair: KeyPair,
+        /**
+         * Whether this client advertises `marmot.group.account-devices.v1`.
+         * Ours always does; the reference simulator's clients do not until a
+         * `set_account_devices_support` step says so, and the vectors that
+         * have such a step depend on that default.
+         */
+        var supportsAccountDevices: Boolean,
     ) {
-        val signer = NostrSignerInternal(KeyPair())
+        val signer = NostrSignerInternal(keyPair)
         val mlsStore = SnapshotStateStore()
         val messageStore = SnapshotMessageStore()
         val bundleStore = SnapshotBundleStore()
@@ -181,6 +213,12 @@ class MarmotScenarioRunner(
                     if (accepted) inFlight.add(Queued(client.name, event, COMMIT_CLASS, label))
                     accepted
                 },
+            supportedComponents =
+                if (client.supportsAccountDevices) {
+                    CurrentProfileGroupFactory.SUPPORTED_COMPONENTS
+                } else {
+                    CurrentProfileGroupFactory.SUPPORTED_COMPONENTS - AccountDevicesV1.COMPONENT_ID
+                },
         )
 
     suspend fun run() {
@@ -188,9 +226,15 @@ class MarmotScenarioRunner(
         preScanPublishOutcomes()
         clients.values.forEach { client -> client.manager = buildManager(client) }
 
-        vector.steps.forEach { step -> execute(step) }
+        vector.steps.forEachIndexed { index, step ->
+            stepIndex = index
+            execute(step)
+        }
         verify()
     }
+
+    /** The index of the top-level step being executed, for `expected_error`. */
+    private var stepIndex = 0
 
     private suspend fun execute(step: ScenarioVector.Step) {
         when (step.type) {
@@ -211,6 +255,11 @@ class MarmotScenarioRunner(
             "release_withheld" -> releaseWithheld(step)
             "restart_client" -> restartClient(step)
             "leave" -> leave(step)
+            "set_account_devices_support" -> setAccountDevicesSupport(step)
+            "self_update" -> selfUpdate(step)
+            "require_account_devices" -> requireAccountDevices(step)
+            "expect_require_account_devices_error" -> expectRequireAccountDevicesError(step)
+            "remove_own_account_devices" -> removeOwnAccountDevices(step)
             // The publication's outcome was consumed when it was made; the step
             // itself carries no further state change.
             "acknowledge_outbound" -> Unit
@@ -361,11 +410,15 @@ class MarmotScenarioRunner(
             )
         }
 
-        val byPubKey = bundles.associate { (invitee, _) -> invitee.signer.pubKey to invitee }
-        deliveries.forEach { delivery ->
-            // The Welcome goes straight to its recipient's inbox. Gift-wrap
-            // addressing is the transport's job and the interop harness's test.
-            byPubKey[delivery.recipientPubKey]?.inbox?.add(delivery.giftWrapEvent)
+        // One Welcome per added KeyPackage, in invite order; each goes straight
+        // to the device that minted that KeyPackage — two devices of one account
+        // share a pubkey, so the address alone cannot pick. Gift-wrap
+        // addressing is the transport's job and the interop harness's test.
+        // None at all when the Add was not confirmed: no Welcome for an epoch nobody accepted.
+        check(deliveries.isEmpty() || deliveries.size == bundles.size) { "${bundles.size} invitees but ${deliveries.size} Welcomes" }
+        bundles.zip(deliveries).forEach { (bundle, delivery) ->
+            check(delivery.recipientPubKey == bundle.first.signer.pubKey)
+            bundle.first.inbox.add(delivery.giftWrapEvent)
         }
     }
 
@@ -389,36 +442,82 @@ class MarmotScenarioRunner(
     }
 
     /**
-     * Evict members by name. The vector names people; MLS removes leaves, so
-     * the pubkey is resolved to the leaf index the group actually holds.
+     * Evict members by name. The vector names people (accounts); an account
+     * leaves by losing EVERY leaf it holds, in one commit
+     * (`member-departure.md`), so this is [MarmotManager.removeAccount].
      */
     private suspend fun removeMembers(step: ScenarioVector.Step) {
         val remover = client(step.string("remover") ?: error("remove_members without a remover"))
         val groupId = remover.groups[currentGroup] ?: error("${remover.name} evicted from a group it is not in")
         val targets = step.strings("members").map { client(it).signer.pubKey }.toSet()
-        val leaves =
-            remover.manager
-                .memberPubkeys(groupId)
-                .filter { it.pubkey in targets }
-                .map { it.leafIndex }
-        check(leaves.size == targets.size) {
-            "remove_members names ${targets.size} members but only ${leaves.size} are in the group"
-        }
-        // One Remove per commit. Every vector in this set evicts exactly one
+        // One account per commit. Every vector in this set evicts exactly one
         // member per step, and the step names ONE publication — so a
         // multi-member step would publish N commits against one
         // acknowledgement and silently mis-align every outcome after it.
         // Refuse instead, the same way an unimplemented step is refused.
-        check(leaves.size == 1) {
-            "remove_members evicts ${leaves.size} members in one step; this runner commits one " +
-                "Remove at a time and the vector's single acknowledgement would not line up"
+        check(targets.size == 1) {
+            "remove_members evicts ${targets.size} members in one step; this runner commits one " +
+                "account at a time and the vector's single acknowledgement would not line up"
         }
-        remover.manager.removeMember(groupId, leaves.single(), emptyList())
+        remover.manager.removeAccount(groupId, targets.single(), emptyList())
         // The evictor watched this departure too. Only ticks diff membership,
         // and an eviction the client commits itself never passes through one —
         // so without this the actor is the one participant who does not
         // remember doing it.
         remover.sawLeave.addAll(targets)
+    }
+
+    /**
+     * Turn `marmot.group.account-devices.v1` support on or off for a client:
+     * a new manager over the same stores, as an upgrade restarts the app. Its
+     * next KeyPackage and leaf advertise the new set; a leaf already in a
+     * group changes only with the client's next self-update.
+     */
+    private suspend fun setAccountDevicesSupport(step: ScenarioVector.Step) {
+        val client = client(step.string("client") ?: error("set_account_devices_support without a client"))
+        client.supportsAccountDevices = step.bool("supported") ?: error("set_account_devices_support without a boolean 'supported'")
+        client.manager = buildManager(client)
+        client.manager.restoreAll()
+    }
+
+    private suspend fun selfUpdate(step: ScenarioVector.Step) {
+        val who = client(step.string("client") ?: error("self_update without a client"))
+        val groupId = who.groups[currentGroup] ?: error("${who.name} self-updated in a group it is not in")
+        who.manager.selfUpdate(groupId, emptyList())
+    }
+
+    private suspend fun requireAccountDevices(step: ScenarioVector.Step) {
+        val who = client(step.string("client") ?: error("require_account_devices without a client"))
+        val groupId = who.groups[currentGroup] ?: error("${who.name} activated in a group it is not in")
+        who.manager.requireAccountDevices(groupId, emptyList())
+    }
+
+    /**
+     * The activation must be refused, with nothing published. The reference's
+     * error is `account_devices_activation_refused`; ours is the blocker
+     * reason plus a refused commit, recorded under that name.
+     */
+    private suspend fun expectRequireAccountDevicesError(step: ScenarioVector.Step) {
+        val who = client(step.string("client") ?: error("expect_require_account_devices_error without a client"))
+        val groupId = who.groups[currentGroup] ?: error("${who.name} is not in the group")
+        val blocker = who.manager.accountDevicesActivationBlocker(groupId)
+        val queued = inFlight.size
+        val refused = runCatching { who.manager.requireAccountDevices(groupId, emptyList()) }.isFailure
+        check(inFlight.size == queued) { "a refused activation published something" }
+        if (blocker != null && refused) observedErrors[stepIndex] = "account_devices_activation_refused"
+    }
+
+    /** A device removes other devices of its own account, by their client names. */
+    private suspend fun removeOwnAccountDevices(step: ScenarioVector.Step) {
+        val who = client(step.string("client") ?: error("remove_own_account_devices without a client"))
+        val groupId = who.groups[currentGroup] ?: error("${who.name} is not in the group")
+        val leaves =
+            step.strings("devices").map { name ->
+                val device = client(name)
+                check(device.signer.pubKey == who.signer.pubKey) { "$name is not a device of ${who.name}'s account" }
+                checkNotNull(device.manager.groupManager.getGroup(groupId)) { "$name is not in the group" }.leafIndex
+            }
+        who.manager.removeOwnAccountDevices(groupId, leaves, emptyList())
     }
 
     /**
@@ -583,6 +682,21 @@ class MarmotScenarioRunner(
             }
         }
 
+        // A fork this batch opened is settled by now or here: the vector's
+        // clock is logical, and every competitor of a race arrives in the same
+        // delivery, so the pass has nothing left to wait for. A pass usually
+        // settles inside the ingest that made it due; either way the last
+        // contested resolution says which rule decided it.
+        client.groups.values.forEach { groupId ->
+            if (groupId in client.manager.inboundProcessor.openConvergencePasses()) {
+                client.manager.inboundProcessor.resolveConvergence(groupId)
+            }
+            client.manager.inboundProcessor.lastContestedResolution(groupId)?.let { resolution ->
+                val seen = decisions.getOrPut(clientName) { mutableListOf() }
+                if (seen.lastOrNull() !== resolution) seen.add(resolution)
+            }
+        }
+
         // A standalone proposal advances nothing on its own. The reference
         // commits what it staged as part of processing, and so must we — a
         // SelfRemove nobody commits leaves the departing member in the tree,
@@ -697,6 +811,47 @@ class MarmotScenarioRunner(
                 }
             }
         }
+        vector.convergenceDecisions.forEach { expected ->
+            val settled = decisions[expected.client].orEmpty().filter { it.decisiveRule != null }
+            if (settled.isEmpty()) {
+                failures.add("${expected.client} settled no contested convergence pass")
+                return@forEach
+            }
+            val got = settled.last()
+            if (got.decisiveRule?.wireName != expected.decisiveRule) {
+                failures.add("${expected.client} settled by ${got.decisiveRule?.wireName}, expected ${expected.decisiveRule}")
+            }
+            expected.selectedTipEpoch?.let { want ->
+                if (got.canonicalEpoch != want) failures.add("${expected.client} settled on epoch ${got.canonicalEpoch}, expected $want")
+            }
+        }
+        vector.accountDevicesStates.forEach { expected ->
+            val client = clients[expected.client] ?: return@forEach
+            client.groups.forEach { (label, groupId) ->
+                val got = client.manager.requiresAccountDevices(groupId)
+                if (got != expected.required) failures.add("${expected.client}[$label] requires account-devices: $got, expected ${expected.required}")
+            }
+        }
+
+        // The very same epoch state: the epoch authenticator is derived from
+        // the epoch secret, so two members share it only when they share the
+        // whole key schedule, tree and transcript.
+        vector.equivalentClients.forEach { names ->
+            val states =
+                names.map { name ->
+                    val client = clients.getValue(name)
+                    val groupId = client.groups[DEFAULT_GROUP]
+                    val group = groupId?.let { client.manager.groupManager.getGroup(it) }
+                    name to group?.let { it.epoch to it.epochAuthenticator.toHexKey() }
+                }
+            if (states.map { it.second }.toSet().size != 1) failures.add("clients are not exactly equivalent: $states")
+        }
+
+        vector.expectedErrors.forEach { expected ->
+            val got = observedErrors[expected.stepIndex]
+            if (got != expected.error) failures.add("step ${expected.stepIndex} (${expected.operation}) by ${expected.client}: got $got, expected ${expected.error}")
+        }
+
         check(failures.isEmpty()) {
             "vector ${vector.name} diverged from its expected trace:\n  " + failures.joinToString("\n  ")
         }
@@ -717,5 +872,28 @@ class MarmotScenarioRunner(
 
         /** The label for a vector that never says `in_group` — most of them. */
         const val DEFAULT_GROUP = "default"
+    }
+}
+
+/**
+ * The account key MDK's conformance simulator gives [label]
+ * (`deterministic_nostr_keys` over `pad32(label)`): SHA-256 of
+ * `"marmot-cgka-conformance-nostr-key-v1" || pad32(label) || counter_be64`,
+ * the first counter that yields a valid secret key. A vector that races two
+ * admins is settled by `tip_committer`, the lower account key, so the replay
+ * has to hold the very keys the vector was recorded with.
+ */
+internal fun deterministicKeyPair(label: String): KeyPair {
+    val seed = ByteArray(32)
+    label.encodeToByteArray().copyInto(seed, endIndex = minOf(label.length, 32))
+    var counter = 0L
+    while (true) {
+        val counterBytes = ByteArray(8) { i -> (counter ushr (56 - 8 * i)).toByte() }
+        val secret = sha256("marmot-cgka-conformance-nostr-key-v1".encodeToByteArray() + seed + counterBytes)
+        try {
+            return KeyPair(privKey = secret)
+        } catch (_: Exception) {
+            counter++
+        }
     }
 }
