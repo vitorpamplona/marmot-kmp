@@ -20,6 +20,8 @@
  */
 package com.vitorpamplona.marmot.features.deviceGroup
 
+import com.vitorpamplona.marmot.features.accountSync.AccountSyncStore
+import com.vitorpamplona.marmot.features.accountSync.InMemoryAccountSyncStore
 import com.vitorpamplona.mls.codec.TlsReader
 import com.vitorpamplona.mls.codec.TlsWriter
 import com.vitorpamplona.quartz.nip01Core.core.HexKey
@@ -40,7 +42,19 @@ data class PrivateKeyPackages(
     val used: List<Ref> = emptyList(),
     /** Ids of the request events this device answered, so it answers each once. */
     val answeredRequests: List<HexKey> = emptyList(),
+    /** Sibling Welcomes this device sent, kept to repair a lost delivery (`Resending a published sibling Welcome`). */
+    val repairs: List<Repair> = emptyList(),
 ) {
+    /** One sent sibling Welcome: its exact content, its chat, and when its carrier last went out. */
+    data class Repair(
+        val toSlot: HexKey,
+        val chat: HexKey,
+        val ref: HexKey,
+        val notAfter: Long,
+        val publishedAt: Long,
+        val content: String,
+    )
+
     /** A KeyPackage this device issued to [toSlot]; [bundle] is its `KeyPackageBundleCodec` bytes. */
     class Issued(
         val toSlot: HexKey,
@@ -108,6 +122,19 @@ data class PrivateKeyPackages(
                 }.toByteArray(),
         )
         w.putOpaqueVarInt(TlsWriter().also { a -> answeredRequests.forEach { a.putBytes(it.hexToByteArray()) } }.toByteArray())
+        w.putOpaqueVarInt(
+            TlsWriter()
+                .also { a ->
+                    repairs.forEach {
+                        a.putBytes(it.toSlot.hexToByteArray())
+                        a.putOpaqueVarInt(it.chat.hexToByteArray())
+                        a.putOpaqueVarInt(it.ref.hexToByteArray())
+                        a.putUint64(it.notAfter)
+                        a.putUint64(it.publishedAt)
+                        a.putOpaqueVarInt(it.content.encodeToByteArray())
+                    }
+                }.toByteArray(),
+        )
         return w.toByteArray()
     }
 
@@ -129,8 +156,11 @@ data class PrivateKeyPackages(
             val ar = TlsReader(r.readOpaqueVarInt())
             val answered = ArrayList<HexKey>()
             while (ar.hasRemaining) answered.add(ar.readBytes(32).toHexKey())
+            val rr = TlsReader(r.readOpaqueVarInt())
+            val repairs = ArrayList<Repair>()
+            while (rr.hasRemaining) repairs.add(Repair(rr.readBytes(32).toHexKey(), rr.readOpaqueVarInt().toHexKey(), rr.readOpaqueVarInt().toHexKey(), rr.readUint64(), rr.readUint64(), rr.readOpaqueVarInt().decodeToString()))
             require(!r.hasRemaining) { "private KeyPackage store has trailing bytes" }
-            return PrivateKeyPackages(issued, held, used, answered)
+            return PrivateKeyPackages(issued, held, used, answered, repairs)
         }
     }
 }
@@ -158,4 +188,6 @@ class MarmotDeviceGroupConfig(
     val privateKeyPackageStore: PrivateKeyPackageStore,
     /** The relays of a device group this device creates. */
     val relays: List<String>,
+    /** Small state shared with siblings (`account-sync.md`): invitation decisions, read, pin, mute, archive. */
+    val accountSyncStore: AccountSyncStore = InMemoryAccountSyncStore(),
 )

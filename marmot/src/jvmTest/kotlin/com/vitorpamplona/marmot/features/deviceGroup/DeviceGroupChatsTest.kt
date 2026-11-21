@@ -32,6 +32,7 @@ import com.vitorpamplona.marmot.client.SnapshotBundleStore
 import com.vitorpamplona.marmot.client.SnapshotMessageStore
 import com.vitorpamplona.marmot.client.SnapshotStateStore
 import com.vitorpamplona.marmot.client.ingest
+import com.vitorpamplona.marmot.features.accountSync.SmallStateItem
 import com.vitorpamplona.marmot.features.devicePairing.ConfirmedLink
 import com.vitorpamplona.marmot.features.devicePairing.ExistingDevicePairing
 import com.vitorpamplona.marmot.features.devicePairing.NewDevicePairing
@@ -42,10 +43,12 @@ import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.core.toHexKey
 import com.vitorpamplona.quartz.nip01Core.crypto.KeyPair
 import com.vitorpamplona.quartz.nip01Core.signers.NostrSignerInternal
+import com.vitorpamplona.quartz.utils.TimeUtils
 import kotlinx.coroutines.runBlocking
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
@@ -125,11 +128,10 @@ class DeviceGroupChatsTest {
         b.groups.start()
         val linked = pair(a, b)
         val founding = a.groups.approve(linked.link, Base64.decode(linked.keyPackage.content), b.slot(), "B", now)
-        a.groups.applyStaged(founding)
-        b.groups.joinLinkWelcome(founding.welcomeBytes!!, linked.bundle, now)
-        val first = b.groups.stageFirstCommit()
-        a.groups.processCommit(founding.nostrGroupId, first.framedCommitBytes)
-        b.groups.applyStaged(first)
+        val welcome = assertNotNull(a.groups.applyStaged(founding).welcome)
+        // The device group's Welcome travels as a kind 444 to the account itself; B joins it as its link's.
+        assertIs<MarmotIngestResult.JoinedGroup>(b.manager.ingest(welcome.giftWrapEvent))
+        a.manager.ingest(assertNotNull(b.groups.applyStaged(b.groups.stageFirstCommit()).event).signedEvent)
         return Triple(a, b, founding.nostrGroupId)
     }
 
@@ -240,6 +242,174 @@ class DeviceGroupChatsTest {
         }
 
     @Test
+    fun aForkedDeviceGroupSettlesOnOneBranchOnBothDevices() =
+        runBlocking<Unit> {
+            val (a, b, deviceGroup) = linkedPair()
+            // Both devices commit from the same epoch: two roster updates on one parent.
+            val fromA = assertNotNull(a.groups.applyStaged(a.groups.stageAnnouncement("a1".repeat(32))).event)
+            val fromB = assertNotNull(b.groups.applyStaged(b.groups.stageAnnouncement("b1".repeat(32))).event)
+            a.manager.ingest(fromB.signedEvent)
+            b.manager.ingest(fromA.signedEvent)
+            a.manager.driveConvergenceToSettlement(pollMs = 1)
+            b.manager.driveConvergenceToSettlement(pollMs = 1)
+            a.groups.refresh()
+            b.groups.refresh()
+
+            val ga = a.manager.groupManager.getGroup(deviceGroup)!!
+            val gb = b.manager.groupManager.getGroup(deviceGroup)!!
+            assertEquals(ga.epoch, gb.epoch)
+            assertContentEquals(ga.epochAuthenticator, gb.epochAuthenticator)
+            val roster = a.groups.roster()!!
+            assertEquals(roster, b.groups.roster())
+            // Exactly one announcement won; the other device announces again before it publishes.
+            val won = listOf(roster.device(a.slot())!!.announcedKeyPackage == "a1".repeat(32), roster.device(b.slot())!!.announcedKeyPackage == "b1".repeat(32))
+            assertEquals(1, won.count { it })
+            assertTrue(a.groups.announcementNeeded("a1".repeat(32)) || b.groups.announcementNeeded("b1".repeat(32)))
+        }
+
+    @Test
+    fun anOlderEpochsDeviceGroupMessageStillReadsItsSender() =
+        runBlocking<Unit> {
+            val (a, b, _) = linkedPair()
+            // B hands A private KeyPackages; A commits before reading them.
+            val handOffs = b.groups.topUpSiblings(now)
+            assertNotNull(a.groups.applyStaged(a.groups.stageAnnouncement("a2".repeat(32))).event)
+            assertNotNull(a.groups.applyStaged(a.groups.stageAnnouncement("a3".repeat(32))).event)
+            // Two epochs later A still holds the hand-offs' epoch secrets and the sender's tag there.
+            a.ingest(handOffs)
+            assertEquals(MarmotDeviceGroupManager.STOCK_TARGET, a.groups.heldFrom(b.slot(), now))
+        }
+
+    @Test
+    fun aDeclineOnOneDeviceTakesTheOtherOutOfThatInvitation() =
+        runBlocking<Unit> {
+            val (a, b, _) = linkedPair()
+            val c = Device(KeyPair(), deviceGroups = false)
+            val chat = "a7".repeat(32)
+            c.manager.createCurrentProfileGroup(chat, relays, null)
+            val (_, welcomes) = c.manager.addMemberInvites(chat, listOf(invite(c, a), invite(c, b)), emptyList())
+            a.manager.ingest(welcomes[0].giftWrapEvent)
+            b.manager.ingest(welcomes[1].giftWrapEvent)
+            // One Add result, one generation, on both devices.
+            val mlsId =
+                a.manager.groupManager
+                    .getGroup(chat)!!
+                    .groupId
+                    .toHexKey()
+            val generation = assertNotNull(a.groups.smallState().generations[mlsId])
+            assertEquals(generation, b.groups.smallState().generations[mlsId])
+
+            // A's user leaves: A records a decline first; B, reading it, leaves too.
+            val updates = a.groups.recordLeave(chat, now)
+            assertEquals(1, updates.size)
+            b.ingest(updates)
+            val held = b.groups.smallState().held("$mlsId/invite/$generation") as SmallStateItem.Invite
+            assertFalse(held.accept)
+            val leave = b.groups.drainOutbox().single()
+            assertIs<MarmotIngestResult.ProposalStaged>(c.manager.ingest(leave.signedEvent))
+        }
+
+    @Test
+    fun settingsAndReadPositionsReachTheSiblingAndARequestGetsABroadcast() =
+        runBlocking<Unit> {
+            val (a, b, _) = linkedPair()
+            val c = Device(KeyPair(), deviceGroups = false)
+            a.ingest(b.groups.topUpSiblings(now))
+            val chat = "a8".repeat(32)
+            val created = a.groups.createChat(chat, relays, null, listOf(invite(a, c)), now)
+            b.ingest(created.deviceGroupEvents)
+            // The founded copy's generation is inherited through the version-2 sibling Welcome.
+            val mlsId =
+                a.manager.groupManager
+                    .getGroup(chat)!!
+                    .groupId
+                    .toHexKey()
+            assertEquals(a.groups.smallState().generations[mlsId], b.groups.smallState().generations[mlsId])
+            assertTrue((a.groups.smallState().held("$mlsId/invite/${a.groups.smallState().generations[mlsId]}") as SmallStateItem.Invite).accept)
+
+            b.ingest(a.groups.changeSetting(chat, "pin", "true", now))
+            b.ingest(a.groups.markRead(chat, 1, now, "ee".repeat(32), now))
+            val state = b.groups.smallState()
+            assertEquals("true", (state.held("$mlsId/pin") as SmallStateItem.Versioned).value)
+            assertEquals("ee".repeat(32), (state.held("$mlsId/read") as SmallStateItem.Read).id)
+            // A read position never moves back.
+            assertTrue(a.groups.markRead(chat, 0, now, "ff".repeat(32), now).isEmpty())
+
+            // B starts: it broadcasts and asks; A answers with everything it holds.
+            val start = b.groups.broadcastDue(now, start = true)
+            a.ingest(start)
+            assertTrue(a.groups.drainOutbox().isNotEmpty())
+            assertTrue(a.groups.broadcastDue(now).isNotEmpty())
+            assertTrue(a.groups.broadcastDue(now + 60).isEmpty(), "the next broadcast waits a day")
+            assertTrue(a.groups.broadcastDue(now + MarmotDeviceGroupManager.BROADCAST_INTERVAL_SECS).isNotEmpty())
+        }
+
+    @Test
+    fun aLostSiblingWelcomeIsSentAgainAfterTheTargetRuns() =
+        runBlocking<Unit> {
+            val (a, b, _) = linkedPair()
+            val c = Device(KeyPair(), deviceGroups = false)
+            val real = TimeUtils.now()
+            a.ingest(b.groups.topUpSiblings(real - 1000))
+            val chat = "a9".repeat(32)
+            a.groups.createChat(chat, relays, null, listOf(invite(a, c)), real - 1000) // its 461 is lost
+            assertTrue(a.groups.siblingWelcomeRepairs(real).isEmpty(), "not due before B has run")
+            b.groups.heartbeatSent(0)
+            a.ingest(listOf(assertNotNull(b.groups.heartbeatDue(real - 100))))
+            val again = a.groups.siblingWelcomeRepairs(real)
+            assertEquals(1, again.size)
+            b.ingest(again)
+            assertTrue(b.manager.groupManager.isMember(chat))
+            assertTrue(a.groups.siblingWelcomeRepairs(real + 1).isEmpty())
+        }
+
+    @Test
+    fun oldLeavesAreRetaggedAndQuietSiblingsGoInactiveThenOut() =
+        runBlocking<Unit> {
+            val keys = KeyPair()
+            val a = Device(keys)
+            val b = Device(keys)
+            a.groups.start()
+            b.groups.start()
+            val c = Device(KeyPair(), deviceGroups = false)
+            val chat = "aa".repeat(32)
+            a.manager.createCurrentProfileGroup(chat, relays, null)
+            c.manager.ingest(
+                a.manager
+                    .addMemberInvites(chat, listOf(invite(a, c)), emptyList())
+                    .second
+                    .single()
+                    .giftWrapEvent,
+            )
+            val linked = pair(a, b)
+            val founding = a.groups.approve(linked.link, Base64.decode(linked.keyPackage.content), b.slot(), "B", now)
+            b.manager.ingest(assertNotNull(a.groups.applyStaged(founding).welcome).giftWrapEvent)
+            a.manager.ingest(assertNotNull(b.groups.applyStaged(b.groups.stageFirstCommit()).event).signedEvent)
+
+            // A's chat leaf predates its tag; a self-update tags it.
+            assertEquals(listOf<DeviceTagV1.Claim>(DeviceTagV1.Claim.Unclaimed), a.groups.claims(chat))
+            val retag = a.groups.retagOwnLeaves().single()
+            c.manager.ingest(retag.signedEvent)
+            assertEquals(listOf<DeviceTagV1.Claim>(DeviceTagV1.Claim.Device(a.slot())), a.groups.claims(chat))
+
+            // B goes quiet: inactive after 30 days, removed after 90.
+            assertNull(a.groups.stageInactivity(now + MarmotDeviceGroupManager.INACTIVE_AFTER_SECS - 1))
+            val inactive = assertNotNull(a.groups.stageInactivity(now + MarmotDeviceGroupManager.INACTIVE_AFTER_SECS))
+            b.manager.ingest(assertNotNull(a.groups.applyStaged(inactive).event).signedEvent)
+            assertEquals(
+                DeviceStatusV1.INACTIVE,
+                b.groups
+                    .roster()!!
+                    .device(b.slot())!!
+                    .status,
+            )
+            val out = assertNotNull(a.groups.stageInactivity(now + MarmotDeviceGroupManager.REMOVE_INACTIVE_AFTER_SECS))
+            b.manager.ingest(assertNotNull(a.groups.applyStaged(out).event).signedEvent)
+            assertNull(a.groups.roster()!!.device(b.slot()))
+            assertTrue(b.groups.trust().unlinked)
+        }
+
+    @Test
     fun aSiblingMissingFromAChatIsFilledAfterAClaim() =
         runBlocking<Unit> {
             val (a, b, _) = linkedPair()
@@ -286,7 +456,7 @@ class DeviceGroupChatsTest {
             b.groups.joinLinkWelcome(founding.welcomeBytes!!, linked.bundle, now)
             assertNull(a.groups.checkLinkDeadlines(now + MarmotDeviceGroupManager.FIRST_COMMIT_DEADLINE_SECS - 1))
             val undo = assertNotNull(a.groups.checkLinkDeadlines(now + MarmotDeviceGroupManager.FIRST_COMMIT_DEADLINE_SECS))
-            a.groups.applyStaged(undo)
+            val undoEvent = assertNotNull(a.groups.applyStaged(undo).event)
             assertNull(a.groups.roster()!!.device(b.slot()))
             assertNull(a.groups.roster()!!.rejectedSlot(b.slot()), "an undone link leaves no record: the slot can link again")
             assertEquals(
@@ -297,7 +467,7 @@ class DeviceGroupChatsTest {
                     .single()
                     .outcome,
             )
-            b.groups.processCommit(founding.nostrGroupId, undo.framedCommitBytes)
+            b.manager.ingest(undoEvent.signedEvent)
             assertFalse(b.groups.trust().unlinked, "a failed link is not an unlink")
             assertNull(b.groups.trust().trustedGroupId)
         }
@@ -328,9 +498,7 @@ class DeviceGroupChatsTest {
             b.groups.joinLinkWelcome(founding.welcomeBytes!!, linked.bundle, now)
             // Nothing is added before the link is made.
             assertTrue(a.groups.addNewDeviceToChats(b.slot(), now).isEmpty())
-            val first = b.groups.stageFirstCommit()
-            a.groups.processCommit(founding.nostrGroupId, first.framedCommitBytes)
-            b.groups.applyStaged(first)
+            a.manager.ingest(assertNotNull(b.groups.applyStaged(b.groups.stageFirstCommit()).event).signedEvent)
             a.ingest(b.groups.topUpSiblings(now))
 
             // A's leaf in the old chat predates its tag, so the chat does not read A as a device yet,
@@ -359,8 +527,7 @@ class DeviceGroupChatsTest {
         runBlocking<Unit> {
             val (a, b, deviceGroup) = linkedPair()
             val leaving = b.groups.stageSignOut()
-            b.groups.applyStaged(leaving)
-            a.groups.processCommit(deviceGroup, leaving.framedCommitBytes)
+            a.manager.ingest(assertNotNull(b.groups.applyStaged(leaving).event).signedEvent)
             assertEquals(
                 DeviceStatusV1.LEAVING,
                 a.groups
@@ -382,8 +549,7 @@ class DeviceGroupChatsTest {
             val ref = "ab".repeat(32)
             assertTrue(a.groups.announcementNeeded(ref))
             val announce = a.groups.stageAnnouncement(ref)
-            a.groups.applyStaged(announce)
-            b.groups.processCommit(deviceGroup, announce.framedCommitBytes)
+            b.manager.ingest(assertNotNull(a.groups.applyStaged(announce).event).signedEvent)
             assertFalse(a.groups.announcementNeeded(ref))
             assertEquals(
                 ref,

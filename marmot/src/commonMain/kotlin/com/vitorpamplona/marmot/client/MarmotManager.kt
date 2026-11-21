@@ -620,6 +620,7 @@ class MarmotManager(
             // survive every restart.
             publishGate.clearGate(result.nostrGroupId)
             subscriptionManager.subscribeGroup(result.nostrGroupId)
+            deviceGroups?.onChatAdmitted(result.nostrGroupId, founded = false)
             Log.d("MarmotManager") { "Joined group ${result.nostrGroupId}" }
         }
 
@@ -1179,6 +1180,8 @@ class MarmotManager(
             }
 
         lastFoundingWelcome = staged.result.welcomeBytes
+        // The founding admission's generation is the post-founding (epoch 1) context.
+        deviceGroups?.onChatAdmitted(nostrGroupId, founded = true)
         return Pair(null, welcomeDeliveries)
     }
 
@@ -1236,6 +1239,68 @@ class MarmotManager(
                 }
             }
         return SiblingAddResult(publication.event, emptyList(), if (publication.confirmed) publication.commitResult.welcomeBytes else null)
+    }
+
+    // --- Device-group plumbing: the device group is an ordinary MLS group to the publish gate,
+    // convergence and subscriptions, so its commits fork and settle like any group's (MDK runs it
+    // through the same CGKA engine: `marmot-app/src/client/device_group.rs` host_may_see_group,
+    // `cgka-engine/src/commit_class.rs` priority). Only its traffic is routed elsewhere.
+
+    /** Registers a device group this device just created at epoch 0. */
+    internal suspend fun adoptCreatedDeviceGroup(
+        nostrGroupId: HexKey,
+        group: MlsGroup,
+    ) {
+        groupManager.adoptGroup(nostrGroupId, group)
+        publishGate.satisfyEmptyObligation(nostrGroupId)
+        inboundProcessor.trackGroup(nostrGroupId)
+        desync.seed(nostrGroupId, TimeUtils.now())
+        subscriptionManager.subscribeGroup(nostrGroupId)
+    }
+
+    /** Registers a device group this device joined through its link's Welcome. */
+    internal suspend fun adoptJoinedDeviceGroup(
+        nostrGroupId: HexKey,
+        group: MlsGroup,
+    ) {
+        groupManager.adoptGroup(nostrGroupId, group)
+        inboundProcessor.trackGroup(nostrGroupId)
+        desync.seed(nostrGroupId, TimeUtils.now())
+        publishGate.clearGate(nostrGroupId)
+        subscriptionManager.subscribeGroup(nostrGroupId)
+    }
+
+    /** The founding Add of a device group: merged locally with an empty publish obligation. */
+    internal suspend fun installDeviceGroupFounding(
+        nostrGroupId: HexKey,
+        staged: MlsGroupManager.StagedCommit,
+    ) {
+        groupManager.installState(nostrGroupId, staged.pendingState)
+        publishGate.satisfyEmptyObligation(nostrGroupId)
+    }
+
+    /** Publishes a staged device-group Commit under publish-before-apply; null when no relay confirmed it. */
+    internal suspend fun publishDeviceGroupCommit(
+        nostrGroupId: HexKey,
+        staged: MlsGroupManager.StagedCommit,
+    ): OutboundGroupEvent? {
+        val publication = commitAndPublish(nostrGroupId, groupRelays(nostrGroupId)) { staged }
+        return if (publication.confirmed) publication.event else null
+    }
+
+    /** The kind 444 for a device group's Add, to this account itself (`device-group.md` "Approving"). */
+    internal suspend fun wrapDeviceGroupWelcome(
+        nostrGroupId: HexKey,
+        welcomeBytes: ByteArray,
+        keyPackageEventId: HexKey,
+    ): WelcomeDelivery = welcomeSender.wrapWelcomeBytes(welcomeBytes, signer.pubKey, keyPackageEventId, groupRelays(nostrGroupId), nostrGroupId)
+
+    /** Drops a device group this device was removed from, or reset. */
+    internal suspend fun discardDeviceGroup(nostrGroupId: HexKey) {
+        subscriptionManager.unsubscribeGroup(nostrGroupId)
+        publishGate.forget(nostrGroupId)
+        groupManager.removeGroupState(nostrGroupId)
+        desync.forget(nostrGroupId)
     }
 
     /**
@@ -1362,6 +1427,8 @@ class MarmotManager(
         desync.seed(nostrGroupId, TimeUtils.now())
         subscriptionManager.subscribeGroup(nostrGroupId)
         markCreatedLocally(nostrGroupId)
+        // A solo creation's generation is its epoch 0; a founding Add replaces it with epoch 1's.
+        deviceGroups?.onChatAdmitted(nostrGroupId, founded = true)
         return nostrGroupId
     }
 
