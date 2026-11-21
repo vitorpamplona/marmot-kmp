@@ -94,6 +94,14 @@ object CurrentProfileGroupFactory {
             AppComponentIds.AGENT_TEXT_STREAM_QUIC_V1,
         )
 
+    /**
+     * [SUPPORTED_COMPONENTS] plus the device-group components, `0x800e` (device roster) and `0x800f`
+     * (device tag). NOT advertised by default: a device that advertises `0x800e` can be linked into a
+     * device group and must then run the device-group flows, so a client opts in by passing this list
+     * where it creates KeyPackages and leaves, once it does (`plans/2026-11-21-device-groups.md`).
+     */
+    val DEVICE_GROUP_SUPPORTED_COMPONENTS: List<Int> = SUPPORTED_COMPONENTS + listOf(AppComponentIds.DEVICE_ROSTER_V1, AppComponentIds.DEVICE_TAG_V1)
+
     /** A leaf keypair plus the account proof authorizing it. */
     class LeafIdentity(
         val signatureKeyPair: Ed25519KeyPair,

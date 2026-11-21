@@ -23,6 +23,7 @@ package com.vitorpamplona.marmot.groups
 import com.vitorpamplona.marmot.appComponents.AccountDevicesV1
 import com.vitorpamplona.marmot.appComponents.AdminPolicyV1
 import com.vitorpamplona.marmot.appComponents.AppComponentIds
+import com.vitorpamplona.marmot.appComponents.DeviceRosterRules
 import com.vitorpamplona.marmot.appComponents.MarmotProtocolProfile
 import com.vitorpamplona.marmot.appComponents.accountIdentityProof.AccountIdentityProofV2
 import com.vitorpamplona.marmot.appComponents.agentTextStream.AgentTextStreamQuicPolicyV1
@@ -90,6 +91,14 @@ object MarmotGroupPolicy : MlsGroupPolicy {
     override val commitExporter: MlsExporterLabel
         get() = MlsExporterLabel("marmot", "group-event".encodeToByteArray(), 32)
 
+    /** The device roster's diff (`device-roster-v1.md` "Update"); every other component replaces whole. */
+    override fun resolveAppDataUpdate(
+        parentExtensions: List<Extension>,
+        componentId: Int,
+        parentData: ByteArray?,
+        update: ByteArray,
+    ): ByteArray = DeviceRosterRules.resolveUpdate(parentExtensions, componentId, parentData, update)
+
     override fun authorizeCommit(
         group: GroupView,
         proposals: List<PendingProposal>,
@@ -123,6 +132,7 @@ object MarmotGroupPolicy : MlsGroupPolicy {
         resulting: GroupView,
     ) {
         AccountDevicesV1.validateResultingState(parentExtensions, proposals, resulting)
+        DeviceRosterRules.validateResultingState(parentExtensions, resulting)
         validateIntroducedLeafProofs(parentExtensions, proposals, committerLeafIndex, resulting)
         validateAdminLeafCoupling(parentExtensions, resulting)
         validateAgentTextStreamState(resulting)
@@ -282,6 +292,22 @@ object MarmotGroupPolicy : MlsGroupPolicy {
         groupInfoExtensions: List<Extension>,
     ) {
         validateJoin(group)
+        // `features/device-group.md` "Trust": a group that requires 0x800e is joined only through the
+        // Welcome a confirmed link names, which [DeviceGroupLinkJoinPolicy] checks instead.
+        check(!DeviceRosterRules.isRequired(group.extensions)) { "A device group is joined only through the Welcome of a confirmed link" }
+        validateJoinedChecks(group, groupInfoSigner, groupInfoExtensions)
+    }
+
+    /**
+     * Every join check but the device-group refusal: shared with the link join, which admits a
+     * device group under its own checks.
+     */
+    internal fun validateJoinedChecks(
+        group: GroupView,
+        groupInfoSigner: Int,
+        groupInfoExtensions: List<Extension>,
+    ) {
+        DeviceRosterRules.validateJoinedState(group)
         AccountDevicesV1.validateJoinedState(group, groupInfoExtensions)
         if (MarmotProtocolProfile.isCurrent(group.extensions)) {
             for (i in 0 until group.leafCount) {

@@ -529,6 +529,16 @@ class MlsGroupManager(
             clone.commit()
         }
 
+    /**
+     * Stage a Commit that [prepare] builds on a clone carrying exactly its own proposals, for the
+     * device-group flows whose Commits combine proposals no other helper does (the founding Add with
+     * its roster entry, a new device's first Commit). See [StagedCommit].
+     */
+    internal suspend fun stageOwn(
+        nostrGroupId: HexKey,
+        prepare: (MlsGroup) -> CommitResult,
+    ): StagedCommit = stage(nostrGroupId, sweepPool = false, prepare)
+
     /** Stage a Remove. See [StagedCommit] for why this does not apply. */
     suspend fun stageRemoveMember(
         nostrGroupId: HexKey,
