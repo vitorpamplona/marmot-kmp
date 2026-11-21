@@ -203,6 +203,35 @@ advertise unless told otherwise) is unchanged; only callers that pass
    chat creation with siblings (1.13), heartbeats (1.14), removal and sign-out (1.16-1.17), sign-ins
    (1.18).
 
+## Fourth pass: closing the library gaps
+
+| Gap | Now | Where |
+|---|---|---|
+| Device-group Commits outside the publish gate and convergence | **done**. Every device-group Commit is published by `MarmotManager.commitAndPublish` (publish-before-apply, obligations) and inbound ones go through `MarmotManager.ingest` like any group's, so a fork settles by the same branch selection. MDK does the same: the device group runs through the one CGKA engine and is only hidden from the host (`marmot-app/src/client/device_group.rs` `host_may_see_group` ~L197), and a roster update is `privileged` because it is admin-required (`cgka-engine/src/commit_class.rs` `priority` ~L61-70, `convergence.rs` `tip_priority_str` ~L149), which `MarmotCommitClass` already scores. The device group is tracked, subscribed and gated like a chat (`MarmotManager.adoptCreatedDeviceGroup`/`adoptJoinedDeviceGroup`); its founding Add uses the empty-obligation exception; the new device's Welcome goes as a kind 444 to the account itself and `ingest` routes a Welcome naming the link's KeyPackage to `joinLinkWelcome`. `deviceGroups.refresh()` runs after every ingested group event. Test: `aForkedDeviceGroupSettlesOnOneBranchOnBothDevices`. | lib |
+| App events from older epochs | **done**: sender claims are recorded per epoch (last 16) and an app event of an older epoch whose secrets the device still holds reads its sender from them; heartbeats stay current-epoch only, as the spec says. Duplicates are dropped by `processGroupEvent` as for chats. Claims are memory only: after a restart, events older than the first epoch seen since are dropped. Test: `anOlderEpochsDeviceGroupMessageStillReadsItsSender`. | lib |
+| Account sync (473/475/476) | **done for small state**: `InvitationGeneration` (spec vector), the 475/476 codecs, merge rules for `read`/`pin`/`mute`/`archive`/`invite`, `AccountSyncStore` v1. Generations are recorded at every join and founding (post-founding context), inherited through version-2 sibling Welcomes, never derived from a sibling Add; a founder holds an implicit accept. `recordLeave` records a decline before the user's Leave; a winning decline for a copy's generation makes its siblings leave and holds automatic sibling Adds. Broadcast on start (with a request), daily, and once an hour in answer. **Not done**: resending items of a withdrawn update (MAY send everything again; a daily broadcast covers it), history (473: keys, bundles, deliveries via Blossom) and backups (recovery key, archives, pointer). This client has no pending-invitation state, so accepts are only retained and forwarded. Tests: `AccountSyncTest`, `aDeclineOnOneDeviceTakesTheOtherOutOfThatInvitation`, `settingsAndReadPositionsReachTheSiblingAndARequestGetsABroadcast`. | lib; app owns read/pin/mute/archive values |
+| Sibling Welcome repair | **done**: sent bodies retained to the private KeyPackage's `not_after` (`PrivateKeyPackages.repairs`), resent in a fresh carrier once the target's last activity is 600 s past the carrier, unless the chat tree shows its leaf past `key_package`. Simplification: the carrier time is when it was built, not when a relay first accepted it. Test: `aLostSiblingWelcomeIsSentAgainAfterTheTargetRuns`. | lib |
+| Inactive marking | **done, simplified**: 30 days without activity (or since `linked_at`) marks `inactive`, 90 removes (no decision, no slot deletion), own entry back to `active` after a heartbeat. The spec's "caught up" clocks (paused while behind, reset after a 24 h gap) are not modelled. | lib |
+| Re-tagging old leaves | **done**: `retagOwnLeaves` self-updates each chat whose own leaf reads untagged; the app spreads the calls out. Test: `oldLeavesAreRetaggedAndQuietSiblingsGoInactiveThenOut`. | lib |
+| Moves between device groups | **not done (big)**: a second pending link while trusting a group, Made with its atomic trust switch, carrying `not_me`/`removed` records, `moved` status and the old siblings' cleanup, old-group work isolation. Until then a device that trusts a group refuses to pair as a new device; the user resets (`resetLocalCopy`) and links fresh. | lib |
+
+**Persisted formats added this pass (unreleased, version 1):**
+- `AccountSyncState` v1 (`features/accountSync/AccountSync.kt`): `uint8 version = 1; opaque
+  item_json<V> items<V>; Generation generations<V>; uint64 last_broadcast; uint64
+  last_request_answered`, `Generation = opaque mls_group_id<V>; opaque generation[32]`; each item is its
+  canonical 475 item object as UTF-8 JSON.
+- `PrivateKeyPackages` v1 gains `RepairV1 repairs<V>`, `RepairV1 = opaque to_slot[32]; opaque
+  chat_nostr_id<V>; opaque ref<V>; uint64 not_after; uint64 published_at; opaque content<V>`.
+
+## Ready for default-on?
+
+Not yet, but close. What is left is bounded and listed above: moves, history deliveries and backups,
+the "caught up" inactivity clocks, persisted per-epoch claims, and the withdrawn-update resend. None of
+it is needed for interop with White Noise's linking, chats, sibling adds and invitation decisions, so
+the switch can go on for real users once Amethyst wires the checklist in the report and a live test
+with `wn` passes; a default-on release should wait for history deliveries (a newly linked device
+otherwise shows chats without their history) and moves.
+
 ## Third pass: what flipping the switch still needs
 
 Library, before an app turns `deviceGroupConfig` on for users:
