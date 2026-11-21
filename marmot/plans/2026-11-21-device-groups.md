@@ -52,7 +52,7 @@ code or by a test named in the 0.17 review.
 | 0.1 | Same-account Adds and Removes in `0x800d` chats are valid from a non-admin; at most 20 leaves per account; same-account Commits score `ordinary`. | `account-devices-v1.md`; MDK `cgka-engine/src/own_account_devices.rs`, vectors `account-devices-*.v1.json` | done (0.17 #1) | n/a | lib |
 | 0.2 | Leaves and KeyPackages with a `0x800f` entry are never rejected; a GroupContext that **requires** `0x800f` is rejected. | `device-tag-v1.md` "Registry", "Validity" | done (0.17 #5; rejection because we do not advertise `0x800f`) | n/a | lib. Must stay true once we advertise `0x800f` (P1 3.4): then add an explicit rule. |
 | 0.3 | Groups that require `0x800e` are never joined except through a confirmed link. | `device-group.md` "Trust" | done implicitly: our KeyPackages do not advertise `0x800e`, so the engine refuses the Welcome. | n/a | lib. Becomes an explicit trust gate before we advertise `0x800e` (P1 1.6). |
-| 0.4 | **Device-group app-event kinds (457 heartbeat, 458 gap-fill claim, 459/460 private KeyPackage request/hand-off, 461 sibling Welcome, 473 history delivery, 475/476 small state, 477 chat inventory) are ignored in any group but the trusted device group.** No chat projects one; a host does not send one as a custom event. | `device-group.md` "Surfaces", each kind's "Receiving"; `registries.md`; MDK `marmot-app/src/client/device_group/messages.rs:57` `is_device_group_kind` | **missing**: `MarmotIngest.ingestGroupEvent` persists and returns every decrypted inner event. | Amethyst indexes whatever `MarmotIngestResult.Message` carries. | lib: `MarmotDeviceGroupKinds` + drop in ingest (this branch). app: nothing once the library drops them; never offer these kinds to `sendCustomEvent`-style paths. |
+| 0.4 | **Device-group app-event kinds (457 heartbeat, 458 gap-fill claim, 459/460 private KeyPackage request/hand-off, 461 sibling Welcome, 473 history delivery, 475/476 small state, 477 chat inventory) are ignored in any group but the trusted device group.** No chat projects one; a host does not send one as a custom event. | `device-group.md` "Surfaces", each kind's "Receiving"; `registries.md`; MDK `marmot-app/src/client/device_group/messages.rs:57` `is_device_group_kind` | **done this branch** (`aa73032`): ingest returns `Ignored` without persisting; `buildGroupMessage` refuses them. Was: every decrypted inner event stored and surfaced. | Amethyst indexes whatever `MarmotIngestResult.Message` carries, so nothing more to do. | lib. app: nothing once the library drops them; never offer these kinds to `sendCustomEvent`-style paths. |
 | 0.5 | A Welcome rumor that names a sibling's KeyPackage (every device of the account gets one gift wrap per added KeyPackage) is "not addressed to this device", not a failure. | `protocol-core/joining.md` "Delivery"; MDK `5e25d953` | partial: terminal, but reported as `MarmotIngestResult.Failure` ("No matching KeyPackageBundle"). | logs a WARN per sibling Welcome. | lib: cosmetic, kept P2 (a new `WelcomeResult` subtype is source-breaking for exhaustive `when`s). |
 | 0.6 | Removing an account removes every leaf; members and counts are per account. | `member-departure.md` | done (0.17 #2) | done (`37e15bcc42`) | — |
 | 0.7 | Admin Leave as step-down then SelfRemove is accepted. | `member-departure.md` "Behavior" (marmot#502) | done (0.17 #5) | n/a | — |
@@ -69,7 +69,7 @@ Ordered by dependency. Every row is library work unless the Where column says ap
 | 1.3 | `marmot.member.device-tag.v1` (`0x800f`): seal (ChaCha20-Poly1305 under `leaf_tag_key`, aad = leaf signature key), sign (`SignWithLabel "Marmot DeviceTag"`), open and verify against a roster (device, removed slot, unclaimed). | `device-tag-v1.md` (vectors); MDK `traits/src/app_components/device_tag.rs`, `cgka-engine/src/device_tag.rs`, `roster_tag_keys.rs` | **this branch**: `DeviceTagV1` codec, `produce`, `read`, vectors. | lib |
 | 1.4 | Produce tags: every KeyPackage and every own LeafNode carries a tag once the device can tag; advertise `0x800f`; never require it. | `device-tag-v1.md` "Producing tags" | missing. mls-kmp already lets the caller set the next commit's leaf extensions (`MlsGroup` `pendingLeafAdvertisement`, ~L827) and KeyPackage leaf extensions. | lib (`CurrentProfileGroupFactory`, `MlsGroupManager`) |
 | 1.5 | Device pairing (kinds 452-456): strict JSON messages, commitment, SAS (seven emoji, Matrix table), MACs, the two state machines (first answer wins, one decision, confirm order, competing requests, 10 answers/hour, 600 s expiries, cancel semantics). Transport-neutral; secrets in memory only. | `device-pairing.md` (two vectors); MDK `crates/marmot-pairing` (all of it), `testdata/pairing-v1.json` | **this branch**: messages, derivations, emoji table, both sessions, spec + MDK vectors. | lib |
-| 1.6 | Pairing over Nostr: rumor from the account to itself, NIP-59 gift wrap to own inbox relays; drop own Confirm echoes. | `transports/nostr.md` "Pairing delivery"; MDK `transport-nostr-adapter` `pairing` | missing | lib (event build/parse), app (which relays, subscribe to own wraps; today Amethyst drops 452-456 in `MarmotDevicePairing`: route them to the library instead) |
+| 1.6 | Pairing over Nostr: rumor from the account to itself, NIP-59 gift wrap to own inbox relays; drop own Confirm echoes. | `transports/nostr.md` "Pairing delivery"; MDK `transport-nostr-adapter` `pairing` | **this branch**: `PairingDelivery.wrap/unwrap` | lib done; app: which relays (own 10050), subscribe to own wraps; today Amethyst drops 452-456 in `MarmotDevicePairing`: route them to `PairingDelivery.unwrap` instead |
 | 1.7 | Device-group trust store: the trusted group id (set on create or on joining the link's Welcome only), the pending link record (session, `KeyPackageRef`, group id, sender signature key, wait end), reserved group id and KeyPackage, 600 s wait. Explicit local reset. | `device-group.md` "Trust", "Joining", "Explicit local reset" | missing | lib (interface + in-memory), app (persisted, encrypted store). **New persisted format.** |
 | 1.8 | Create the device group on approve (founding Add of exactly the confirmed KeyPackage, roster with both entries, account as sole admin, `0x800d` + `0x800e` required); or one Commit adding the confirmed KeyPackage and its `set_device`. Link made on the new device's first Commit; failed after 3600 s and undone with `remove_device`. | "Creating the device group", "Approving", "A link that is not taken up" | missing (needs 1.1-1.4) | lib (`MarmotDeviceGroupManager`) |
 | 1.9 | New device: join only the link's Welcome (group, signer leaf key, KeyPackage, `0x800e`), first Commit sets `tag_signature_key` and tags its leaf. | "Joining", "Matching leaves to devices" | missing. The Welcome signer is already reachable through `MarmotGroupPolicy.validateJoin(group, signer, …)`. | lib |
@@ -132,3 +132,32 @@ With `wn`/`wnd` at `bf4778a3` (`cli/tests/marmot/state/mdk/target/release`) agai
    same-account Add after B joined; B must accept that Commit (non-admin, `0x800d`) and keep decrypting.
 2. P0: grep `amy`'s stored messages for kinds 457-477: none.
 3. P1, once wired: `amy devices link` as the new device against A1, then as the approving device for a fresh `wnd`.
+
+## Done on this branch (`wt/device-groups`)
+
+| Commit | What |
+|---|---|
+| `49a2c9d` | This plan. |
+| `aa73032` | P0 0.4: device-group kinds ignored in chats, never sent to one. |
+| `b0812eb` | 1.1: `DeviceRosterV1` codec, validation, diff apply; spec vectors + MDK invariant tests. |
+| `3e582c1` | 1.3: `DeviceTagV1` produce/open/read; spec vector byte-exact. |
+| `5bea577` | 1.5: pairing messages, derivations, emoji table, both state machines; MDK `pairing-v1.json` through both. |
+| `a817aa7` | Codecs of 457, 458, 459, 460, 461 v1-v3, 477 (token vector). |
+| `8709ffe` | 1.6 (library half): pairing over NIP-59 self-addressed gift wraps. |
+
+Nothing here is wired into `MarmotManager` yet, and no KeyPackage advertises `0x800e`/`0x800f`, so
+behaviour towards White Noise is unchanged except row 0.4.
+
+## Next library steps, in order
+
+1. mls-kmp hook for AppDataUpdate resolution (1.2), released.
+2. `MarmotGroupPolicy`: the `0x800e` requirement rules (never added or removed after creation, one
+   credential identity, roster valid after every Commit, no `remove`), and the explicit "no group
+   requires `0x800f`" rule. Only then advertise `0x800e`/`0x800f` and tag KeyPackages/leaves (1.4).
+3. `DeviceGroupTrustStore` + `MarmotDeviceGroupManager`: create/approve/join (1.7-1.9) with an
+   in-process end-to-end test: pairing over `PairingDelivery`, the founding Add, the new device's
+   tagging first Commit, link made. MDK's `cgka-engine/tests/account_devices/link_device.rs` and
+   `device_group_welcome.rs` are the cases to port.
+4. Slot announcements (1.10), private KeyPackages + sibling Welcomes (1.11-1.12), gap filling and
+   chat creation with siblings (1.13), heartbeats (1.14), removal and sign-out (1.16-1.17), sign-ins
+   (1.18).
