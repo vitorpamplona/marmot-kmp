@@ -24,6 +24,7 @@ import com.vitorpamplona.marmot.GroupEventResult
 import com.vitorpamplona.marmot.MarmotInboundProcessor
 import com.vitorpamplona.marmot.WelcomeResult
 import com.vitorpamplona.marmot.appComponents.agentTextStream.AgentTextStreamRetirement
+import com.vitorpamplona.marmot.features.deviceGroup.MarmotDeviceGroupKinds
 import com.vitorpamplona.quartz.marmot.mip02Welcome.WelcomeEvent
 import com.vitorpamplona.quartz.marmot.mip03GroupMessages.GroupEvent
 import com.vitorpamplona.quartz.nip01Core.core.Event
@@ -214,6 +215,11 @@ private suspend fun MarmotManager.ingestGroupEvent(ge: GroupEvent): MarmotIngest
         is GroupEventResult.ApplicationMessage -> {
             if (isRetiredStreamStart(result.innerEventJson)) {
                 MarmotIngestResult.Ignored("retired agent text stream start")
+            } else if (isDeviceGroupTraffic(result.innerEventJson)) {
+                // `features/device-group.md`: these kinds are read only in the device group the device
+                // trusts and ignored in every other group, so no chat projects one. This client trusts
+                // none yet, so it neither stores nor surfaces them.
+                MarmotIngestResult.Ignored("device-group kind outside a trusted device group")
             } else {
                 // MLS ratchets once we decrypt; future reads of the same ciphertext
                 // would fail — persist the plaintext now so restarts/replays see it.
@@ -269,3 +275,6 @@ private suspend fun MarmotManager.ingestGroupEvent(ge: GroupEvent): MarmotIngest
     }
 
 private fun isRetiredStreamStart(innerEventJson: String): Boolean = Event.fromJsonOrNull(innerEventJson)?.kind?.let(AgentTextStreamRetirement::isStreamStart) == true
+
+/** Whether a decrypted inner event is a device-group app event (`MarmotDeviceGroupKinds`). */
+private fun isDeviceGroupTraffic(innerEventJson: String): Boolean = Event.fromJsonOrNull(innerEventJson)?.let { MarmotDeviceGroupKinds.isDeviceGroupKind(it.kind) } ?: false

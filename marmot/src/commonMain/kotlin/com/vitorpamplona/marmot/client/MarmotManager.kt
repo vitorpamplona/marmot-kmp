@@ -44,6 +44,7 @@ import com.vitorpamplona.marmot.appComponents.MarmotGroupState
 import com.vitorpamplona.marmot.appComponents.MarmotProtocolProfile
 import com.vitorpamplona.marmot.appComponents.MessageRetentionV1
 import com.vitorpamplona.marmot.client.MarmotGroupImage
+import com.vitorpamplona.marmot.features.deviceGroup.MarmotDeviceGroupKinds
 import com.vitorpamplona.marmot.foundation.appEvents.MarmotAdminDeletion
 import com.vitorpamplona.marmot.foundation.appEvents.MarmotAppEvent
 import com.vitorpamplona.marmot.foundation.appEvents.MarmotGroupSnapshot
@@ -609,6 +610,9 @@ class MarmotManager(
         expectedEpoch: Long? = null,
     ): OutboundGroupEvent {
         requireOutboundAllowed(nostrGroupId, "send a message")
+        // Device-group app events go only to the account's own device group, which this client
+        // does not run yet; every receiver ignores one anywhere else (`features/device-group.md`).
+        require(!MarmotDeviceGroupKinds.isDeviceGroupKind(innerEvent.kind)) { "kind ${innerEvent.kind} is sent only in a device group" }
         return outboundProcessor.buildGroupEvent(nostrGroupId, innerEvent, expectedEpoch)
     }
 
