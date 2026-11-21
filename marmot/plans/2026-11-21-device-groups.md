@@ -64,15 +64,15 @@ Ordered by dependency. Every row is library work unless the Where column says ap
 
 | # | Behaviour | Spec / MDK | lib | Where |
 |---|---|---|---|---|
-| 1.1 | `marmot.account.device-roster.v1` (`0x800e`): state and update codecs (canonical), validation, apply-a-diff, sorted ops, the never-added / never-removed requirement, one account per device group. | `device-roster-v1.md` (with byte vectors); MDK `traits/src/app_components/device_roster.rs:45-505` | **this branch**: codec, validation, apply, vectors (`DeviceRosterV1`). Requirement checks in a policy: not yet. | lib |
-| 1.2 | **AppDataUpdate diff semantics for `0x800e`.** Members apply the update as a diff to the parent's roster, not as a replacement. | `device-roster-v1.md` "Update" | blocked: mls-kmp `MlsGroup.applyAppDataUpdateProposals` (MlsGroup.kt ~L2931) replaces the bytes whole. | **mls-kmp**: a policy hook `resolveAppDataUpdate(componentId, parentBytes?, updateBytes): ByteArray` (identity by default) called there and wherever GroupContext extensions are recomputed for staging. marmot-kmp then plugs `DeviceRosterV1.applyUpdate`. Without it our device-group commits and MDK's diverge on the GroupContext and the device group forks. |
+| 1.1 | `marmot.account.device-roster.v1` (`0x800e`): state and update codecs (canonical), validation, apply-a-diff, sorted ops, the never-added / never-removed requirement, one account per device group. | `device-roster-v1.md` (with byte vectors); MDK `traits/src/app_components/device_roster.rs:45-505` | **done**: codec (`b0812eb`); requirement rules in `DeviceRosterRules` via `MarmotGroupPolicy` (never added or dropped after creation, valid roster while required, one credential identity, no `0x800f` requirement anywhere), refusals tested by reason | lib |
+| 1.2 | **AppDataUpdate diff semantics for `0x800e`.** Members apply the update as a diff to the parent's roster, not as a replacement. | `device-roster-v1.md` "Update" | **done**: mls-kmp `MlsGroupPolicy.resolveAppDataUpdate` (wt/appdata-update-hook `a859377`, unreleased); `MarmotGroupPolicy` applies the roster diff only while the parent requires `0x800e` | **mls-kmp**: a policy hook `resolveAppDataUpdate(componentId, parentBytes?, updateBytes): ByteArray` (identity by default) called there and wherever GroupContext extensions are recomputed for staging. marmot-kmp then plugs `DeviceRosterV1.applyUpdate`. Without it our device-group commits and MDK's diverge on the GroupContext and the device group forks. |
 | 1.3 | `marmot.member.device-tag.v1` (`0x800f`): seal (ChaCha20-Poly1305 under `leaf_tag_key`, aad = leaf signature key), sign (`SignWithLabel "Marmot DeviceTag"`), open and verify against a roster (device, removed slot, unclaimed). | `device-tag-v1.md` (vectors); MDK `traits/src/app_components/device_tag.rs`, `cgka-engine/src/device_tag.rs`, `roster_tag_keys.rs` | **this branch**: `DeviceTagV1` codec, `produce`, `read`, vectors. | lib |
-| 1.4 | Produce tags: every KeyPackage and every own LeafNode carries a tag once the device can tag; advertise `0x800f`; never require it. | `device-tag-v1.md` "Producing tags" | missing. mls-kmp already lets the caller set the next commit's leaf extensions (`MlsGroup` `pendingLeafAdvertisement`, ~L827) and KeyPackage leaf extensions. | lib (`CurrentProfileGroupFactory`, `MlsGroupManager`) |
+| 1.4 | Produce tags: every KeyPackage and every own LeafNode carries a tag once the device can tag; advertise `0x800f`; never require it. | `device-tag-v1.md` "Producing tags" | partial: the creator's founding leaf and the new device's first-Commit leaf are tagged (`MarmotDeviceGroupManager`); KeyPackages are not tagged yet; `0x800e`/`0x800f` advertised only through the opt-in `CurrentProfileGroupFactory.DEVICE_GROUP_SUPPORTED_COMPONENTS` (default OFF) | lib (`CurrentProfileGroupFactory`, `MlsGroupManager`) |
 | 1.5 | Device pairing (kinds 452-456): strict JSON messages, commitment, SAS (seven emoji, Matrix table), MACs, the two state machines (first answer wins, one decision, confirm order, competing requests, 10 answers/hour, 600 s expiries, cancel semantics). Transport-neutral; secrets in memory only. | `device-pairing.md` (two vectors); MDK `crates/marmot-pairing` (all of it), `testdata/pairing-v1.json` | **this branch**: messages, derivations, emoji table, both sessions, spec + MDK vectors. | lib |
 | 1.6 | Pairing over Nostr: rumor from the account to itself, NIP-59 gift wrap to own inbox relays; drop own Confirm echoes. | `transports/nostr.md` "Pairing delivery"; MDK `transport-nostr-adapter` `pairing` | **this branch**: `PairingDelivery.wrap/unwrap` | lib done; app: which relays (own 10050), subscribe to own wraps; today Amethyst drops 452-456 in `MarmotDevicePairing`: route them to `PairingDelivery.unwrap` instead |
-| 1.7 | Device-group trust store: the trusted group id (set on create or on joining the link's Welcome only), the pending link record (session, `KeyPackageRef`, group id, sender signature key, wait end), reserved group id and KeyPackage, 600 s wait. Explicit local reset. | `device-group.md` "Trust", "Joining", "Explicit local reset" | missing | lib (interface + in-memory), app (persisted, encrypted store). **New persisted format.** |
-| 1.8 | Create the device group on approve (founding Add of exactly the confirmed KeyPackage, roster with both entries, account as sole admin, `0x800d` + `0x800e` required); or one Commit adding the confirmed KeyPackage and its `set_device`. Link made on the new device's first Commit; failed after 3600 s and undone with `remove_device`. | "Creating the device group", "Approving", "A link that is not taken up" | missing (needs 1.1-1.4) | lib (`MarmotDeviceGroupManager`) |
-| 1.9 | New device: join only the link's Welcome (group, signer leaf key, KeyPackage, `0x800e`), first Commit sets `tag_signature_key` and tags its leaf. | "Joining", "Matching leaves to devices" | missing. The Welcome signer is already reachable through `MarmotGroupPolicy.validateJoin(group, signer, …)`. | lib |
+| 1.7 | Device-group trust store: the trusted group id (set on create or on joining the link's Welcome only), the pending link record (session, `KeyPackageRef`, group id, sender signature key, wait end), reserved group id and KeyPackage, 600 s wait. Explicit local reset. | `device-group.md` "Trust", "Joining", "Explicit local reset" | **done** (lib): `DeviceGroupTrust` (versioned codec), `DeviceGroupTrustStore`, `InMemoryDeviceGroupTrustStore`; the link-only join is `DeviceGroupLinkJoinPolicy`, and `MarmotGroupPolicy.validateJoin` refuses every other `0x800e` Welcome. Explicit local reset: missing | lib (interface + in-memory), app (persisted, encrypted store). **New persisted format.** |
+| 1.8 | Create the device group on approve (founding Add of exactly the confirmed KeyPackage, roster with both entries, account as sole admin, `0x800d` + `0x800e` required); or one Commit adding the confirmed KeyPackage and its `set_device`. Link made on the new device's first Commit; failed after 3600 s and undone with `remove_device`. | "Creating the device group", "Approving", "A link that is not taken up" | **done** (lib, in-process): `MarmotDeviceGroupManager.confirmTarget/approve/applyStaged/processCommit`; link made on the new device's first Commit. The 3600 s failure and its undo: missing | lib (`MarmotDeviceGroupManager`) |
+| 1.9 | New device: join only the link's Welcome (group, signer leaf key, KeyPackage, `0x800e`), first Commit sets `tag_signature_key` and tags its leaf. | "Joining", "Matching leaves to devices" | **done** (lib, in-process): `joinLinkWelcome` (link's group id, signer leaf key, KeyPackage, `0x800e`, 600 s wait) and `stageFirstCommit` (tag key + tagged UpdatePath leaf) | lib |
 | 1.10 | Slot announcements: announce `announced_key_package` in the roster before every publish; do not publish unannounced. | "Slot announcements" | missing | lib (`KeyPackageRotationManager` gate) |
 | 1.11 | Private KeyPackages: issue (tagged, not last-resort, stock 5→10, cap ≥300), request (459) / hand-off (460) codecs and rules, consume only through a sibling Welcome. | "Private KeyPackages"; MDK `cgka-engine/src/private_key_packages.rs`, `marmot-app/src/client/private_key_packages.rs` | codecs **this branch**; stock/rules missing | lib. **New persisted format** (issued and held private KeyPackages with their owners). |
 | 1.12 | Sibling Welcome (461) v1/v2/v3: codec, send after the Add is canonical, receive checks (trusted group, `to`, `from` in roster, sender tag, KeyPackage issued to `from`), repair after heartbeat. v3 forwarded `inviter`/`confirmed`. | "Sibling Welcomes" (#512) | codec **this branch**; flows missing | lib |
@@ -106,6 +106,18 @@ prompt and warning, the "unlinked" notice, notification suppression for the devi
 verbs (thin over the library), and keeping the device group out of `marmotGroupList`.
 
 ## Persisted formats (API)
+
+**New in this branch: `DeviceGroupTrust`, version 1** (`features/deviceGroup/DeviceGroupTrust.kt`), the
+one store this work adds. Marmot binary profile: `uint8 version = 1; opaque own_slot[32];
+optional<opaque<V>> trusted_mls_group_id; optional<opaque<V>> trusted_nostr_group_id;
+optional<opaque<V>> tag_signing_seed; optional<PendingLinkV1> pending_link; ApprovalV1 approvals<V>`, where
+`PendingLinkV1 = session, key_package_event, key_package_ref, device_group_id, welcome_sender_key,
+existing_device_slot (each opaque<V>), uint64 wait_until` and `ApprovalV1 = opaque slot[32]; uint64
+linked_at; uint8 outcome (0 pending, 1 made, 2 failed)`. It holds the tag signing seed: an app's store
+MUST encrypt it at rest. A change to its layout is a new version byte, never an edit of version 1. The
+founding device's pre-creation material (group id, leaf key, roster key) between its Confirm and the
+founding Add is memory only, so a restart there abandons the link (the new device's 600 s wait ends it).
+
 
 Nothing in this branch changes a store's bytes: the new code is codecs and in-memory state machines. The pairing
 sessions keep their secrets in memory only, as the spec requires. These will be new persisted formats when they land,
@@ -147,6 +159,17 @@ With `wn`/`wnd` at `bf4778a3` (`cli/tests/marmot/state/mdk/target/release`) agai
 
 Nothing here is wired into `MarmotManager` yet, and no KeyPackage advertises `0x800e`/`0x800f`, so
 behaviour towards White Noise is unchanged except row 0.4.
+
+## Second pass (on top of the table above)
+
+| Repo | Commit | What |
+|---|---|---|
+| mls-kmp `wt/appdata-update-hook` | `a859377` | `MlsGroupPolicy.resolveAppDataUpdate` (identity default), applied for local, inbound and external commits; ABI dump; guide row. |
+| marmot-kmp | see the report | Roster diff and requirement rules in the policy; `DeviceGroupTrust` + store; `DeviceGroupLinkJoinPolicy`; `MarmotDeviceGroupManager`; `DeviceGroupLinkTest` (pairing over gift wraps, founding Add, link Welcome, first Commit, roster bytes equal on both devices, tags read on both). |
+
+The flag: `0x800e`/`0x800f` are OFF by default. `SUPPORTED_COMPONENTS` (what KeyPackages and leaves
+advertise unless told otherwise) is unchanged; only callers that pass
+`DEVICE_GROUP_SUPPORTED_COMPONENTS` advertise them, and nothing in the library or Amethyst does yet.
 
 ## Next library steps, in order
 
