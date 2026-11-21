@@ -165,7 +165,7 @@ behaviour towards White Noise is unchanged except row 0.4.
 | Repo | Commit | What |
 |---|---|---|
 | mls-kmp `wt/appdata-update-hook` | `a859377` | `MlsGroupPolicy.resolveAppDataUpdate` (identity default), applied for local, inbound and external commits; ABI dump; guide row. |
-| marmot-kmp | see the report | Roster diff and requirement rules in the policy; `DeviceGroupTrust` + store; `DeviceGroupLinkJoinPolicy`; `MarmotDeviceGroupManager`; `DeviceGroupLinkTest` (pairing over gift wraps, founding Add, link Welcome, first Commit, roster bytes equal on both devices, tags read on both). |
+| marmot-kmp | `26b415c` | Roster diff and requirement rules in the policy; `DeviceGroupTrust` + store; `DeviceGroupLinkJoinPolicy`; `MarmotDeviceGroupManager`; `DeviceGroupLinkTest` (pairing over gift wraps, founding Add, link Welcome, first Commit, roster bytes equal on both devices, tags read on both). |
 
 The flag: `0x800e`/`0x800f` are OFF by default. `SUPPORTED_COMPONENTS` (what KeyPackages and leaves
 advertise unless told otherwise) is unchanged; only callers that pass
