@@ -119,6 +119,17 @@ object CurrentProfileGroupFactory {
         signer: NostrSigner,
         ciphersuite: MlsCiphersuite = MlsCiphersuite.DEFAULT,
         supportedComponents: List<Int> = SUPPORTED_COMPONENTS,
+    ): LeafIdentity = newLeafIdentity(signer, ciphersuite, supportedComponents) { emptyList() }
+
+    /**
+     * [newLeafIdentity] with more leaf dictionary entries, built from the new leaf's signature key:
+     * a linked device's `0x800f` device tag, which is bound to that key.
+     */
+    suspend fun newLeafIdentity(
+        signer: NostrSigner,
+        ciphersuite: MlsCiphersuite,
+        supportedComponents: List<Int>,
+        leafComponents: (signatureKey: ByteArray) -> List<ComponentData>,
     ): LeafIdentity {
         val keyPair = Ed25519.generateKeyPair()
         val proof = AccountIdentityProofV2.create(signer, ciphersuite, keyPair.publicKey)
@@ -129,7 +140,7 @@ object CurrentProfileGroupFactory {
                     ComponentData(ComponentsList.APP_COMPONENTS_ID, ComponentsList.encode(supportedComponents)),
                     ComponentData(ComponentsList.SAFE_AAD_ID, ComponentsList.encode(emptyList())),
                     ComponentData(AppComponentIds.ACCOUNT_IDENTITY_PROOF_V2, proof.encode()),
-                ),
+                ) + leafComponents(keyPair.publicKey),
             )
         return LeafIdentity(keyPair, listOf(dictionary.toExtension()))
     }
@@ -148,9 +159,18 @@ object CurrentProfileGroupFactory {
         ciphersuite: MlsCiphersuite = MlsCiphersuite.DEFAULT,
         /** The component ids the KeyPackage's leaf advertises; an older release advertised fewer. */
         supportedComponents: List<Int> = SUPPORTED_COMPONENTS,
+    ): KeyPackageBundle = createKeyPackage(signer, lastResort, ciphersuite, supportedComponents) { emptyList() }
+
+    /** [createKeyPackage] whose leaf also carries [leafComponents] of its signature key (a device tag). */
+    suspend fun createKeyPackage(
+        signer: NostrSigner,
+        lastResort: Boolean,
+        ciphersuite: MlsCiphersuite,
+        supportedComponents: List<Int>,
+        leafComponents: (signatureKey: ByteArray) -> List<ComponentData>,
     ): KeyPackageBundle {
         val identity = signer.pubKey.hexToByteArray()
-        val leaf = newLeafIdentity(signer, ciphersuite, supportedComponents)
+        val leaf = newLeafIdentity(signer, ciphersuite, supportedComponents, leafComponents)
 
         val keyPackageExtensions =
             if (lastResort) {
@@ -232,9 +252,24 @@ object CurrentProfileGroupFactory {
         ciphersuite: MlsCiphersuite = MlsCiphersuite.DEFAULT,
         /** The component ids the creator's leaf advertises. */
         supportedComponents: List<Int> = SUPPORTED_COMPONENTS,
+    ): MlsGroup = createGroup(signer, nostrGroupId, relays, profile, additionalAdmins, retention, encryptedMedia, agentTextStream, ciphersuite, supportedComponents) { emptyList() }
+
+    /** [createGroup] whose creator leaf also carries [leafComponents] of its signature key (a device tag). */
+    suspend fun createGroup(
+        signer: NostrSigner,
+        nostrGroupId: ByteArray,
+        relays: List<String>,
+        profile: GroupProfileV1?,
+        additionalAdmins: List<ByteArray>,
+        retention: MessageRetentionV1?,
+        encryptedMedia: EncryptedMediaPolicyV2?,
+        agentTextStream: AgentTextStreamQuicPolicyV1?,
+        ciphersuite: MlsCiphersuite,
+        supportedComponents: List<Int>,
+        leafComponents: (signatureKey: ByteArray) -> List<ComponentData>,
     ): MlsGroup {
         val identity = signer.pubKey.hexToByteArray()
-        val leaf = newLeafIdentity(signer, ciphersuite, supportedComponents)
+        val leaf = newLeafIdentity(signer, ciphersuite, supportedComponents, leafComponents)
 
         val dictionary =
             MarmotGroupState.buildDictionary(
