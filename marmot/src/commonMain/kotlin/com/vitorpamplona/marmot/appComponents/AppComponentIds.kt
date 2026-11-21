@@ -118,6 +118,12 @@ object AppComponentIds {
     /** `marmot.group.account-devices.v1` — same-account Adds and Removes; carries no data. See `AccountDevicesV1`. */
     const val ACCOUNT_DEVICES_V1 = 0x800d
 
+    /** `marmot.account.device-roster.v1` — a device group's roster; requiring it marks a device group. See `DeviceRosterV1`. */
+    const val DEVICE_ROSTER_V1 = 0x800e
+
+    /** `marmot.member.device-tag.v1` — the LeafNode tag naming which linked device holds a leaf; never required. See `DeviceTagV1`. */
+    const val DEVICE_TAG_V1 = 0x800f
+
     /**
      * The `0x` + four-lowercase-hex-digit rendering used wherever a component
      * id appears as text: the kind-30443 `app_components` tag values, and the
