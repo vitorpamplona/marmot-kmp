@@ -29,11 +29,13 @@ import com.vitorpamplona.quartz.nip01Core.core.toHexKey
 
 /**
  * What a device keeps, across restarts, about its device group (`features/device-group.md` "Trust",
- * "Joining", "A link that is not taken up"). Trust is recorded when the device creates the group or
- * joins it through its link's Welcome, and never inferred from group state.
+ * "Joining", "A link that is not taken up", "Removing a device", "Heartbeats", "New sign-ins"). Trust
+ * is recorded when the device creates the group or joins it through its link's Welcome, and is never
+ * inferred from group state.
  *
- * Persisted format (API): [encode] / [decode], version 1, in the Marmot binary profile. It holds the
- * device's tag signing seed, so a store MUST encrypt it at rest.
+ * Persisted format (API): [encode] / [decode], version 1, in the Marmot binary profile; the layout is
+ * written out in `plans/2026-11-21-device-groups.md`. It holds the tag signing seed, so a store MUST
+ * encrypt it at rest.
  */
 data class DeviceGroupTrust(
     /** This device's KeyPackage publication slot. */
@@ -46,12 +48,27 @@ data class DeviceGroupTrust(
     val tagSigningSeed: HexKey? = null,
     /** A new device's confirmed link, while it waits for that link's Welcome. */
     val pendingLink: PendingLink? = null,
+    /** The KeyPackageRef this device was linked with: the post-link inventory names it. */
+    val linkedKeyPackageRef: HexKey? = null,
+    /** The device group removed this device: it acts for the account no more (`On the removed device`). */
+    val unlinked: Boolean = false,
     /** The links this device approved, by the new device's slot. */
     val approvals: List<Approval> = emptyList(),
+    /** Removals this device decided, kept until the roster no longer lists the slot. */
+    val removalDecisions: List<SlotTime> = emptyList(),
+    /** When this device last sent a heartbeat that a relay accepted. */
+    val lastHeartbeatSent: Long = 0,
+    /** Each sibling's last activity, for its roster entry (slot and `linked_at`). */
+    val activity: List<Activity> = emptyList(),
+    /** Slots a roster this device applied held as `removed`, with the cutoff no sign-in older than raises. */
+    val removedSlots: List<SlotTime> = emptyList(),
+    /** The slots the first complete-or-answered sign-in check returned; null until it ran. */
+    val firstCheckSlots: List<HexKey>? = null,
+    /** Sign-ins this device's user answered "This wasn't me". */
+    val ownRejections: List<SlotTime> = emptyList(),
 ) {
     val trustsDeviceGroup: Boolean get() = trustedGroupId != null
 
-    /** A confirmed link waiting for its Welcome; it ends at [waitUntil] (600 s after the Confirm). */
     data class PendingLink(
         val link: ConfirmedLink,
         val waitUntil: Long,
@@ -60,13 +77,8 @@ data class DeviceGroupTrust(
     enum class Outcome(
         val code: Int,
     ) {
-        /** Added; the new device's first Commit is not on the selected branch yet. */
         PENDING(0),
-
-        /** Its first Commit is selected: the link stays made. */
         MADE(1),
-
-        /** Not made within 3600 s of `linked_at`: the approver undoes it. */
         FAILED(2),
     }
 
@@ -74,6 +86,19 @@ data class DeviceGroupTrust(
         val slot: HexKey,
         val linkedAt: Long,
         val outcome: Outcome,
+        /** The signature key of the leaf the approving Add created, to remove it if the link fails. */
+        val leafSignatureKey: HexKey,
+    )
+
+    data class SlotTime(
+        val slot: HexKey,
+        val time: Long,
+    )
+
+    data class Activity(
+        val slot: HexKey,
+        val linkedAt: Long,
+        val lastActivity: Long,
     )
 
     fun encode(): ByteArray {
@@ -88,21 +113,42 @@ data class DeviceGroupTrust(
         } else {
             w.putUint8(1)
             val l = pendingLink.link
-            w.putOpaqueVarInt(l.sessionId.hexToByteArray())
-            w.putOpaqueVarInt(l.keyPackageEventId.hexToByteArray())
-            w.putOpaqueVarInt(l.keyPackageRef.hexToByteArray())
-            w.putOpaqueVarInt(l.deviceGroupId.hexToByteArray())
-            w.putOpaqueVarInt(l.welcomeSenderKey.hexToByteArray())
-            w.putOpaqueVarInt(l.existingDeviceSlot.hexToByteArray())
+            listOf(l.sessionId, l.keyPackageEventId, l.keyPackageRef, l.deviceGroupId, l.welcomeSenderKey, l.existingDeviceSlot).forEach { w.putOpaqueVarInt(it.hexToByteArray()) }
             w.putUint64(pendingLink.waitUntil)
         }
-        val a = TlsWriter()
-        approvals.forEach {
-            a.putBytes(it.slot.hexToByteArray())
-            a.putUint64(it.linkedAt)
-            a.putUint8(it.outcome.code)
+        putOptionalVar(w, linkedKeyPackageRef)
+        w.putUint8(if (unlinked) 1 else 0)
+        w.putOpaqueVarInt(
+            TlsWriter()
+                .also { a ->
+                    approvals.forEach {
+                        a.putBytes(it.slot.hexToByteArray())
+                        a.putUint64(it.linkedAt)
+                        a.putUint8(it.outcome.code)
+                        a.putOpaqueVarInt(it.leafSignatureKey.hexToByteArray())
+                    }
+                }.toByteArray(),
+        )
+        putSlotTimes(w, removalDecisions)
+        w.putUint64(lastHeartbeatSent)
+        w.putOpaqueVarInt(
+            TlsWriter()
+                .also { a ->
+                    activity.forEach {
+                        a.putBytes(it.slot.hexToByteArray())
+                        a.putUint64(it.linkedAt)
+                        a.putUint64(it.lastActivity)
+                    }
+                }.toByteArray(),
+        )
+        putSlotTimes(w, removedSlots)
+        if (firstCheckSlots == null) {
+            w.putUint8(0)
+        } else {
+            w.putUint8(1)
+            w.putOpaqueVarInt(TlsWriter().also { a -> firstCheckSlots.forEach { a.putBytes(it.hexToByteArray()) } }.toByteArray())
         }
-        w.putOpaqueVarInt(a.toByteArray())
+        putSlotTimes(w, ownRejections)
         return w.toByteArray()
     }
 
@@ -128,6 +174,28 @@ data class DeviceGroupTrust(
                 else -> throw IllegalArgumentException("invalid presence byte")
             }
 
+        private fun putSlotTimes(
+            w: TlsWriter,
+            list: List<SlotTime>,
+        ) {
+            w.putOpaqueVarInt(
+                TlsWriter()
+                    .also { a ->
+                        list.forEach {
+                            a.putBytes(it.slot.hexToByteArray())
+                            a.putUint64(it.time)
+                        }
+                    }.toByteArray(),
+            )
+        }
+
+        private fun readSlotTimes(r: TlsReader): List<SlotTime> {
+            val a = TlsReader(r.readOpaqueVarInt())
+            val out = ArrayList<SlotTime>()
+            while (a.hasRemaining) out.add(SlotTime(a.readBytes(32).toHexKey(), a.readUint64()))
+            return out
+        }
+
         fun decode(bytes: ByteArray): DeviceGroupTrust {
             val r = TlsReader(bytes)
             require(r.readUint8() == VERSION) { "unknown device-group trust version" }
@@ -139,29 +207,47 @@ data class DeviceGroupTrust(
                 when (r.readUint8()) {
                     0 -> null
                     1 -> {
-                        val link =
-                            ConfirmedLink(
-                                sessionId = r.readOpaqueVarInt().toHexKey(),
-                                keyPackageEventId = r.readOpaqueVarInt().toHexKey(),
-                                keyPackageRef = r.readOpaqueVarInt().toHexKey(),
-                                deviceGroupId = r.readOpaqueVarInt().toHexKey(),
-                                welcomeSenderKey = r.readOpaqueVarInt().toHexKey(),
-                                existingDeviceSlot = r.readOpaqueVarInt().toHexKey(),
-                            )
-                        PendingLink(link, r.readUint64())
+                        val f = List(6) { r.readOpaqueVarInt().toHexKey() }
+                        PendingLink(ConfirmedLink(f[0], f[1], f[2], f[3], f[4], f[5]), r.readUint64())
                     }
                     else -> throw IllegalArgumentException("invalid presence byte")
                 }
+            val linkedRef = readOptionalVar(r)
+            val unlinked =
+                when (r.readUint8()) {
+                    0 -> false
+                    1 -> true
+                    else -> throw IllegalArgumentException("invalid flag")
+                }
             val ar = TlsReader(r.readOpaqueVarInt())
-            require(!r.hasRemaining) { "device-group trust has trailing bytes" }
             val approvals = ArrayList<Approval>()
             while (ar.hasRemaining) {
                 val slot = ar.readBytes(32).toHexKey()
                 val linkedAt = ar.readUint64()
                 val code = ar.readUint8()
-                approvals.add(Approval(slot, linkedAt, Outcome.entries.firstOrNull { it.code == code } ?: throw IllegalArgumentException("unknown outcome $code")))
+                val outcome = Outcome.entries.firstOrNull { it.code == code } ?: throw IllegalArgumentException("unknown outcome $code")
+                approvals.add(Approval(slot, linkedAt, outcome, ar.readOpaqueVarInt().toHexKey()))
             }
-            return DeviceGroupTrust(ownSlot, group, nostr, seed, pending, approvals)
+            val decisions = readSlotTimes(r)
+            val lastHeartbeat = r.readUint64()
+            val act = TlsReader(r.readOpaqueVarInt())
+            val activity = ArrayList<Activity>()
+            while (act.hasRemaining) activity.add(Activity(act.readBytes(32).toHexKey(), act.readUint64(), act.readUint64()))
+            val removed = readSlotTimes(r)
+            val first =
+                when (r.readUint8()) {
+                    0 -> null
+                    1 -> {
+                        val fr = TlsReader(r.readOpaqueVarInt())
+                        val out = ArrayList<HexKey>()
+                        while (fr.hasRemaining) out.add(fr.readBytes(32).toHexKey())
+                        out
+                    }
+                    else -> throw IllegalArgumentException("invalid presence byte")
+                }
+            val rejections = readSlotTimes(r)
+            require(!r.hasRemaining) { "device-group trust has trailing bytes" }
+            return DeviceGroupTrust(ownSlot, group, nostr, seed, pending, linkedRef, unlinked, approvals, decisions, lastHeartbeat, activity, removed, first, rejections)
         }
     }
 }

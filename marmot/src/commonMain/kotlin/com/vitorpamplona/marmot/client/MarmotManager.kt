@@ -44,7 +44,9 @@ import com.vitorpamplona.marmot.appComponents.MarmotGroupState
 import com.vitorpamplona.marmot.appComponents.MarmotProtocolProfile
 import com.vitorpamplona.marmot.appComponents.MessageRetentionV1
 import com.vitorpamplona.marmot.client.MarmotGroupImage
+import com.vitorpamplona.marmot.features.deviceGroup.MarmotDeviceGroupConfig
 import com.vitorpamplona.marmot.features.deviceGroup.MarmotDeviceGroupKinds
+import com.vitorpamplona.marmot.features.deviceGroup.MarmotDeviceGroupManager
 import com.vitorpamplona.marmot.foundation.appEvents.MarmotAdminDeletion
 import com.vitorpamplona.marmot.foundation.appEvents.MarmotAppEvent
 import com.vitorpamplona.marmot.foundation.appEvents.MarmotGroupSnapshot
@@ -65,6 +67,7 @@ import com.vitorpamplona.marmot.mip00KeyPackages.KeyPackageRotationManager
 import com.vitorpamplona.marmot.mip00KeyPackages.KeyPackageUtils
 import com.vitorpamplona.marmot.mip00KeyPackages.buildCurrentProfileFrom
 import com.vitorpamplona.marmot.mip01Groups.MarmotGroupData
+import com.vitorpamplona.marmot.mip01Groups.MlsCiphersuite
 import com.vitorpamplona.marmot.mip03GroupMessages.GroupEventEncryption
 import com.vitorpamplona.marmot.protocolCore.GroupLifecycleState
 import com.vitorpamplona.marmot.protocolCore.LocalOutboundGate
@@ -75,6 +78,7 @@ import com.vitorpamplona.marmot.protocolCore.PublishOutcome
 import com.vitorpamplona.mls.components.ComponentsList
 import com.vitorpamplona.mls.group.MlsGroup
 import com.vitorpamplona.mls.messages.CommitResult
+import com.vitorpamplona.mls.messages.KeyPackageBundle
 import com.vitorpamplona.mls.messages.MlsKeyPackage
 import com.vitorpamplona.mls.tree.Credential
 import com.vitorpamplona.quartz.marmot.mip00KeyPackages.KeyPackageEvent
@@ -165,8 +169,33 @@ class MarmotManager(
      * KeyPackage it makes. Defaults to [CurrentProfileGroupFactory.SUPPORTED_COMPONENTS];
      * the conformance runner passes fewer to play an older client.
      */
-    val supportedComponents: List<Int> = CurrentProfileGroupFactory.SUPPORTED_COMPONENTS,
+    supportedComponents: List<Int> = CurrentProfileGroupFactory.SUPPORTED_COMPONENTS,
+    /**
+     * The device-group switch. Null (the default) keeps device groups off: no KeyPackage or leaf
+     * advertises `0x800e`/`0x800f`, and every device-group app event is ignored. A config turns
+     * them on: [deviceGroups] runs linking, private KeyPackages and sibling Welcomes, and every
+     * KeyPackage and leaf advertises both components and carries this device's tag once it can.
+     */
+    val deviceGroupConfig: MarmotDeviceGroupConfig? = null,
 ) {
+    /** The 2.4 constructor, kept so code compiled against it still links. */
+    @Deprecated("Use the constructor with deviceGroupConfig. Removed in 3.0.0.", level = DeprecationLevel.HIDDEN)
+    constructor(
+        signer: NostrSigner,
+        store: MlsGroupStateStore,
+        messageStore: MarmotMessageStore?,
+        keyPackageStore: KeyPackageBundleStore?,
+        publisher: MarmotPublisher,
+        publishObligationStore: MarmotPublishObligationStore?,
+        ingestDedupStore: MarmotIngestDedupStore?,
+        scope: CoroutineScope?,
+        supportedComponents: List<Int>,
+    ) : this(signer, store, messageStore, keyPackageStore, publisher, publishObligationStore, ingestDedupStore, scope, supportedComponents, null)
+
+    /** The component ids this client's leaves advertise: [deviceGroupConfig] adds `0x800e`/`0x800f`. */
+    val supportedComponents: List<Int> =
+        if (deviceGroupConfig == null) supportedComponents else (supportedComponents + CurrentProfileGroupFactory.DEVICE_GROUP_SUPPORTED_COMPONENTS).distinct()
+
     /** The 2.x constructor, kept so code compiled against it still links. */
     @Deprecated("Use the constructor with supportedComponents. Removed in 3.0.0.", level = DeprecationLevel.HIDDEN)
     constructor(
@@ -180,12 +209,15 @@ class MarmotManager(
         scope: CoroutineScope? = null,
     ) : this(signer, store, messageStore, keyPackageStore, publisher, publishObligationStore, ingestDedupStore, scope, CurrentProfileGroupFactory.SUPPORTED_COMPONENTS)
 
-    val groupManager = MlsGroupManager(store, supportedComponents)
-    val keyPackageRotationManager = KeyPackageRotationManager(keyPackageStore, supportedComponents)
+    val groupManager = MlsGroupManager(store, this.supportedComponents)
+    val keyPackageRotationManager = KeyPackageRotationManager(keyPackageStore, this.supportedComponents)
     val subscriptionManager = MarmotSubscriptionManager(signer.pubKey)
     val inboundProcessor = MarmotInboundProcessor(groupManager, keyPackageRotationManager)
     val outboundProcessor = MarmotOutboundProcessor(groupManager)
     val welcomeSender = MarmotWelcomeSender(signer)
+
+    /** Device groups, when [deviceGroupConfig] turns them on. Call its `start()` once at launch. */
+    val deviceGroups: MarmotDeviceGroupManager? = deviceGroupConfig?.let { MarmotDeviceGroupManager(this, it) }
 
     /**
      * Called for every kind:1210 row this client DERIVES, so a front end can
@@ -612,7 +644,9 @@ class MarmotManager(
         requireOutboundAllowed(nostrGroupId, "send a message")
         // Device-group app events go only to the account's own device group, which this client
         // does not run yet; every receiver ignores one anywhere else (`features/device-group.md`).
-        require(!MarmotDeviceGroupKinds.isDeviceGroupKind(innerEvent.kind)) { "kind ${innerEvent.kind} is sent only in a device group" }
+        require(!MarmotDeviceGroupKinds.isDeviceGroupKind(innerEvent.kind) || deviceGroups?.isTrustedDeviceGroup(nostrGroupId) == true) {
+            "kind ${innerEvent.kind} is sent only in this device's device group"
+        }
         return outboundProcessor.buildGroupEvent(nostrGroupId, innerEvent, expectedEpoch)
     }
 
@@ -990,6 +1024,11 @@ class MarmotManager(
         require(invites.map { it.keyPackageEventId }.toSet().size == invites.size) {
             "addMemberInvites: the same KeyPackage appears twice in one commit"
         }
+        // `device-group.md` "Creating a chat": a client implementing device groups never adds its own
+        // account's PUBLISHED KeyPackages; its siblings join with private ones ([addWithSiblings]).
+        require(deviceGroupConfig == null || invites.none { it.memberPubKey == signer.pubKey }) {
+            "addMemberInvites: in device-group mode this account's devices are added only with private KeyPackages"
+        }
 
         // Verify that each KeyPackage credential matches the expected member
         // pubkey. Accepts either framing — a peer's published KeyPackage is an
@@ -1139,11 +1178,89 @@ class MarmotManager(
                 )
             }
 
+        lastFoundingWelcome = staged.result.welcomeBytes
         return Pair(null, welcomeDeliveries)
+    }
+
+    /** The Welcome bytes of the last founding Add, for the sibling Welcomes [addWithSiblings] sends. */
+    private var lastFoundingWelcome: ByteArray? = null
+
+    /** What [addWithSiblings] did. */
+    class SiblingAddResult(
+        /** The commit to publish; null for a founding Add, which publishes none. */
+        val event: OutboundGroupEvent?,
+        /** The Welcomes of other accounts' invitees, as [addMemberInvites] returns them. */
+        val welcomes: List<WelcomeDelivery>,
+        /**
+         * The Welcome for the siblings added with private KeyPackages: sent only inside the device
+         * group, never as a kind 444 (`device-group.md` "Sending a sibling Welcome"). Null when the
+         * commit was not confirmed.
+         */
+        val siblingWelcome: ByteArray?,
+    )
+
+    /**
+     * [addMemberInvites] that also adds this account's own linked devices with the private
+     * KeyPackages they handed this device ([siblingKeyPackages], already admitted by the device
+     * group's rules). In the founding Add they join beside [invites]; later, with no [invites], the
+     * Commit is a same-account Add, which a group requiring `0x800d` accepts from any member.
+     */
+    suspend fun addWithSiblings(
+        nostrGroupId: HexKey,
+        invites: List<MemberInvite>,
+        siblingKeyPackages: List<ByteArray>,
+        relays: List<NormalizedRelayUrl>,
+    ): SiblingAddResult {
+        require(invites.isNotEmpty() || siblingKeyPackages.isNotEmpty()) { "addWithSiblings: nothing to add" }
+        val siblings = siblingKeyPackages.map { KeyPackageUtils.decodeKeyPackage(it) }
+        for (kp in siblings) {
+            val credential = kp.leafNode.credential
+            require(credential is Credential.Basic && credential.identity.toHexKey() == signer.pubKey) { "a sibling KeyPackage is this account's" }
+        }
+        if (siblings.isEmpty()) {
+            val (event, welcomes) = addMemberInvites(nostrGroupId, invites, relays)
+            return SiblingAddResult(event, welcomes, null)
+        }
+        if (isFoundingAdd(nostrGroupId)) {
+            val decoded = invites.map { KeyPackageUtils.decodeKeyPackage(it.keyPackageBytes) }
+            lastFoundingWelcome = null
+            val (_, welcomes) = commitFoundingAdd(nostrGroupId, invites, relays, (decoded + siblings).map { it.toTlsBytes() }, decoded + siblings)
+            return SiblingAddResult(null, welcomes, lastFoundingWelcome)
+        }
+        require(invites.isEmpty()) { "addWithSiblings: add other accounts and siblings in separate commits" }
+        val publication =
+            commitAndPublish(nostrGroupId, relays) {
+                groupManager.stageOwn(nostrGroupId) { clone ->
+                    siblings.forEach { clone.proposeAdd(it.toTlsBytes()) }
+                    clone.commit()
+                }
+            }
+        return SiblingAddResult(publication.event, emptyList(), if (publication.confirmed) publication.commitResult.welcomeBytes else null)
+    }
+
+    /**
+     * Joins a chat through a sibling Welcome the device group admitted, with the private KeyPackage
+     * [bundle] this device issued (`device-group.md` "Receiving a sibling Welcome"). Joining consumes
+     * the KeyPackage; the caller deletes it.
+     */
+    suspend fun joinSiblingWelcome(
+        welcomeBytes: ByteArray,
+        bundle: KeyPackageBundle,
+    ): WelcomeResult {
+        val result = inboundProcessor.joinWithBundle(welcomeBytes, bundle)
+        if (result is WelcomeResult.Joined) {
+            desync.seed(result.nostrGroupId, TimeUtils.now())
+            publishGate.clearGate(result.nostrGroupId)
+            subscriptionManager.subscribeGroup(result.nostrGroupId)
+            recordRetentionForCurrentEpoch(result.nostrGroupId)
+            syncGroupSystemRows(result.nostrGroupId)
+        }
+        return result
     }
 
     /**
      * `protocol-core/group-setup.md`: a creator that supports
+
      * `marmot.group.account-devices.v1` MUST require it when its own leaf and
      * every founding KeyPackage advertise it; never in a legacy group. When
      * that founding Add would then break the component's own rules (an account
@@ -1230,7 +1347,11 @@ class MarmotManager(
                 profile = profile,
                 additionalAdmins = additionalAdmins,
                 retention = retention,
+                encryptedMedia = null,
+                agentTextStream = null,
+                ciphersuite = MlsCiphersuite.DEFAULT,
                 supportedComponents = supportedComponents,
+                leafComponents = { key -> deviceGroups?.ownTagComponents(key).orEmpty() },
             )
         groupManager.adoptGroup(nostrGroupId, group)
         // Same empty-obligation exception as [createGroup]: a one-member

@@ -22,6 +22,8 @@ package com.vitorpamplona.marmot.features.deviceGroup
 
 import com.vitorpamplona.crypto.curve25519.Ed25519
 import com.vitorpamplona.crypto.random.RandomInstance
+import com.vitorpamplona.marmot.OutboundGroupEvent
+import com.vitorpamplona.marmot.WelcomeResult
 import com.vitorpamplona.marmot.appComponents.AccountDevicesV1
 import com.vitorpamplona.marmot.appComponents.AdminPolicyV1
 import com.vitorpamplona.marmot.appComponents.CurrentProfileGroupFactory
@@ -29,55 +31,160 @@ import com.vitorpamplona.marmot.appComponents.DeviceEntryV1
 import com.vitorpamplona.marmot.appComponents.DeviceRosterRules
 import com.vitorpamplona.marmot.appComponents.DeviceRosterUpdateV1
 import com.vitorpamplona.marmot.appComponents.DeviceRosterV1
+import com.vitorpamplona.marmot.appComponents.DeviceStatusV1
 import com.vitorpamplona.marmot.appComponents.DeviceTagV1
 import com.vitorpamplona.marmot.appComponents.GroupLifecycleV1
+import com.vitorpamplona.marmot.appComponents.GroupProfileV1
 import com.vitorpamplona.marmot.appComponents.MarmotGroupState
 import com.vitorpamplona.marmot.appComponents.NostrRoutingV1
+import com.vitorpamplona.marmot.appComponents.RejectedSlotV1
+import com.vitorpamplona.marmot.appComponents.RejectionReasonV1
 import com.vitorpamplona.marmot.appComponents.RosterOperationV1
+import com.vitorpamplona.marmot.client.MarmotManager
 import com.vitorpamplona.marmot.features.devicePairing.ConfirmedLink
 import com.vitorpamplona.marmot.groups.MarmotCapabilities
 import com.vitorpamplona.marmot.groups.MarmotGroupPolicy
 import com.vitorpamplona.marmot.groups.MlsGroupManager
 import com.vitorpamplona.marmot.groups.currentNostrGroupId
 import com.vitorpamplona.marmot.mip00KeyPackages.KeyPackageUtils
+import com.vitorpamplona.marmot.mip01Groups.MlsCiphersuite
+import com.vitorpamplona.mls.codec.TlsWriter
 import com.vitorpamplona.mls.components.AppDataDictionary
+import com.vitorpamplona.mls.components.ComponentData
 import com.vitorpamplona.mls.components.ComponentsList
+import com.vitorpamplona.mls.framing.MlsMessage
+import com.vitorpamplona.mls.framing.WireFormat
 import com.vitorpamplona.mls.group.MlsGroup
 import com.vitorpamplona.mls.messages.KeyPackageBundle
+import com.vitorpamplona.mls.messages.KeyPackageBundleCodec
+import com.vitorpamplona.mls.tree.Credential
 import com.vitorpamplona.mls.tree.Extension
+import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.core.HexKey
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
 import com.vitorpamplona.quartz.nip01Core.core.toHexKey
 import com.vitorpamplona.quartz.nip01Core.signers.NostrSigner
+import com.vitorpamplona.quartz.nip01Core.signers.eventTemplate
+import com.vitorpamplona.quartz.nip59Giftwrap.rumors.RumorAssembler
+import com.vitorpamplona.quartz.utils.Log
+import com.vitorpamplona.quartz.utils.TimeUtils
+import kotlin.concurrent.Volatile
 
 /**
- * The device-group side of linking (`features/device-group.md` "Creating the device group",
- * "Approving", "Joining", "Matching leaves to devices"): an existing device names the group in its
- * Confirm, creates it if it trusts none, and adds exactly the confirmed KeyPackage together with the
- * new device's roster entry; the new device joins only its link's Welcome and makes its first Commit,
- * which sets its `tag_signature_key` and tags its leaf, the sign that the link is made.
+ * An account's device group (`features/device-group.md`): linking, the roster, private KeyPackages,
+ * sibling Welcomes, gap filling, heartbeats, removal, sign-out and sign-ins.
  *
- * Every Commit here is staged ([MlsGroupManager.StagedCommit]): the caller publishes it, and only then
- * applies it with [applyStaged] (publish-before-apply). Transport (relays, publishing, the Welcome's
- * delivery to the new device) is the caller's, as for every other group.
- *
- * Device-group support stays opt-in: this class needs leaves that advertise
- * [CurrentProfileGroupFactory.DEVICE_GROUP_SUPPORTED_COMPONENTS], which nothing creates by default.
+ * Built by `MarmotManager` when its `deviceGroupConfig` is set; that config is the one switch an app
+ * flips. Every Commit here is staged ([MlsGroupManager.StagedCommit]): the caller publishes it, then
+ * [applyStaged] (publish-before-apply). App events for siblings go out as [OutboundGroupEvent]s in the
+ * device group: returned by the call that makes them, or, for answers to inbound traffic, queued in
+ * [drainOutbox].
  */
-class MarmotDeviceGroupManager(
+class MarmotDeviceGroupManager internal constructor(
     private val signer: NostrSigner,
     private val groupManager: MlsGroupManager,
     private val trustStore: DeviceGroupTrustStore,
-    /** This device's KeyPackage publication slot (its kind-30443 `d`). */
-    private val ownSlot: HexKey,
-    /** Where the device group's traffic goes, if this device creates it. */
+    private val keyPackageStore: PrivateKeyPackageStore,
+    private var slot: HexKey?,
     private val relays: List<String>,
+    private val manager: MarmotManager?,
 ) {
+    /** The device group of [manager], as its config sets it up. Call [start] before use. */
+    constructor(manager: MarmotManager, config: MarmotDeviceGroupConfig) :
+        this(manager.signer, manager.groupManager, config.trustStore, config.privateKeyPackageStore, null, config.relays, manager)
+
+    /** Linking only, over a bare [MlsGroupManager], with this device's slot given. */
+    constructor(
+        signer: NostrSigner,
+        groupManager: MlsGroupManager,
+        trustStore: DeviceGroupTrustStore,
+        ownSlot: HexKey,
+        relays: List<String>,
+    ) : this(signer, groupManager, trustStore, InMemoryPrivateKeyPackageStore(), ownSlot, relays, null)
+
+    private val ownSlot: HexKey get() = checkNotNull(slot) { "call start() first" }
+
+    @Volatile
+    private var cached: DeviceGroupTrust? = null
+
+    private val outbox = ArrayList<OutboundGroupEvent>()
+
+    /** Live gap-fill claims: (chat, target slot) to claimant slot to expiry. */
+    private val claims = HashMap<Pair<HexKey, HexKey>, MutableMap<HexKey, Long>>()
+
+    /** Post-link inventory pages this new device received: revision, total and the tokens. */
+    private var inventory: Triple<Long, Long, MutableSet<HexKey>>? = null
+
     /**
-     * What the founding device needs between its Confirm and the founding Add: the group id it named,
-     * the leaf whose signature key it named, the roster key and its tag key. Memory only: a restart
-     * in between abandons the link, which the new device's 600 s wait then ends.
+     * Loads the trust record, resolves this device's slot (its primary KeyPackage `d`), and makes the
+     * KeyPackages it mints carry its device tag.
      */
+    suspend fun start() {
+        val m = manager
+        if (slot == null && m != null) slot = m.keyPackageRotationManager.getOrCreateSlotDTag(KeyPackageUtils.PRIMARY_SLOT)
+        cached = trustStore.load() ?: DeviceGroupTrust(ownSlot)
+        m?.keyPackageRotationManager?.leafComponents = { key -> ownTagComponents(key) }
+    }
+
+    suspend fun trust(): DeviceGroupTrust = cached ?: (trustStore.load() ?: DeviceGroupTrust(ownSlot)).also { cached = it }
+
+    private suspend fun saveTrust(trust: DeviceGroupTrust) {
+        trustStore.save(trust)
+        cached = trust
+    }
+
+    private suspend fun keyPackages(): PrivateKeyPackages = keyPackageStore.load() ?: PrivateKeyPackages()
+
+    /** Whether [nostrGroupId] is this device's trusted device group, which no chat list shows. */
+    fun isTrustedDeviceGroup(nostrGroupId: HexKey): Boolean = cached?.let { !it.unlinked && it.trustedNostrGroupId == nostrGroupId } == true
+
+    suspend fun deviceGroupNostrId(): HexKey? = trust().trustedNostrGroupId
+
+    suspend fun isDeviceGroup(nostrGroupId: HexKey): Boolean = trust().trustedNostrGroupId == nostrGroupId
+
+    private fun deviceGroup(): MlsGroup? = cached?.trustedNostrGroupId?.let { groupManager.getGroup(it) }
+
+    suspend fun roster(): DeviceRosterV1? = trust().trustedNostrGroupId?.let { groupManager.getGroup(it) }?.let { DeviceRosterRules.rosterOf(it.view().extensions) }
+
+    private fun cachedRoster(): DeviceRosterV1? = deviceGroup()?.let { DeviceRosterRules.rosterOf(it.view().extensions) }
+
+    /** The answers queued for inbound traffic (hand-offs for requests): publish them in the device group. */
+    fun drainOutbox(): List<OutboundGroupEvent> = outbox.toList().also { outbox.clear() }
+
+    // =================================================================================================
+    // Tags (device-tag-v1.md "Producing tags")
+    // =================================================================================================
+
+    /**
+     * The `0x800f` entry for a new leaf with [signatureKey], once this device can tag: it trusts a
+     * device group whose roster lists it with its `tag_signature_key`. Empty before that.
+     */
+    fun ownTagComponents(signatureKey: ByteArray): List<ComponentData> {
+        val t = cached ?: return emptyList()
+        val seed = t.tagSigningSeed ?: return emptyList()
+        val roster = cachedRoster() ?: return emptyList()
+        val tagKey = roster.device(t.ownSlot)?.tagSignatureKey ?: return emptyList()
+        if (tagKey != Ed25519.keyPairFromSeed(seed.hexToByteArray()).publicKey.toHexKey()) return emptyList()
+        val tag = DeviceTagV1.produce(roster.leafTagKey.hexToByteArray(), t.ownSlot.hexToByteArray(), signatureKey, seed.hexToByteArray())
+        return listOf(ComponentData(DeviceTagV1.COMPONENT_ID, tag.encode()))
+    }
+
+    /** Who holds each of this account's leaves in [nostrGroupId], as this device reads their tags. */
+    suspend fun claims(nostrGroupId: HexKey): List<DeviceTagV1.Claim> = leafClaims(nostrGroupId).map { it.second }
+
+    private suspend fun leafClaims(nostrGroupId: HexKey): List<Pair<Int, DeviceTagV1.Claim>> {
+        val roster = roster() ?: return emptyList()
+        val view = groupManager.getGroup(nostrGroupId)?.view() ?: return emptyList()
+        return (0 until view.leafCount).mapNotNull { i ->
+            val leaf = view.leafNode(i) ?: return@mapNotNull null
+            if (view.memberIdentityHex(i) != signer.pubKey) null else i to DeviceTagV1.read(leaf, roster)
+        }
+    }
+
+    // =================================================================================================
+    // Linking: existing device
+    // =================================================================================================
+
     private class Founding(
         val groupId: ByteArray,
         val leaf: CurrentProfileGroupFactory.LeafIdentity,
@@ -85,20 +192,8 @@ class MarmotDeviceGroupManager(
         val tagSeed: ByteArray,
     )
 
+    /** Memory only: a restart between the Confirm and the founding Add abandons the link. */
     private var founding: Founding? = null
-
-    suspend fun trust(): DeviceGroupTrust = trustStore.load() ?: DeviceGroupTrust(ownSlot)
-
-    /** The Nostr routing id of the trusted device group, if any. */
-    suspend fun deviceGroupNostrId(): HexKey? = trust().trustedNostrGroupId
-
-    /** Whether [nostrGroupId] is this device's trusted device group, which no chat list shows. */
-    suspend fun isDeviceGroup(nostrGroupId: HexKey): Boolean = trust().trustedNostrGroupId == nostrGroupId
-
-    /** The trusted device group's roster. */
-    suspend fun roster(): DeviceRosterV1? = trust().trustedNostrGroupId?.let { groupManager.getGroup(it) }?.let { DeviceRosterRules.rosterOf(it.view().extensions) }
-
-    // ---- existing device ----
 
     /**
      * What this device's Confirm names: the trusted device group and its own leaf's signature key
@@ -114,10 +209,15 @@ class MarmotDeviceGroupManager(
         val f =
             founding ?: run {
                 val tagSeed = RandomInstance.bytes(32)
+                val leafTagKey = RandomInstance.bytes(32)
+                val ownSlotBytes = ownSlot.hexToByteArray()
                 Founding(
                     groupId = RandomInstance.bytes(16),
-                    leaf = CurrentProfileGroupFactory.newLeafIdentity(signer, supportedComponents = CurrentProfileGroupFactory.DEVICE_GROUP_SUPPORTED_COMPONENTS),
-                    leafTagKey = RandomInstance.bytes(32),
+                    leaf =
+                        CurrentProfileGroupFactory.newLeafIdentity(signer, MlsCiphersuite.DEFAULT, CurrentProfileGroupFactory.DEVICE_GROUP_SUPPORTED_COMPONENTS) { key ->
+                            listOf(ComponentData(DeviceTagV1.COMPONENT_ID, DeviceTagV1.produce(leafTagKey, ownSlotBytes, key, tagSeed).encode()))
+                        },
+                    leafTagKey = leafTagKey,
                     tagSeed = tagSeed,
                 ).also { founding = it }
             }
@@ -137,9 +237,8 @@ class MarmotDeviceGroupManager(
 
     /**
      * After the new device's Confirm verified ([link]): add exactly the confirmed KeyPackage
-     * ([keyPackageMessage], the publication's MLSMessage or KeyPackage bytes, whose slot is
-     * [newDeviceSlot]) with its roster entry, creating the device group first if this device trusts
-     * none. Publish the returned Commit and its Welcome, then [applyStaged].
+     * ([keyPackageMessage], whose publication slot is [newDeviceSlot]) with its roster entry, creating
+     * the device group first if this device trusts none. Publish, then [applyStaged].
      */
     suspend fun approve(
         link: ConfirmedLink,
@@ -154,6 +253,7 @@ class MarmotDeviceGroupManager(
         val keyPackage = KeyPackageUtils.decodeKeyPackage(keyPackageMessage)
         check(keyPackage.reference().toHexKey() == link.keyPackageRef) { "A device group adds only the KeyPackage the link confirmed" }
         val t = trust()
+        check(t.pendingLink == null) { "A device waiting for its own link answers no request" }
         val nostrId = t.trustedNostrGroupId ?: create(link, now)
         val group = checkNotNull(groupManager.getGroup(nostrId))
         check(group.groupId.toHexKey() == link.deviceGroupId) { "The link names another group" }
@@ -178,7 +278,7 @@ class MarmotDeviceGroupManager(
         val staged =
             groupManager.stageOwn(nostrId) { clone ->
                 clone.proposeAdd(keyPackage.toTlsBytes())
-                if (isFounding && keyPackageAdvertises(keyPackageMessage, AccountDevicesV1.COMPONENT_ID)) {
+                if (isFounding && AccountDevicesV1.COMPONENT_ID in AccountDevicesV1.advertised(keyPackage.leafNode.extensions)) {
                     // The ordinary creation rule (`protocol-core/group-setup.md`): every founder supports 0x800d.
                     val required = ComponentsList.supportedOrRequired(clone.appDataDictionary()).toMutableSet()
                     required.add(AccountDevicesV1.COMPONENT_ID)
@@ -187,16 +287,11 @@ class MarmotDeviceGroupManager(
                 clone.proposeAppDataUpdate(DeviceRosterV1.COMPONENT_ID, update)
                 clone.commit()
             }
-        trustStore.save(trust().let { it.copy(approvals = it.approvals.filterNot { a -> a.slot == newDeviceSlot } + DeviceGroupTrust.Approval(newDeviceSlot, now, DeviceGroupTrust.Outcome.PENDING)) })
+        val approval = DeviceGroupTrust.Approval(newDeviceSlot, now, DeviceGroupTrust.Outcome.PENDING, keyPackage.leafNode.signatureKey.toHexKey())
+        saveTrust(trust().let { it.copy(approvals = it.approvals.filterNot { a -> a.slot == newDeviceSlot } + approval) })
         return Staged(nostrId, staged)
     }
 
-    private fun keyPackageAdvertises(
-        keyPackageMessage: ByteArray,
-        componentId: Int,
-    ): Boolean = componentId in AccountDevicesV1.advertised(KeyPackageUtils.decodeKeyPackage(keyPackageMessage).leafNode.extensions)
-
-    /** The founding state: this account as sole admin, `0x800e` required, a roster of this device alone. */
     private suspend fun create(
         link: ConfirmedLink,
         now: Long,
@@ -216,7 +311,7 @@ class MarmotDeviceGroupManager(
                 linkedAt = now,
                 tagSignatureKey = tagKey.publicKey.toHexKey(),
             )
-        val roster = DeviceRosterV1(f.leafTagKey.toHexKey(), listOf(ownEntry))
+        val roster = DeviceRosterV1(f.leafTagKey.toHexKey(), listOf(ownEntry), ownRejectionsForRoster())
         val nostrId = RandomInstance.bytes(32)
         val dictionary =
             MarmotGroupState
@@ -226,14 +321,12 @@ class MarmotDeviceGroupManager(
                     lifecycle = GroupLifecycleV1.ACTIVE,
                     extraRequiredComponents = listOf(DeviceRosterV1.COMPONENT_ID),
                 ).with(DeviceRosterV1.COMPONENT_ID, roster.encode())
-        val tag = DeviceTagV1.produce(f.leafTagKey, ownSlot.hexToByteArray(), f.leaf.signatureKeyPair.publicKey, f.tagSeed)
-        val leafExtensions = withTag(f.leaf.leafExtensions, tag)
         val group =
             MlsGroup.create(
                 identity = signer.pubKey.hexToByteArray(),
                 signingKey = f.leaf.signatureKeyPair.privateKey,
                 initialExtensions = listOf(dictionary.toExtension()),
-                leafExtensions = leafExtensions,
+                leafExtensions = f.leaf.leafExtensions,
                 policy = MarmotGroupPolicy,
                 capabilities = MarmotCapabilities.currentProfileLeaf(),
                 requiredCapabilities = MarmotCapabilities.currentProfileRequired(),
@@ -241,19 +334,35 @@ class MarmotDeviceGroupManager(
             )
         val nostrHex = nostrId.toHexKey()
         groupManager.adoptGroup(nostrHex, group)
-        trustStore.save(trust().copy(trustedGroupId = f.groupId.toHexKey(), trustedNostrGroupId = nostrHex, tagSigningSeed = f.tagSeed.toHexKey()))
+        saveTrust(trust().copy(trustedGroupId = f.groupId.toHexKey(), trustedNostrGroupId = nostrHex, tagSigningSeed = f.tagSeed.toHexKey(), ownRejections = emptyList()))
         founding = null
         return nostrHex
     }
 
-    // ---- new device ----
+    /** A founding roster carries the rejections this device kept while it had no device group. */
+    private suspend fun ownRejectionsForRoster(): List<RejectedSlotV1> =
+        trust()
+            .ownRejections
+            .filter { it.slot != ownSlot }
+            .sortedBy { it.slot }
+            .map { RejectedSlotV1(it.slot, RejectionReasonV1.NOT_ME, it.time) }
+
+    // =================================================================================================
+    // Linking: new device
+    // =================================================================================================
 
     /** After this device's Confirm went out: keep the link until its Welcome joins or 600 s pass. */
     suspend fun recordLink(
         link: ConfirmedLink,
         now: Long,
     ) {
-        trustStore.save(trust().copy(pendingLink = DeviceGroupTrust.PendingLink(link, now + LINK_WAIT_SECS)))
+        saveTrust(trust().copy(pendingLink = DeviceGroupTrust.PendingLink(link, now + LINK_WAIT_SECS)))
+    }
+
+    /** A Cancel for the link's session withdraws the link, unless its Welcome already joined. */
+    suspend fun cancelLink(sessionId: HexKey) {
+        val t = trust()
+        if (t.pendingLink?.link?.sessionId == sessionId) saveTrust(t.copy(pendingLink = null))
     }
 
     /**
@@ -274,12 +383,14 @@ class MarmotDeviceGroupManager(
         check(joined.groupId.toHexKey() == pending.link.deviceGroupId) { "The Welcome joins another group than the link's" }
         val nostrId = checkNotNull(joined.currentNostrGroupId()) { "The device group carries no routing" }
         groupManager.adoptGroup(nostrId, MlsGroup.restore(joined.saveState(), MarmotGroupPolicy))
-        trustStore.save(
+        saveTrust(
             t.copy(
                 trustedGroupId = pending.link.deviceGroupId,
                 trustedNostrGroupId = nostrId,
                 tagSigningSeed = RandomInstance.bytes(32).toHexKey(),
                 pendingLink = null,
+                linkedKeyPackageRef = pending.link.keyPackageRef,
+                unlinked = false,
             ),
         )
         return nostrId
@@ -311,44 +422,736 @@ class MarmotDeviceGroupManager(
         return Staged(nostrId, staged)
     }
 
-    // ---- both ----
+    // =================================================================================================
+    // Roster commits: link failure, slot announcements, removal, sign-out, rejections
+    // =================================================================================================
+
+    private suspend fun stageRosterUpdate(
+        removeLeaves: List<Int>,
+        ops: List<RosterOperationV1>,
+    ): Staged {
+        val nostrId = checkNotNull(trust().trustedNostrGroupId) { "No device group is trusted" }
+        val update = DeviceRosterUpdateV1.of(ops).encode()
+        val staged =
+            groupManager.stageOwn(nostrId) { clone ->
+                removeLeaves.sorted().forEach { clone.proposeRemove(it) }
+                clone.proposeAppDataUpdate(DeviceRosterV1.COMPONENT_ID, update)
+                clone.commit()
+            }
+        return Staged(nostrId, staged)
+    }
+
+    /**
+     * `A link that is not taken up`: each link this device approved whose new device has not made its
+     * first Commit 3600 s after `linked_at` fails, and this device undoes it with one Commit that
+     * removes the new device's leaf and, with `remove_device` alone, its entry. Publish, then
+     * [applyStaged]. Null when nothing is due.
+     */
+    suspend fun checkLinkDeadlines(now: Long): Staged? {
+        val t = trust()
+        val roster = roster() ?: return null
+        val due = t.approvals.filter { it.outcome == DeviceGroupTrust.Outcome.PENDING && now >= it.linkedAt + FIRST_COMMIT_DEADLINE_SECS }
+        val failed = t.approvals.filter { it.outcome == DeviceGroupTrust.Outcome.FAILED } + due.map { it.copy(outcome = DeviceGroupTrust.Outcome.FAILED) }
+        if (due.isNotEmpty()) saveTrust(t.copy(approvals = t.approvals.map { a -> if (a in due) a.copy(outcome = DeviceGroupTrust.Outcome.FAILED) else a }))
+        val undo = failed.filter { roster.device(it.slot)?.linkedBy == ownSlot }
+        if (undo.isEmpty()) return null
+        val view = checkNotNull(deviceGroup()).view()
+        val leaves = undo.mapNotNull { a -> (0 until view.leafCount).firstOrNull { view.leafNode(it)?.signatureKey?.toHexKey() == a.leafSignatureKey } }
+        return stageRosterUpdate(leaves, undo.map { RosterOperationV1.RemoveDevice(it.slot) })
+    }
+
+    /** Whether this device must announce [keyPackageRef] in its roster entry before publishing it. */
+    suspend fun announcementNeeded(keyPackageRef: HexKey): Boolean {
+        val roster = roster() ?: return false
+        return roster.device(ownSlot)?.announcedKeyPackage != keyPackageRef
+    }
+
+    /**
+     * `Slot announcements`: the Commit that names [keyPackageRef] in this device's own entry, every
+     * other field unchanged. The device publishes that KeyPackage only once this Commit is applied.
+     */
+    suspend fun stageAnnouncement(keyPackageRef: HexKey): Staged {
+        val entry = checkNotNull(roster()?.device(ownSlot)) { "The roster does not list this device" }
+        return stageRosterUpdate(emptyList(), listOf(RosterOperationV1.SetDevice(entry.copy(announcedKeyPackage = keyPackageRef))))
+    }
+
+    /**
+     * `The removal Commit`: the sibling's tagged leaf out, `remove_device`, then a `removed` record with
+     * the decision's time and the entry's key. The decision is kept until the roster no longer lists the
+     * slot. Publish, then [applyStaged], then [removeGoneDevicesFromChats].
+     */
+    suspend fun stageRemoveDevice(
+        slot: HexKey,
+        now: Long,
+    ): Staged {
+        check(slot != ownSlot) { "A device never removes itself: it signs out" }
+        val nostrId = checkNotNull(trust().trustedNostrGroupId)
+        val roster = checkNotNull(roster())
+        val entry = checkNotNull(roster.device(slot)) { "The roster does not list that device" }
+        val tagKey = checkNotNull(entry.tagSignatureKey) { "A device whose link may still fail is not removed" }
+        val t = trust()
+        val decidedAt = t.removalDecisions.firstOrNull { it.slot == slot }?.time ?: now
+        saveTrust(t.copy(removalDecisions = t.removalDecisions.filterNot { it.slot == slot } + DeviceGroupTrust.SlotTime(slot, decidedAt)))
+        val leaf = leafClaims(nostrId).firstOrNull { it.second == DeviceTagV1.Claim.Device(slot) }?.first
+        return stageRosterUpdate(
+            listOfNotNull(leaf),
+            listOf(RosterOperationV1.RemoveDevice(slot), RosterOperationV1.SetRejectedSlot(RejectedSlotV1(slot, RejectionReasonV1.REMOVED, decidedAt, tagKey))),
+        )
+    }
+
+    /**
+     * `device-roster-v1.md` "State": a `removed` record goes once 30 days have passed since its
+     * `rejected_at`. The Commit that drops every such record, or null when none is due.
+     */
+    suspend fun expireRemovedRecords(now: Long): Staged? {
+        val due = roster()?.rejectedSlots.orEmpty().filter { it.reason == RejectionReasonV1.REMOVED && now >= it.rejectedAt + REMOVED_RECORD_SECS }
+        if (due.isEmpty()) return null
+        return stageRosterUpdate(emptyList(), due.map { RosterOperationV1.RemoveRejectedSlot(it.slot) })
+    }
+
+    /** `Signing out` through siblings: this device's own entry set to `leaving`. Publish, then [applyStaged]. */
+    suspend fun stageSignOut(): Staged {
+        val entry = checkNotNull(roster()?.device(ownSlot)) { "The roster does not list this device" }
+        checkNotNull(entry.tagSignatureKey) { "A device without its tag key signs out on its own" }
+        return stageRosterUpdate(emptyList(), listOf(RosterOperationV1.SetDevice(entry.copy(status = DeviceStatusV1.LEAVING))))
+    }
+
+    /** Siblings the roster lists as `leaving` with their key: each is removed as if the user decided to. */
+    suspend fun pendingDepartures(): List<HexKey> =
+        roster()
+            ?.devices
+            .orEmpty()
+            .filter { it.slot != ownSlot && it.status == DeviceStatusV1.LEAVING && it.tagSignatureKey != null }
+            .map { it.slot }
+
+    // =================================================================================================
+    // Applying device-group Commits
+    // =================================================================================================
 
     /** Makes a published staged Commit canonical. */
     suspend fun applyStaged(staged: Staged) {
         groupManager.installState(staged.nostrGroupId, staged.staged.pendingState)
-        refreshApprovals()
+        afterRosterChange()
     }
 
-    /** Applies an inbound device-group Commit, then updates the links this device approved. */
+    /** Applies an inbound device-group Commit, then everything that follows from the roster it leaves. */
     suspend fun processCommit(
         nostrGroupId: HexKey,
         framedCommitBytes: ByteArray,
     ) {
         groupManager.processFramedCommit(nostrGroupId, framedCommitBytes)
-        refreshApprovals()
+        afterRosterChange()
     }
 
-    /** A link is made once the roster lists the new device with its `tag_signature_key`. */
-    private suspend fun refreshApprovals() {
-        val t = trust()
-        val roster = roster() ?: return
-        val updated =
+    private suspend fun afterRosterChange() {
+        var t = trust()
+        val nostrId = t.trustedNostrGroupId ?: return
+        val group = groupManager.getGroup(nostrId) ?: return
+        if (!group.isLocalMember()) {
+            onRemovedFromDeviceGroup(t, group)
+            return
+        }
+        val roster = DeviceRosterRules.rosterOf(group.view().extensions) ?: return
+        // Links made: the roster lists the new device with its key.
+        val approvals =
             t.approvals.map { a ->
                 if (a.outcome == DeviceGroupTrust.Outcome.PENDING && roster.device(a.slot)?.tagSignatureKey != null) a.copy(outcome = DeviceGroupTrust.Outcome.MADE) else a
             }
-        if (updated != t.approvals) trustStore.save(t.copy(approvals = updated))
+        // Every slot a roster this device applied holds as removed, for sign-ins (MDK 2d509151).
+        val removed = t.removedSlots.associateBy { it.slot }.toMutableMap()
+        roster.rejectedSlots.filter { it.reason == RejectionReasonV1.REMOVED }.forEach { r -> removed[r.slot] = DeviceGroupTrust.SlotTime(r.slot, maxOf(removed[r.slot]?.time ?: 0, r.rejectedAt)) }
+        val decisions = t.removalDecisions.filter { roster.device(it.slot) != null }
+        // A rejection is forgotten once the roster holds the slot as a device.
+        val rejections = t.ownRejections.filter { roster.device(it.slot) == null }
+        t = t.copy(approvals = approvals, removedSlots = removed.values.sortedBy { it.slot }, removalDecisions = decisions, ownRejections = rejections)
+        saveTrust(t)
+        dropKeyPackagesOfGoneSlots(roster)
     }
 
-    /** Who holds each leaf of [nostrGroupId], as this device reads their tags against its roster. */
-    suspend fun claims(nostrGroupId: HexKey): List<DeviceTagV1.Claim> {
-        val roster = roster() ?: return emptyList()
-        val view = groupManager.getGroup(nostrGroupId)?.view() ?: return emptyList()
-        val own = signer.pubKey
-        return (0 until view.leafCount).mapNotNull { i ->
-            val leaf = view.leafNode(i) ?: return@mapNotNull null
-            if (view.memberIdentityHex(i) != own) null else DeviceTagV1.read(leaf, roster)
+    /**
+     * `On the removed device` / `A link that is not taken up`: removed with no entry left for its slot
+     * and having joined rather than created the group, the link failed; otherwise the user removed it
+     * and the device is unlinked, acting for the account no more. Either way its copy is discarded.
+     */
+    private suspend fun onRemovedFromDeviceGroup(
+        t: DeviceGroupTrust,
+        group: MlsGroup,
+    ) {
+        val roster = DeviceRosterRules.rosterOf(group.view().extensions)
+        val linkFailed = roster != null && roster.device(t.ownSlot) == null && roster.rejectedSlot(t.ownSlot) == null && t.linkedKeyPackageRef != null
+        t.trustedNostrGroupId?.let { groupManager.removeGroupState(it) }
+        val reset = DeviceGroupTrust(ownSlot = t.ownSlot, unlinked = !linkFailed, ownRejections = t.ownRejections, firstCheckSlots = t.firstCheckSlots)
+        saveTrust(reset)
+        keyPackageStore.save(PrivateKeyPackages())
+        Log.w(TAG) { if (linkFailed) "linking this device failed" else "this device was unlinked from its account" }
+    }
+
+    /**
+     * `Explicit local reset`: discards this device's copy of its device group and the link-bound state,
+     * keeping its chats and account. A later link is a fresh join.
+     */
+    suspend fun resetLocalCopy() {
+        val t = trust()
+        t.trustedNostrGroupId?.let { groupManager.removeGroupState(it) }
+        saveTrust(DeviceGroupTrust(ownSlot = t.ownSlot, ownRejections = t.ownRejections, firstCheckSlots = t.firstCheckSlots))
+        keyPackageStore.save(PrivateKeyPackages())
+        founding = null
+    }
+
+    /** `Removing it from chats`: this account's leaves of gone slots, out of every chat requiring `0x800d`. */
+    suspend fun removeGoneDevicesFromChats(): List<OutboundGroupEvent> {
+        val m = manager ?: return emptyList()
+        val deviceGroupId = trust().trustedNostrGroupId ?: return emptyList()
+        val out = ArrayList<OutboundGroupEvent>()
+        for (chat in groupManager.activeGroupIds()) {
+            if (chat == deviceGroupId) continue
+            val group = groupManager.getGroup(chat) ?: continue
+            if (!AccountDevicesV1.isRequired(group.view().extensions)) continue
+            val gone = leafClaims(chat).filter { it.second is DeviceTagV1.Claim.RemovedSlot }.map { it.first }
+            if (gone.isEmpty()) continue
+            try {
+                out.add(m.removeOwnAccountDevices(chat, gone))
+            } catch (e: Exception) {
+                Log.w(TAG, "could not remove a gone device's leaves from $chat", e)
+            }
+        }
+        return out
+    }
+
+    private suspend fun dropKeyPackagesOfGoneSlots(roster: DeviceRosterV1) {
+        val kps = keyPackages()
+        val live: (HexKey) -> Boolean = { roster.device(it) != null }
+        val kept = kps.copy(issued = kps.issued.filter { live(it.toSlot) }, held = kps.held.filter { live(it.fromSlot) })
+        if (kept.issued.size != kps.issued.size || kept.held.size != kps.held.size) keyPackageStore.save(kept)
+    }
+
+    // =================================================================================================
+    // Device-group app events
+    // =================================================================================================
+
+    private suspend fun deviceGroupEvent(
+        kind: Int,
+        content: String,
+        now: Long,
+    ): OutboundGroupEvent {
+        val m = checkNotNull(manager) { "app events need a MarmotManager" }
+        val nostrId = checkNotNull(trust().trustedNostrGroupId)
+        val rumor = RumorAssembler.assembleRumor<Event>(signer.pubKey, eventTemplate<Event>(kind = kind, description = content, createdAt = now) {})
+        return m.buildGroupMessage(nostrId, rumor)
+    }
+
+    /** Whether this device's own leaf in its device group carries a tag that reads as its slot. */
+    private suspend fun ownLeafTagged(): Boolean {
+        val nostrId = trust().trustedNostrGroupId ?: return false
+        val view = groupManager.getGroup(nostrId)?.view() ?: return false
+        val leaf = view.leafNode(view.myLeafIndex) ?: return false
+        return roster()?.let { DeviceTagV1.read(leaf, it) } == DeviceTagV1.Claim.Device(ownSlot)
+    }
+
+    /**
+     * Routes one decrypted app event of the trusted device group. The sending leaf, in the epoch the
+     * device holds, must carry a tag that reads as a device in the roster; anything else is dropped.
+     */
+    suspend fun onAppEvent(
+        nostrGroupId: HexKey,
+        innerEventJson: String,
+        senderLeafIndex: Int,
+        epoch: Long,
+        now: Long = TimeUtils.now(),
+    ) {
+        if (!isTrustedDeviceGroup(nostrGroupId)) return
+        val event = Event.fromJsonOrNull(innerEventJson) ?: return
+        val group = groupManager.getGroup(nostrGroupId) ?: return
+        if (epoch != group.epoch) return
+        val roster = DeviceRosterRules.rosterOf(group.view().extensions) ?: return
+        val leaf = group.view().leafNode(senderLeafIndex) ?: return
+        val sender = (DeviceTagV1.read(leaf, roster) as? DeviceTagV1.Claim.Device)?.slot ?: return
+        if (sender == ownSlot) return
+        when (event.kind) {
+            MarmotDeviceGroupKinds.HEARTBEAT -> onHeartbeat(sender, roster, event.createdAt, now)
+            MarmotDeviceGroupKinds.GAP_FILL_CLAIM -> onClaim(sender, event, now)
+            MarmotDeviceGroupKinds.PRIVATE_KEY_PACKAGE_REQUEST -> onKeyPackageRequest(sender, event, now)
+            MarmotDeviceGroupKinds.PRIVATE_KEY_PACKAGE_HAND_OFF -> onHandOff(sender, event, now)
+            MarmotDeviceGroupKinds.SIBLING_WELCOME -> onSiblingWelcome(sender, event)
+            MarmotDeviceGroupKinds.LINK_CHAT_INVENTORY -> onInventory(sender, roster, event, now)
+            else -> {}
         }
     }
+
+    // ---- heartbeats ----------------------------------------------------------------------------------
+
+    /** A heartbeat to send when the last one is an hour old and this device's leaf is tagged. */
+    suspend fun heartbeatDue(now: Long): OutboundGroupEvent? {
+        val t = trust()
+        if (!t.trustsDeviceGroup || now - t.lastHeartbeatSent < DeviceHeartbeat.INTERVAL_SECS || !ownLeafTagged()) return null
+        return deviceGroupEvent(DeviceHeartbeat.KIND, DeviceHeartbeat.CONTENT, now)
+    }
+
+    /** A relay accepted the heartbeat sent at [sentAt]. */
+    suspend fun heartbeatSent(sentAt: Long) {
+        saveTrust(trust().copy(lastHeartbeatSent = sentAt))
+    }
+
+    private suspend fun onHeartbeat(
+        sender: HexKey,
+        roster: DeviceRosterV1,
+        createdAt: Long,
+        now: Long,
+    ) {
+        val linkedAt = roster.device(sender)?.linkedAt ?: return
+        val seen = minOf(createdAt, now)
+        val t = trust()
+        val prior = t.activity.firstOrNull { it.slot == sender && it.linkedAt == linkedAt }?.lastActivity ?: 0
+        if (seen <= prior) return
+        saveTrust(t.copy(activity = t.activity.filterNot { it.slot == sender } + DeviceGroupTrust.Activity(sender, linkedAt, seen)))
+    }
+
+    /** A sibling's last activity, for its current roster entry. */
+    suspend fun lastActivity(slot: HexKey): Long? {
+        val linkedAt = roster()?.device(slot)?.linkedAt ?: return null
+        return trust().activity.firstOrNull { it.slot == slot && it.linkedAt == linkedAt }?.lastActivity
+    }
+
+    // ---- private KeyPackages -------------------------------------------------------------------------
+
+    private suspend fun issue(
+        toSlot: HexKey,
+        count: Int,
+        now: Long,
+    ): List<ByteArray> {
+        val m = checkNotNull(manager)
+        val kps = keyPackages()
+        val room = MAX_PRIVATE_PER_SIBLING - kps.issued.count { it.toSlot == toSlot && now < it.notAfter }
+        val n = minOf(count, room)
+        if (n <= 0) return emptyList()
+        val issued = ArrayList<PrivateKeyPackages.Issued>()
+        val messages = ArrayList<ByteArray>()
+        repeat(n) {
+            val bundle = CurrentProfileGroupFactory.createKeyPackage(signer, false, MlsCiphersuite.DEFAULT, m.supportedComponents) { key -> ownTagComponents(key) }
+            check(DeviceTagV1.entryOf(bundle.keyPackage.leafNode) != null) { "a private KeyPackage carries the issuer's tag" }
+            val lifetime = checkNotNull(bundle.keyPackage.leafNode.lifetime)
+            issued.add(PrivateKeyPackages.Issued(toSlot, bundle.keyPackage.reference().toHexKey(), lifetime.notBefore, lifetime.notAfter, now, KeyPackageBundleCodec.encode(bundle)))
+            messages.add(mlsMessage(bundle.keyPackage.toTlsBytes()))
+        }
+        keyPackageStore.save(kps.copy(issued = kps.issued + issued))
+        return messages
+    }
+
+    private fun mlsMessage(keyPackage: ByteArray): ByteArray =
+        TlsWriter()
+            .also { MlsMessage(wireFormat = WireFormat.KEY_PACKAGE, payload = keyPackage).encodeTls(it) }
+            .toByteArray()
+
+    private suspend fun handOff(
+        toSlot: HexKey,
+        packages: List<ByteArray>,
+        now: Long,
+    ): List<OutboundGroupEvent> =
+        packages.chunked(PrivateKeyPackageHandOff.MAX_KEY_PACKAGES).map {
+            deviceGroupEvent(PrivateKeyPackageHandOff.KIND, PrivateKeyPackageHandOff(ownSlot, toSlot, it).content(), now)
+        }
+
+    /** Asks [fromSlot] for [want] private KeyPackages (459). */
+    suspend fun requestKeyPackages(
+        fromSlot: HexKey,
+        want: Int,
+        now: Long,
+    ): OutboundGroupEvent = deviceGroupEvent(PrivateKeyPackageRequest.KIND, PrivateKeyPackageRequest(ownSlot, fromSlot, want).content(), now)
+
+    /**
+     * "Issuing": for each sibling whose stock (handed, unconsumed, before halfway) is below 5, issue
+     * enough to bring it to 10 and hand them over. Returns the hand-offs to publish.
+     */
+    suspend fun topUpSiblings(now: Long): List<OutboundGroupEvent> {
+        if (!ownLeafTagged()) return emptyList()
+        val roster = roster() ?: return emptyList()
+        val out = ArrayList<OutboundGroupEvent>()
+        for (device in roster.devices) {
+            if (device.slot == ownSlot || device.tagSignatureKey == null) continue
+            val stock = keyPackages().issued.count { it.toSlot == device.slot && now < it.halfway }
+            if (stock >= STOCK_LOW) continue
+            val packages = issue(device.slot, STOCK_TARGET - stock, now)
+            if (packages.isNotEmpty()) out.addAll(handOff(device.slot, packages, now))
+        }
+        return out
+    }
+
+    private suspend fun onKeyPackageRequest(
+        sender: HexKey,
+        event: Event,
+        now: Long,
+    ) {
+        val request = PrivateKeyPackageRequest.parse(event.content) ?: return
+        if (request.to != ownSlot || request.from != sender) return
+        val kps = keyPackages()
+        if (event.id in kps.answeredRequests) return
+        keyPackageStore.save(kps.copy(answeredRequests = (kps.answeredRequests + event.id).takeLast(MAX_ANSWERED)))
+        val packages = issue(sender, request.want, now)
+        if (packages.isNotEmpty()) outbox.addAll(handOff(sender, packages, now))
+    }
+
+    private suspend fun onHandOff(
+        sender: HexKey,
+        event: Event,
+        now: Long,
+    ) {
+        val handOff = PrivateKeyPackageHandOff.parse(event.content) ?: return
+        if (handOff.to != ownSlot || handOff.from != sender) return
+        val roster = roster() ?: return
+        val kps = keyPackages()
+        val accepted = ArrayList<PrivateKeyPackages.Held>()
+        for (bytes in handOff.keyPackages) {
+            val kp =
+                try {
+                    KeyPackageUtils.decodeKeyPackage(bytes)
+                } catch (e: Exception) {
+                    return
+                }
+            val credential = kp.leafNode.credential
+            val lifetime = kp.leafNode.lifetime ?: return
+            // The whole hand-off is dropped unless every KeyPackage is the account's, live, not
+            // last-resort, and tagged as the sender's.
+            if (credential !is Credential.Basic || credential.identity.toHexKey() != signer.pubKey) return
+            if (kp.isLastResort() || now >= lifetime.notAfter || now < lifetime.notBefore) return
+            if (DeviceTagV1.read(kp.leafNode, roster) != DeviceTagV1.Claim.Device(sender)) return
+            val ref = kp.reference().toHexKey()
+            if (kps.used.any { it.ref == ref } || kps.held.any { it.ref == ref }) continue
+            accepted.add(PrivateKeyPackages.Held(sender, ref, lifetime.notBefore, lifetime.notAfter, bytes))
+        }
+        if (accepted.isNotEmpty()) keyPackageStore.save(kps.copy(held = kps.held + accepted))
+    }
+
+    /** Private KeyPackages [slot] handed this device that it can still use. */
+    suspend fun heldFrom(
+        slot: HexKey,
+        now: Long,
+    ): Int = keyPackages().held.count { it.fromSlot == slot && now < it.notAfter }
+
+    private suspend fun takeHeld(
+        slot: HexKey,
+        now: Long,
+    ): PrivateKeyPackages.Held? {
+        val kps = keyPackages()
+        val pick = kps.held.filter { it.fromSlot == slot && now < it.notAfter }.minByOrNull { it.notAfter } ?: return null
+        keyPackageStore.save(kps.copy(held = kps.held.filterNot { it.ref == pick.ref }, used = kps.used.filter { now < it.notAfter } + PrivateKeyPackages.Ref(pick.ref, pick.notAfter)))
+        return pick
+    }
+
+    // ---- sibling Welcomes ----------------------------------------------------------------------------
+
+    /** Siblings a chat may include: listed `active`/`inactive`, with a tag key, not this device. */
+    private suspend fun eligibleSiblings(requireAddToAll: Boolean): List<DeviceEntryV1> {
+        val roster = roster() ?: return emptyList()
+        val t = trust()
+        return roster.devices.filter { d ->
+            d.slot != ownSlot &&
+                d.tagSignatureKey != null &&
+                (d.status == DeviceStatusV1.ACTIVE || d.status == DeviceStatusV1.INACTIVE) &&
+                (!requireAddToAll || d.addToAllChats) &&
+                t.approvals.none { it.slot == d.slot && it.outcome != DeviceGroupTrust.Outcome.MADE }
+        }
+    }
+
+    /** What [createChat] and [addSiblingToChat] did. */
+    class SiblingAdd(
+        val result: MarmotManager.SiblingAddResult,
+        /** The sibling Welcomes to publish in the device group. */
+        val deviceGroupEvents: List<OutboundGroupEvent>,
+        /** Siblings left out for lack of a private KeyPackage: ask them ([requestKeyPackages]). */
+        val missing: List<HexKey>,
+    )
+
+    /**
+     * `Creating a chat`: a chat whose founding Add holds [invites] (other accounts' published
+     * KeyPackages) and each linked sibling with a private KeyPackage it handed this device. A sibling
+     * without one is omitted. Each included sibling gets a sibling Welcome in the device group.
+     */
+    suspend fun createChat(
+        nostrGroupId: HexKey,
+        chatRelays: List<String>,
+        profile: GroupProfileV1?,
+        invites: List<MarmotManager.MemberInvite>,
+        now: Long,
+    ): SiblingAdd {
+        val m = checkNotNull(manager)
+        m.createCurrentProfileGroup(nostrGroupId, chatRelays, profile)
+        val included = ArrayList<Pair<HexKey, PrivateKeyPackages.Held>>()
+        val missing = ArrayList<HexKey>()
+        if (ownLeafTagged()) {
+            for (sibling in eligibleSiblings(requireAddToAll = false)) {
+                val held = takeHeld(sibling.slot, now)
+                if (held == null) missing.add(sibling.slot) else included.add(sibling.slot to held)
+            }
+        }
+        val normalized = m.groupRelays(nostrGroupId)
+        val result = m.addWithSiblings(nostrGroupId, invites, included.map { it.second.keyPackage }, normalized)
+        val events = siblingWelcomes(result.siblingWelcome, included, chatRelays, now)
+        return SiblingAdd(result, events, missing)
+    }
+
+    /**
+     * Adds [slot] to [nostrGroupId] with one of its private KeyPackages (the approver's post-link Add, or
+     * a gap fill), unless a leaf already reads as it. Null when it cannot now.
+     */
+    suspend fun addSiblingToChat(
+        nostrGroupId: HexKey,
+        slot: HexKey,
+        now: Long,
+    ): SiblingAdd? {
+        val m = checkNotNull(manager)
+        if (!ownLeafTagged()) return null
+        val group = groupManager.getGroup(nostrGroupId) ?: return null
+        if (!AccountDevicesV1.isRequired(group.view().extensions)) return null
+        if (leafClaims(nostrGroupId).any { it.second == DeviceTagV1.Claim.Device(slot) }) return null
+        val held = takeHeld(slot, now) ?: return SiblingAdd(MarmotManager.SiblingAddResult(null, emptyList(), null), emptyList(), listOf(slot))
+        val relayUrls = AppDataDictionary.fromExtensionsOrEmpty(group.view().extensions)[NostrRoutingV1.COMPONENT_ID]?.let { NostrRoutingV1.decode(it).relays }.orEmpty()
+        val result = m.addWithSiblings(nostrGroupId, emptyList(), listOf(held.keyPackage), m.groupRelays(nostrGroupId))
+        return SiblingAdd(result, siblingWelcomes(result.siblingWelcome, listOf(slot to held), relayUrls, now), emptyList())
+    }
+
+    /**
+     * `Adding the new device to chats`: once a link this device approved is made, and while the new
+     * device is active with "add to all my chats" on, add it to every chat this device is in that can
+     * take a same-account Add. Chats it cannot take now (no private KeyPackage yet) are left for a later
+     * pass or a sibling's gap fill.
+     */
+    suspend fun addNewDeviceToChats(
+        slot: HexKey,
+        now: Long,
+    ): List<SiblingAdd> {
+        val t = trust()
+        if (t.approvals.none { it.slot == slot && it.outcome == DeviceGroupTrust.Outcome.MADE }) return emptyList()
+        val entry = roster()?.device(slot) ?: return emptyList()
+        if (entry.status != DeviceStatusV1.ACTIVE || !entry.addToAllChats) return emptyList()
+        val deviceGroupId = t.trustedNostrGroupId
+        return groupManager.activeGroupIds().filter { it != deviceGroupId }.mapNotNull { chat -> addSiblingToChat(chat, slot, now)?.takeIf { it.missing.isEmpty() } }
+    }
+
+    private suspend fun siblingWelcomes(
+        welcome: ByteArray?,
+        included: List<Pair<HexKey, PrivateKeyPackages.Held>>,
+        chatRelays: List<String>,
+        now: Long,
+    ): List<OutboundGroupEvent> {
+        if (welcome == null || included.isEmpty()) return emptyList()
+        // This client keeps no invitation generations, and every chat it holds is one its user joined,
+        // so it forwards its copy as confirmed (version 3, `device-group.md` "Choosing the version").
+        val version = SiblingWelcome.choose(null, null, confirmed = true)
+        val relays = chatRelays.distinct().take(SiblingWelcome.MAX_RELAYS)
+        return included.map { (slot, held) ->
+            deviceGroupEvent(SiblingWelcome.KIND, SiblingWelcome(version, ownSlot, slot, null, null, true, held.ref, welcome, relays).content(), now)
+        }
+    }
+
+    private suspend fun onSiblingWelcome(
+        sender: HexKey,
+        event: Event,
+    ) {
+        val m = manager ?: return
+        val sw = SiblingWelcome.parse(event.content) ?: return
+        if (sw.to != ownSlot || sw.from != sender) return
+        val kps = keyPackages()
+        val issued = kps.issued.firstOrNull { it.ref == sw.keyPackageRef && it.toSlot == sender } ?: return
+        val bundle = KeyPackageBundleCodec.decode(issued.bundle)
+        when (val result = m.joinSiblingWelcome(sw.welcome, bundle)) {
+            is WelcomeResult.Joined -> keyPackageStore.save(keyPackages().let { it.copy(issued = it.issued.filterNot { i -> i.ref == issued.ref }) })
+            else -> Log.w(TAG) { "sibling Welcome from ${sender.take(8)} did not join: $result" }
+        }
+    }
+
+    // ---- gap fill ------------------------------------------------------------------------------------
+
+    private suspend fun onClaim(
+        sender: HexKey,
+        event: Event,
+        now: Long,
+    ) {
+        val claim = GapFillClaim.parse(event.content) ?: return
+        if (claim.from != sender || !GapFillClaim.isLive(event.createdAt, now)) return
+        val roster = roster() ?: return
+        if (roster.device(claim.to) == null) return
+        val map = claims.getOrPut(claim.chat to claim.to) { HashMap() }
+        map[sender] = maxOf(map[sender] ?: 0, event.createdAt + GapFillClaim.LIFETIME_SECS)
+    }
+
+    /** What [fillMissingChats] produced: claims to publish now, and the Adds it made. */
+    class GapFill(
+        val claims: List<OutboundGroupEvent>,
+        val adds: List<SiblingAdd>,
+    )
+
+    /**
+     * `Filling a missing chat`: for each chat requiring `0x800d` that lacks a sibling with "add to all
+     * my chats" on, claim it first (458); on a later pass, if this device's live claim is the lowest
+     * slot among the live ones, make the Add.
+     */
+    suspend fun fillMissingChats(now: Long): GapFill {
+        val deviceGroupId = trust().trustedNostrGroupId ?: return GapFill(emptyList(), emptyList())
+        if (!ownLeafTagged()) return GapFill(emptyList(), emptyList())
+        val siblings = eligibleSiblings(requireAddToAll = true)
+        val outClaims = ArrayList<OutboundGroupEvent>()
+        val adds = ArrayList<SiblingAdd>()
+        for (chat in groupManager.activeGroupIds()) {
+            if (chat == deviceGroupId) continue
+            val group = groupManager.getGroup(chat) ?: continue
+            if (!AccountDevicesV1.isRequired(group.view().extensions)) continue
+            val present = leafClaims(chat).map { it.second }.toSet()
+            val mlsId = group.groupId.toHexKey()
+            for (sibling in siblings) {
+                if (DeviceTagV1.Claim.Device(sibling.slot) in present) continue
+                if (heldFrom(sibling.slot, now) == 0) continue
+                val live = claims.getOrPut(mlsId to sibling.slot) { HashMap() }
+                live.entries.removeAll { now >= it.value }
+                if (ownSlot !in live) {
+                    outClaims.add(deviceGroupEvent(GapFillClaim.KIND, GapFillClaim(ownSlot, sibling.slot, mlsId).content(), now))
+                    live[ownSlot] = now + GapFillClaim.LIFETIME_SECS
+                    continue
+                }
+                if (live.keys.minOrNull() != ownSlot) continue
+                addSiblingToChat(chat, sibling.slot, now)?.let { adds.add(it) }
+            }
+        }
+        return GapFill(outClaims, adds)
+    }
+
+    // ---- post-link inventory -------------------------------------------------------------------------
+
+    /**
+     * The approver's report to the new device [slot] of the chats it can expect (477), for a link it
+     * approved: every chat requiring `0x800d`, as tokens of the link's KeyPackageRef and the group id.
+     */
+    suspend fun chatInventory(
+        slot: HexKey,
+        revision: Long,
+        now: Long,
+    ): List<OutboundGroupEvent> {
+        val roster = roster() ?: return emptyList()
+        val entry = roster.device(slot) ?: return emptyList()
+        if (entry.linkedBy != ownSlot) return emptyList()
+        val ref = entry.announcedKeyPackage ?: return emptyList()
+        val deviceGroupId = trust().trustedNostrGroupId
+        val tokens =
+            groupManager
+                .activeGroupIds()
+                .filter { it != deviceGroupId }
+                .mapNotNull { groupManager.getGroup(it) }
+                .filter { AccountDevicesV1.isRequired(it.view().extensions) }
+                .map { LinkChatInventory.token(ref.hexToByteArray(), it.groupId).toHexKey() }
+                .sorted()
+        val pages = if (tokens.isEmpty()) listOf(emptyList()) else tokens.chunked(LinkChatInventory.PAGE_SIZE)
+        return pages.mapIndexed { i, page ->
+            deviceGroupEvent(LinkChatInventory.KIND, LinkChatInventory(slot, ref, revision, now + INVENTORY_LIFETIME_SECS, tokens.size.toLong(), i.toLong(), page).content(), now)
+        }
+    }
+
+    private suspend fun onInventory(
+        sender: HexKey,
+        roster: DeviceRosterV1,
+        event: Event,
+        now: Long,
+    ) {
+        val page = LinkChatInventory.parse(event.content) ?: return
+        val t = trust()
+        if (page.to != ownSlot || page.link != t.linkedKeyPackageRef || roster.device(ownSlot)?.linkedBy != sender) return
+        if (now >= page.expiresAt) return
+        val current = inventory
+        if (current == null || page.revision > current.first) {
+            inventory = Triple(page.revision, page.total, page.chats.toMutableSet())
+        } else if (page.revision == current.first) {
+            current.third.addAll(page.chats)
+        }
+    }
+
+    /** How many chats the approver reported that this new device has not joined yet; null without a report. */
+    suspend fun remainingExpectedChats(): Long? {
+        val inv = inventory ?: return null
+        val ref = trust().linkedKeyPackageRef ?: return null
+        val joined =
+            groupManager
+                .activeGroupIds()
+                .mapNotNull { groupManager.getGroup(it) }
+                .map { LinkChatInventory.token(ref.hexToByteArray(), it.groupId).toHexKey() }
+                .count { it in inv.third }
+        return inv.second - joined
+    }
+
+    // ---- sign-ins ------------------------------------------------------------------------------------
+
+    /** A KeyPackage publication of this account: its slot and `created_at`. */
+    data class Publication(
+        val slot: HexKey,
+        val createdAt: Long,
+    )
+
+    enum class SignInClass {
+        /** This device's own slot. */
+        OWN,
+
+        /** A device in the trusted roster. */
+        LINKED,
+
+        /** Rejected in the roster or by this device. */
+        REJECTED,
+
+        /** Published no later than a removal this device saw: no sign-in (MDK `2d509151`). */
+        REMOVED,
+
+        /** Returned by the first check: signed in before this device. */
+        ALREADY_SIGNED_IN,
+
+        /** Appeared after the first check: ask the user whether it was them. */
+        NEW_SIGN_IN,
+    }
+
+    /**
+     * `New sign-ins`: classifies the account's current publications. The first call records the slots
+     * it saw as the first check ([recordFirstCheck]); a slot that check returned is "already signed
+     * in", any other unrecognized slot is new. A slot a roster held as `removed` raises nothing for a
+     * publication no later than that removal plus [DIRECTORY_SKEW_SECS].
+     */
+    suspend fun classifySignIns(publications: List<Publication>): Map<HexKey, SignInClass> {
+        val t = trust()
+        val roster = roster()
+        val first = t.firstCheckSlots?.toSet()
+        val latest = publications.groupBy { it.slot }.mapValues { (_, p) -> p.maxOf { it.createdAt } }
+        return latest.mapValues { (slot, createdAt) ->
+            when {
+                slot == ownSlot -> SignInClass.OWN
+                roster?.device(slot) != null -> SignInClass.LINKED
+                roster?.rejectedSlot(slot)?.reason == RejectionReasonV1.NOT_ME || t.ownRejections.any { it.slot == slot } -> SignInClass.REJECTED
+                roster?.rejectedSlot(slot)?.reason == RejectionReasonV1.REMOVED -> SignInClass.REMOVED
+                t.removedSlots.any { it.slot == slot } ->
+                    // A removed device comes back only in a new slot: a later publication in the old
+                    // one is a new sign-in, whatever the first check saw.
+                    if (t.removedSlots.any { it.slot == slot && createdAt <= it.time + DIRECTORY_SKEW_SECS }) SignInClass.REMOVED else SignInClass.NEW_SIGN_IN
+                first != null && slot in first -> SignInClass.ALREADY_SIGNED_IN
+                else -> SignInClass.NEW_SIGN_IN
+            }
+        }
+    }
+
+    /** Records the first complete read's slots, once; later calls change nothing. */
+    suspend fun recordFirstCheck(slots: Collection<HexKey>) {
+        val t = trust()
+        if (t.firstCheckSlots == null) saveTrust(t.copy(firstCheckSlots = slots.distinct().sorted()))
+    }
+
+    /**
+     * "This wasn't me": keeps the rejection and, in the trusted device group while the roster has no
+     * entry for the slot, returns the Commit that records a `not_me` rejected slot.
+     */
+    suspend fun rejectSignIn(
+        slot: HexKey,
+        now: Long,
+    ): Staged? {
+        val t = trust()
+        if (t.ownRejections.none { it.slot == slot }) saveTrust(t.copy(ownRejections = t.ownRejections + DeviceGroupTrust.SlotTime(slot, now)))
+        val roster = roster() ?: return null
+        if (roster.device(slot) != null || roster.rejectedSlot(slot) != null) return null
+        return stageRosterUpdate(emptyList(), listOf(RosterOperationV1.SetRejectedSlot(RejectedSlotV1(slot, RejectionReasonV1.NOT_ME, now))))
+    }
+
+    // =================================================================================================
 
     private fun withTag(
         leafExtensions: List<Extension>,
@@ -359,10 +1162,28 @@ class MarmotDeviceGroupManager(
     }
 
     companion object {
+        private const val TAG = "MarmotDeviceGroup"
+
         /** How long a new device waits for its link's Welcome after its Confirm. */
         const val LINK_WAIT_SECS = 600L
 
         /** How long the approver waits for the new device's first Commit after `linked_at`. */
         const val FIRST_COMMIT_DEADLINE_SECS = 3600L
+
+        /** "Issuing": top up below 5, to 10; keep at most 300 per sibling. */
+        const val STOCK_LOW = 5
+        const val STOCK_TARGET = 10
+        const val MAX_PRIVATE_PER_SIBLING = 300
+
+        private const val MAX_ANSWERED = 512
+
+        /** Version 1 inventory senders use at most a seven-day report lifetime. */
+        const val INVENTORY_LIFETIME_SECS = 7 * 24 * 3600L
+
+        /** A `removed` record lasts this long after its `rejected_at`. */
+        const val REMOVED_RECORD_SECS = 30 * 24 * 3600L
+
+        /** How far ahead a removed device's clock may run, for the removed-slot sign-in cutoff. */
+        const val DIRECTORY_SKEW_SECS = 600L
     }
 }

@@ -283,12 +283,20 @@ class DeviceGroupLinkTest {
                 trustedNostrGroupId = "06".repeat(32),
                 tagSigningSeed = "07".repeat(32),
                 pendingLink = DeviceGroupTrust.PendingLink(link, now + 600),
-                approvals = listOf(DeviceGroupTrust.Approval("08".repeat(32), now, DeviceGroupTrust.Outcome.MADE)),
+                linkedKeyPackageRef = "09".repeat(32),
+                approvals = listOf(DeviceGroupTrust.Approval("08".repeat(32), now, DeviceGroupTrust.Outcome.MADE, "0a".repeat(32))),
+                removalDecisions = listOf(DeviceGroupTrust.SlotTime("0b".repeat(32), now)),
+                lastHeartbeatSent = now,
+                activity = listOf(DeviceGroupTrust.Activity("0c".repeat(32), now, now + 1)),
+                removedSlots = listOf(DeviceGroupTrust.SlotTime("0d".repeat(32), now)),
+                firstCheckSlots = listOf("0e".repeat(32)),
+                ownRejections = listOf(DeviceGroupTrust.SlotTime("0f".repeat(32), now)),
             )
         assertEquals(trust, DeviceGroupTrust.decode(trust.encode()))
         assertEquals(DeviceGroupTrust(phoneSlot), DeviceGroupTrust.decode(DeviceGroupTrust(phoneSlot).encode()))
-        // Version 1's layout, frozen: version, slot, three absent options, no link, no approvals.
-        assertEquals("01" + phoneSlot + "00000000" + "00", DeviceGroupTrust(phoneSlot).encode().toHexKey())
+        // Version 1's layout, frozen: version, slot, three absent options, no link, no ref, linked, no
+        // approvals or decisions, no heartbeat, no activity or removed slots, no first check, no rejections.
+        assertEquals("01" + phoneSlot + "000000" + "00" + "00" + "00" + "00" + "00" + "0000000000000000" + "00" + "00" + "00" + "00", DeviceGroupTrust(phoneSlot).encode().toHexKey())
         assertFails { DeviceGroupTrust.decode(DeviceGroupTrust(phoneSlot).encode() + byteArrayOf(0)) }
     }
 

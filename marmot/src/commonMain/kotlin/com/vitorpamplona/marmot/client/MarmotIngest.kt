@@ -213,12 +213,17 @@ private suspend fun MarmotManager.ingestGroupEvent(ge: GroupEvent): MarmotIngest
         // "Receiving from older clients"). A kind 9 carrying stream tags is
         // not caught here: it is an ordinary chat message.
         is GroupEventResult.ApplicationMessage -> {
-            if (isRetiredStreamStart(result.innerEventJson)) {
+            val deviceGroups = deviceGroups
+            if (deviceGroups != null && deviceGroups.isTrustedDeviceGroup(result.groupId)) {
+                // The device group is not a chat: its traffic goes to the device-group flows and is
+                // never stored or surfaced as a message (`device-group.md` "Keeping it out of sight").
+                deviceGroups.onAppEvent(result.groupId, result.innerEventJson, result.senderLeafIndex, result.epoch)
+                MarmotIngestResult.Ignored("device-group traffic")
+            } else if (isRetiredStreamStart(result.innerEventJson)) {
                 MarmotIngestResult.Ignored("retired agent text stream start")
             } else if (isDeviceGroupTraffic(result.innerEventJson)) {
                 // `features/device-group.md`: these kinds are read only in the device group the device
-                // trusts and ignored in every other group, so no chat projects one. This client trusts
-                // none yet, so it neither stores nor surfaces them.
+                // trusts and ignored in every other group, so no chat projects one.
                 MarmotIngestResult.Ignored("device-group kind outside a trusted device group")
             } else {
                 // MLS ratchets once we decrypt; future reads of the same ciphertext

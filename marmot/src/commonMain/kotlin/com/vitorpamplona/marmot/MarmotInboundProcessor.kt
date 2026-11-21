@@ -488,6 +488,23 @@ class MarmotInboundProcessor(
         }
 
     /**
+     * Join a group from [welcomeBytes] with a KeyPackage [bundle] the caller already chose: a private
+     * KeyPackage a sibling Welcome named, which no rotation manager holds.
+     */
+    suspend fun joinWithBundle(
+        welcomeBytes: ByteArray,
+        bundle: KeyPackageBundle,
+    ): WelcomeResult =
+        try {
+            val (_, nostrGroupId) = groupManager.processWelcome(welcomeBytes, bundle, null)
+            convergence.trackGroup(nostrGroupId)
+            WelcomeResult.Joined(nostrGroupId = nostrGroupId, needsKeyPackageRotation = false)
+        } catch (e: Exception) {
+            Log.w("MarmotDbg", "MarmotInboundProcessor.joinWithBundle failed", e)
+            WelcomeResult.Error("Failed to process sibling Welcome: ${e.message}", e)
+        }
+
+    /**
      * Resolve the KeyPackageBundle a Welcome is addressed to, the way RFC 9420
      * §12.4.3.1 (and OpenMLS) does it: walk the Welcome's EncryptedGroupSecrets
      * in order and take the first `new_member` KeyPackageRef we hold private
