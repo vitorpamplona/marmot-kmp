@@ -67,21 +67,21 @@ Ordered by dependency. Every row is library work unless the Where column says ap
 | 1.1 | `marmot.account.device-roster.v1` (`0x800e`): state and update codecs (canonical), validation, apply-a-diff, sorted ops, the never-added / never-removed requirement, one account per device group. | `device-roster-v1.md` (with byte vectors); MDK `traits/src/app_components/device_roster.rs:45-505` | **done**: codec (`b0812eb`); requirement rules in `DeviceRosterRules` via `MarmotGroupPolicy` (never added or dropped after creation, valid roster while required, one credential identity, no `0x800f` requirement anywhere), refusals tested by reason | lib |
 | 1.2 | **AppDataUpdate diff semantics for `0x800e`.** Members apply the update as a diff to the parent's roster, not as a replacement. | `device-roster-v1.md` "Update" | **done**: mls-kmp `MlsGroupPolicy.resolveAppDataUpdate` (wt/appdata-update-hook `a859377`, unreleased); `MarmotGroupPolicy` applies the roster diff only while the parent requires `0x800e` | **mls-kmp**: a policy hook `resolveAppDataUpdate(componentId, parentBytes?, updateBytes): ByteArray` (identity by default) called there and wherever GroupContext extensions are recomputed for staging. marmot-kmp then plugs `DeviceRosterV1.applyUpdate`. Without it our device-group commits and MDK's diverge on the GroupContext and the device group forks. |
 | 1.3 | `marmot.member.device-tag.v1` (`0x800f`): seal (ChaCha20-Poly1305 under `leaf_tag_key`, aad = leaf signature key), sign (`SignWithLabel "Marmot DeviceTag"`), open and verify against a roster (device, removed slot, unclaimed). | `device-tag-v1.md` (vectors); MDK `traits/src/app_components/device_tag.rs`, `cgka-engine/src/device_tag.rs`, `roster_tag_keys.rs` | **this branch**: `DeviceTagV1` codec, `produce`, `read`, vectors. | lib |
-| 1.4 | Produce tags: every KeyPackage and every own LeafNode carries a tag once the device can tag; advertise `0x800f`; never require it. | `device-tag-v1.md` "Producing tags" | partial: the creator's founding leaf and the new device's first-Commit leaf are tagged (`MarmotDeviceGroupManager`); KeyPackages are not tagged yet; `0x800e`/`0x800f` advertised only through the opt-in `CurrentProfileGroupFactory.DEVICE_GROUP_SUPPORTED_COMPONENTS` (default OFF) | lib (`CurrentProfileGroupFactory`, `MlsGroupManager`) |
+| 1.4 | Produce tags: every KeyPackage and every own LeafNode carries a tag once the device can tag; advertise `0x800f`; never require it. | `device-tag-v1.md` "Producing tags" | **done**: published KeyPackages (rotation manager hook), private KeyPackages, the creator leaf of chats and of the device group, and the new device's first-Commit leaf carry the tag once the device can tag. Not yet: retagging an older untagged chat leaf through a later UpdatePath (a SHOULD) | lib (`CurrentProfileGroupFactory`, `MlsGroupManager`) |
 | 1.5 | Device pairing (kinds 452-456): strict JSON messages, commitment, SAS (seven emoji, Matrix table), MACs, the two state machines (first answer wins, one decision, confirm order, competing requests, 10 answers/hour, 600 s expiries, cancel semantics). Transport-neutral; secrets in memory only. | `device-pairing.md` (two vectors); MDK `crates/marmot-pairing` (all of it), `testdata/pairing-v1.json` | **this branch**: messages, derivations, emoji table, both sessions, spec + MDK vectors. | lib |
 | 1.6 | Pairing over Nostr: rumor from the account to itself, NIP-59 gift wrap to own inbox relays; drop own Confirm echoes. | `transports/nostr.md` "Pairing delivery"; MDK `transport-nostr-adapter` `pairing` | **this branch**: `PairingDelivery.wrap/unwrap` | lib done; app: which relays (own 10050), subscribe to own wraps; today Amethyst drops 452-456 in `MarmotDevicePairing`: route them to `PairingDelivery.unwrap` instead |
-| 1.7 | Device-group trust store: the trusted group id (set on create or on joining the link's Welcome only), the pending link record (session, `KeyPackageRef`, group id, sender signature key, wait end), reserved group id and KeyPackage, 600 s wait. Explicit local reset. | `device-group.md` "Trust", "Joining", "Explicit local reset" | **done** (lib): `DeviceGroupTrust` (versioned codec), `DeviceGroupTrustStore`, `InMemoryDeviceGroupTrustStore`; the link-only join is `DeviceGroupLinkJoinPolicy`, and `MarmotGroupPolicy.validateJoin` refuses every other `0x800e` Welcome. Explicit local reset: missing | lib (interface + in-memory), app (persisted, encrypted store). **New persisted format.** |
-| 1.8 | Create the device group on approve (founding Add of exactly the confirmed KeyPackage, roster with both entries, account as sole admin, `0x800d` + `0x800e` required); or one Commit adding the confirmed KeyPackage and its `set_device`. Link made on the new device's first Commit; failed after 3600 s and undone with `remove_device`. | "Creating the device group", "Approving", "A link that is not taken up" | **done** (lib, in-process): `MarmotDeviceGroupManager.confirmTarget/approve/applyStaged/processCommit`; link made on the new device's first Commit. The 3600 s failure and its undo: missing | lib (`MarmotDeviceGroupManager`) |
+| 1.7 | Device-group trust store: the trusted group id (set on create or on joining the link's Welcome only), the pending link record (session, `KeyPackageRef`, group id, sender signature key, wait end), reserved group id and KeyPackage, 600 s wait. Explicit local reset. | `device-group.md` "Trust", "Joining", "Explicit local reset" | **done** (lib): `DeviceGroupTrust` v1 (now also unlinked flag, linked ref, removal decisions, heartbeat times, removed slots, first-check slots, own rejections), stores, `DeviceGroupLinkJoinPolicy`; `resetLocalCopy` (explicit local reset) | lib (interface + in-memory), app (persisted, encrypted store). **New persisted format.** |
+| 1.8 | Create the device group on approve (founding Add of exactly the confirmed KeyPackage, roster with both entries, account as sole admin, `0x800d` + `0x800e` required); or one Commit adding the confirmed KeyPackage and its `set_device`. Link made on the new device's first Commit; failed after 3600 s and undone with `remove_device`. | "Creating the device group", "Approving", "A link that is not taken up" | **done** (lib, in-process): create/approve/first Commit, link made; `checkLinkDeadlines` fails a link 3600 s after `linked_at` and undoes it (leaf + `remove_device`); the new device tells a failed link from an unlink | lib (`MarmotDeviceGroupManager`) |
 | 1.9 | New device: join only the link's Welcome (group, signer leaf key, KeyPackage, `0x800e`), first Commit sets `tag_signature_key` and tags its leaf. | "Joining", "Matching leaves to devices" | **done** (lib, in-process): `joinLinkWelcome` (link's group id, signer leaf key, KeyPackage, `0x800e`, 600 s wait) and `stageFirstCommit` (tag key + tagged UpdatePath leaf) | lib |
-| 1.10 | Slot announcements: announce `announced_key_package` in the roster before every publish; do not publish unannounced. | "Slot announcements" | missing | lib (`KeyPackageRotationManager` gate) |
-| 1.11 | Private KeyPackages: issue (tagged, not last-resort, stock 5→10, cap ≥300), request (459) / hand-off (460) codecs and rules, consume only through a sibling Welcome. | "Private KeyPackages"; MDK `cgka-engine/src/private_key_packages.rs`, `marmot-app/src/client/private_key_packages.rs` | codecs **this branch**; stock/rules missing | lib. **New persisted format** (issued and held private KeyPackages with their owners). |
-| 1.12 | Sibling Welcome (461) v1/v2/v3: codec, send after the Add is canonical, receive checks (trusted group, `to`, `from` in roster, sender tag, KeyPackage issued to `from`), repair after heartbeat. v3 forwarded `inviter`/`confirmed`. | "Sibling Welcomes" (#512) | codec **this branch**; flows missing | lib |
-| 1.13 | Adding the new device to chats (approver) and filling a missing chat (gap-fill claim 458: canonical JSON, 600 s, lowest slot wins), creating a chat with siblings' private KeyPackages, never with own published ones. | "Adding the new device to chats", "Filling a missing chat", "Creating a chat" | claim codec **this branch**; flows missing. `KeyPackageUtils.selectAllForInvite` must exclude the own account once a device group is trusted. | lib |
-| 1.14 | Heartbeats (457 `{"v":1}`, hourly, tagged leaf only), last activity. | "Heartbeats"; MDK `device_heartbeats.rs` | codec **this branch** | lib |
-| 1.15 | Post-link chat inventory (477): tokens, pages of 128, revision. Optional. | "Post-link chat inventory" (#511) | token + content codec **this branch** | lib; app shows "N chats left" |
-| 1.16 | Remove a device (one Commit: remove leaf + `remove_device` + `set_rejected_slot removed`), delete its slot (kind 5), siblings remove its chat leaves (same-account Remove), delete exchanged private KeyPackages; the removed device's unlinked flow. | "Removing a device", "On the removed device" | missing | lib; app: Devices screen "Remove", "This device was unlinked" notice |
-| 1.17 | Sign out through siblings (`leaving`) or on its own. | "Signing out" | missing | lib; app: sign-out path calls it |
-| 1.18 | New sign-ins: complete checks of own slots, first-check classification, Link / Not now / This wasn't me (`not_me`), warning; a KeyPackage in our own slot we did not make. | "New sign-ins", "Rejections" | missing | lib (classification, store interface), app (prompts, warning). **New persisted format** (sign-in list, answers). |
+| 1.10 | Slot announcements: announce `announced_key_package` in the roster before every publish; do not publish unannounced. | "Slot announcements" | **done** as API: `announcementNeeded` / `stageAnnouncement`. The app calls them before publishing a KeyPackage; publishing is not gated inside the library yet | lib (`KeyPackageRotationManager` gate) |
+| 1.11 | Private KeyPackages: issue (tagged, not last-resort, stock 5→10, cap ≥300), request (459) / hand-off (460) codecs and rules, consume only through a sibling Welcome. | "Private KeyPackages"; MDK `cgka-engine/src/private_key_packages.rs`, `marmot-app/src/client/private_key_packages.rs` | **done**: issue (tagged, not last-resort, stock 5→10, cap 300), 459 answered once per event id, 460 accepted only whole and tagged as the sender's, used refs kept to `not_after`; `PrivateKeyPackageStore` v1 | lib. **New persisted format** (issued and held private KeyPackages with their owners). |
+| 1.12 | Sibling Welcome (461) v1/v2/v3: codec, send after the Add is canonical, receive checks (trusted group, `to`, `from` in roster, sender tag, KeyPackage issued to `from`), repair after heartbeat. v3 forwarded `inviter`/`confirmed`. | "Sibling Welcomes" (#512) | **done**: v3 (confirmed copy, no generation: this client keeps none) sent after the Add; received only from a tagged roster device for a KeyPackage issued to it, joining with that bundle. Forwarded `inviter`/`confirmed` are read but not presented (Amethyst has no pending-invitation state). Repair (resend after heartbeat) not done | lib |
+| 1.13 | Adding the new device to chats (approver) and filling a missing chat (gap-fill claim 458: canonical JSON, 600 s, lowest slot wins), creating a chat with siblings' private KeyPackages, never with own published ones. | "Adding the new device to chats", "Filling a missing chat", "Creating a chat" | **done**: `createChat` includes siblings' private KeyPackages (never published own ones: `addMemberInvites` refuses own-account invites in device-group mode), `addNewDeviceToChats` (approver), `fillMissingChats` (claim first, lowest live claimant adds) | lib |
+| 1.14 | Heartbeats (457 `{"v":1}`, hourly, tagged leaf only), last activity. | "Heartbeats"; MDK `device_heartbeats.rs` | **done**: `heartbeatDue`/`heartbeatSent`, counted only from a tagged leaf, last activity per roster entry. Inactive marking (30/90 days) not done | lib |
+| 1.15 | Post-link chat inventory (477): tokens, pages of 128, revision. Optional. | "Post-link chat inventory" (#511) | **done**: approver `chatInventory`, new device `remainingExpectedChats` | lib; app shows "N chats left" |
+| 1.16 | Remove a device (one Commit: remove leaf + `remove_device` + `set_rejected_slot removed`), delete its slot (kind 5), siblings remove its chat leaves (same-account Remove), delete exchanged private KeyPackages; the removed device's unlinked flow. | "Removing a device", "On the removed device" | **done**: `stageRemoveDevice` (leaf + `remove_device` + `removed` record), `removeGoneDevicesFromChats` (same-account Remove), private KeyPackages of gone slots dropped, the removed device marks itself unlinked and discards its copy; `expireRemovedRecords` (30 days). Slot deletion (kind 5) is the app's | lib; app: Devices screen "Remove", "This device was unlinked" notice |
+| 1.17 | Sign out through siblings (`leaving`) or on its own. | "Signing out" | **done** through siblings: `stageSignOut` (`leaving`) and `pendingDepartures`. Signing out on its own is the app's existing leave path | lib; app: sign-out path calls it |
+| 1.18 | New sign-ins: complete checks of own slots, first-check classification, Link / Not now / This wasn't me (`not_me`), warning; a KeyPackage in our own slot we did not make. | "New sign-ins", "Rejections" | **done** as classification: `recordFirstCheck`, `classifySignIns` (own, linked, rejected, removed incl. after the record expires per MDK 2d509151, already signed in, new), `rejectSignIn` (`not_me`). Reading the account's publications and the warning UI are the app's | lib (classification, store interface), app (prompts, warning). **New persisted format** (sign-in list, answers). |
 | 1.19 | Devices screen: list, rename (`rename_id`), the three settings, client/platform. | "Devices", "Labels, clients and platforms" | missing | app (UI, strings), lib (roster edits) |
 
 ### P2
@@ -107,16 +107,29 @@ verbs (thin over the library), and keeping the device group out of `marmotGroupL
 
 ## Persisted formats (API)
 
-**New in this branch: `DeviceGroupTrust`, version 1** (`features/deviceGroup/DeviceGroupTrust.kt`), the
-one store this work adds. Marmot binary profile: `uint8 version = 1; opaque own_slot[32];
-optional<opaque<V>> trusted_mls_group_id; optional<opaque<V>> trusted_nostr_group_id;
-optional<opaque<V>> tag_signing_seed; optional<PendingLinkV1> pending_link; ApprovalV1 approvals<V>`, where
-`PendingLinkV1 = session, key_package_event, key_package_ref, device_group_id, welcome_sender_key,
-existing_device_slot (each opaque<V>), uint64 wait_until` and `ApprovalV1 = opaque slot[32]; uint64
-linked_at; uint8 outcome (0 pending, 1 made, 2 failed)`. It holds the tag signing seed: an app's store
-MUST encrypt it at rest. A change to its layout is a new version byte, never an edit of version 1. The
-founding device's pre-creation material (group id, leaf key, roster key) between its Confirm and the
-founding Add is memory only, so a restart there abandons the link (the new device's 600 s wait ends it).
+**New in this branch, both unreleased (version 1 may still change before the first release):**
+
+- `DeviceGroupTrust` v1 (`features/deviceGroup/DeviceGroupTrust.kt`), Marmot binary profile, in order:
+  `uint8 version = 1; opaque own_slot[32]; optional<opaque<V>> trusted_mls_group_id;
+  optional<opaque<V>> trusted_nostr_group_id; optional<opaque<V>> tag_signing_seed;
+  optional<PendingLinkV1> pending_link; optional<opaque<V>> linked_key_package_ref; uint8 unlinked;
+  ApprovalV1 approvals<V>; SlotTime removal_decisions<V>; uint64 last_heartbeat_sent;
+  ActivityV1 activity<V>; SlotTime removed_slots<V>; optional<SlotId first_check_slots<V>>;
+  SlotTime own_rejections<V>`, with `PendingLinkV1 = session, key_package_event, key_package_ref,
+  device_group_id, welcome_sender_key, existing_device_slot (each opaque<V>), uint64 wait_until`,
+  `ApprovalV1 = opaque slot[32]; uint64 linked_at; uint8 outcome (0 pending, 1 made, 2 failed);
+  opaque leaf_signature_key<V>`, `SlotTime = opaque slot[32]; uint64 time`,
+  `ActivityV1 = opaque slot[32]; uint64 linked_at; uint64 last_activity`. Holds the tag signing seed:
+  encrypt at rest.
+- `PrivateKeyPackages` v1 (`features/deviceGroup/PrivateKeyPackages.kt`): `uint8 version = 1;
+  IssuedV1 issued<V>; HeldV1 held<V>; RefV1 used<V>; opaque answered_request_id[32]<V>`, with
+  `IssuedV1 = opaque to_slot[32]; opaque ref<V>; uint64 not_before; uint64 not_after; uint64 handed_at;
+  opaque bundle<V>` (mls-kmp `KeyPackageBundleCodec`, private keys), `HeldV1 = opaque from_slot[32];
+  opaque ref<V>; uint64 not_before; uint64 not_after; opaque key_package_mls_message<V>`,
+  `RefV1 = opaque ref<V>; uint64 not_after`. Holds private keys: encrypt at rest.
+- Kept in memory only, by design or for now: the founding device's material between its Confirm and
+  the founding Add (a restart abandons that link), live gap-fill claims (the spec allows forgetting
+  them), and the post-link inventory pages (a lost inventory only hides progress).
 
 
 Nothing in this branch changes a store's bytes: the new code is codecs and in-memory state machines. The pairing
@@ -167,7 +180,12 @@ behaviour towards White Noise is unchanged except row 0.4.
 | mls-kmp `wt/appdata-update-hook` | `a859377` | `MlsGroupPolicy.resolveAppDataUpdate` (identity default), applied for local, inbound and external commits; ABI dump; guide row. |
 | marmot-kmp | `26b415c` | Roster diff and requirement rules in the policy; `DeviceGroupTrust` + store; `DeviceGroupLinkJoinPolicy`; `MarmotDeviceGroupManager`; `DeviceGroupLinkTest` (pairing over gift wraps, founding Add, link Welcome, first Commit, roster bytes equal on both devices, tags read on both). |
 
-The flag: `0x800e`/`0x800f` are OFF by default. `SUPPORTED_COMPONENTS` (what KeyPackages and leaves
+**The switch:** `MarmotManager(…, deviceGroupConfig = MarmotDeviceGroupConfig(trustStore,
+privateKeyPackageStore, relays))`. Null, the default, keeps device groups off: `supportedComponents`
+unchanged, every device-group app event ignored. Set, `MarmotManager.deviceGroups` runs everything above
+and every KeyPackage and leaf advertises `0x800e`/`0x800f` (tagged once the device can tag).
+
+(Earlier note:) The flag: `0x800e`/`0x800f` are OFF by default. `SUPPORTED_COMPONENTS` (what KeyPackages and leaves
 advertise unless told otherwise) is unchanged; only callers that pass
 `DEVICE_GROUP_SUPPORTED_COMPONENTS` advertise them, and nothing in the library or Amethyst does yet.
 
@@ -184,3 +202,22 @@ advertise unless told otherwise) is unchanged; only callers that pass
 4. Slot announcements (1.10), private KeyPackages + sibling Welcomes (1.11-1.12), gap filling and
    chat creation with siblings (1.13), heartbeats (1.14), removal and sign-out (1.16-1.17), sign-ins
    (1.18).
+
+## Third pass: what flipping the switch still needs
+
+Library, before an app turns `deviceGroupConfig` on for users:
+
+- Device-group Commits go through `MarmotDeviceGroupManager`'s staging, not `MarmotManager`'s
+  publish gate and convergence engine: inbound device-group Commits must be routed to
+  `deviceGroups.processCommit` (today `MarmotManager.ingest` treats them like any group's), and a fork
+  of the device group is not resolved by convergence yet.
+- Device-group app events are accepted only from the epoch the receiver holds (the spec reads the
+  sender's tag in the epoch the message was sent in); older ones are dropped.
+- Sibling Welcome repair (resend after a heartbeat), inactive marking (30/90 days), moves between
+  device groups, account sync (475/476/473: invitation decisions, history) and retagging old untagged
+  chat leaves are not done. Without account sync a linked device answers invitations on its own.
+- Publishing a KeyPackage is not gated on its announcement inside the library: the app must call
+  `announcementNeeded`/`stageAnnouncement` first.
+
+So the library is ready for an opt-in, test-account rollout behind the switch, not for a default-on
+release.
