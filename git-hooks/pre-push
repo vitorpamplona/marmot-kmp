@@ -24,7 +24,6 @@ TASKS=(
     :marmot:compileCommonMainKotlinMetadata
     :marmot:compileAppleMainKotlinMetadata
     :marmot:jvmTest
-    :marmot-quic:jvmTest
     :marmot-bench:compileKotlin
 )
 
