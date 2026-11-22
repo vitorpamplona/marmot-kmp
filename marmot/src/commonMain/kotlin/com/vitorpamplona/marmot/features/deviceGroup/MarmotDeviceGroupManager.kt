@@ -1300,6 +1300,20 @@ class MarmotDeviceGroupManager internal constructor(
         return out
     }
 
+    /**
+     * Convergence rewound the device group onto another branch: an update this device encrypted on the
+     * withdrawn branch may never reach a sibling, and branch selection parks it rather than withdrawing it.
+     * Every item, invitation answers included, is owed again and queued on [drainOutbox]; receivers merge by
+     * version, so an update that does arrive later costs only a duplicate (MDK 0.19.0, mdk#3594).
+     */
+    suspend fun onDeviceGroupRewound(
+        nostrGroupId: HexKey,
+        now: Long = TimeUtils.now(),
+    ) {
+        if (!isTrustedDeviceGroup(nostrGroupId)) return
+        outbox.addAll(sendItems(sync().items, now))
+    }
+
     private suspend fun onBroadcastRequest(now: Long) {
         val s = sync()
         // At most one answering broadcast an hour.

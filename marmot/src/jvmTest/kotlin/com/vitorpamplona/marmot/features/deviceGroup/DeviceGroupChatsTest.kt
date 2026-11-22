@@ -345,6 +345,35 @@ class DeviceGroupChatsTest {
         }
 
     @Test
+    fun aWithdrawnDeviceGroupBranchOwesTheSmallStateAgain() =
+        runBlocking<Unit> {
+            val (a, b, _) = linkedPair()
+            val c = Device(KeyPair(), deviceGroups = false)
+            a.ingest(b.groups.topUpSiblings(now))
+            val chat = "b8".repeat(32)
+            val created = a.groups.createChat(chat, relays, null, listOf(invite(a, c)), now)
+            b.ingest(created.deviceGroupEvents)
+            // The pin update was sent on a branch that then lost: B never read it.
+            assertEquals(1, a.groups.changeSetting(chat, "pin", "true", now).size)
+            a.groups.drainOutbox()
+
+            // A rewound chat is not the device group: nothing is owed.
+            a.groups.onDeviceGroupRewound(chat, now)
+            assertTrue(a.groups.drainOutbox().isEmpty())
+
+            a.groups.onDeviceGroupRewound(assertNotNull(a.groups.deviceGroupNostrId()), now)
+            val again = a.groups.drainOutbox()
+            assertTrue(again.isNotEmpty())
+            b.ingest(again)
+            val mlsId =
+                a.manager.groupManager
+                    .getGroup(chat)!!
+                    .groupId
+                    .toHexKey()
+            assertEquals("true", (b.groups.smallState().held("$mlsId/pin") as SmallStateItem.Versioned).value)
+        }
+
+    @Test
     fun aLostSiblingWelcomeIsSentAgainAfterTheTargetRuns() =
         runBlocking<Unit> {
             val (a, b, _) = linkedPair()

@@ -1578,6 +1578,8 @@ class MarmotManager(
                     "convergence settled group=${resolution.groupId.take(8)}… " +
                         "epoch=${resolution.canonicalEpoch} rewound=${resolution.rewound}"
                 }
+                // The device group's own branch lost: what it sent on it is owed again.
+                if (resolution.rewound) deviceGroups?.onDeviceGroupRewound(resolution.groupId)
                 // Settlement is the only moment a pending disband can be
                 // decided: the branch is chosen, so the request has either won,
                 // lost and needs regenerating, or become impossible. Doing it
