@@ -115,10 +115,12 @@ class MarmotAppEvent(
          *   row for one either).
          * - [KIND_REPORT] and [KIND_REVIEW] are moderation state for the admins.
          * - 447/448/449 push-token gossip is routing data for a notification server.
-         * - 1200 agent-stream anchors carry routing metadata with an empty body;
-         *   the reader sees the live preview and then the final kind 9. 1201 and
-         *   1202 agent activity and operation status are telemetry about a run
-         *   whose result arrives as a kind 9.
+         * - 1200 stream starts belong to the retired agent text stream, and a
+         *   client does not display one (`agent-text-stream-quic-v1.md`,
+         *   "Retirement"); ingestion already drops them, and this keeps any an
+         *   older build stored off the timeline. 1201 and 1202 agent activity and
+         *   operation status are telemetry about a run whose result arrives as a
+         *   kind 9.
          *
          * [KIND_SYSTEM] is not here: see [isTimelineRow].
          */

@@ -112,7 +112,9 @@ object MarmotGroupPolicy : MlsGroupPolicy {
      *   introduces, in a current-profile group, and that the group stays on
      *   that profile;
      * - the admin–leaf coupling of `app-components/admin-policy-v1.md`: every
-     *   admin the resulting state names still holds a leaf.
+     *   admin the resulting state names still holds a leaf;
+     * - the retired agent text stream's `0x8006` state, when the group still
+     *   carries it, is valid (`agent-text-stream-quic-v1.md`, "Validation").
      */
     override fun validateResultingState(
         parentExtensions: List<Extension>,
@@ -123,6 +125,20 @@ object MarmotGroupPolicy : MlsGroupPolicy {
         AccountDevicesV1.validateResultingState(parentExtensions, proposals, resulting)
         validateIntroducedLeafProofs(parentExtensions, proposals, committerLeafIndex, resulting)
         validateAdminLeafCoupling(parentExtensions, resulting)
+        validateAgentTextStreamState(resulting)
+    }
+
+    /**
+     * `agent-text-stream-quic-v1.md`, "What clients keep doing": a client that
+     * advertises `0x8006` validates its state on every Commit, so an older
+     * client's update is accepted only when valid. MDK checks the same bytes on
+     * every update it receives. The member-role half of "Validation" is checked
+     * at join ([requireAgentTextStreamRoles]); like MDK, not on received Commits.
+     */
+    private fun validateAgentTextStreamState(resulting: GroupView) {
+        AppDataDictionary.fromExtensionsOrEmpty(resulting.extensions)[AgentTextStreamQuicPolicyV1.COMPONENT_ID]?.let {
+            AgentTextStreamQuicPolicyV1.decode(it)
+        }
     }
 
     /**
@@ -444,6 +460,10 @@ object MarmotGroupPolicy : MlsGroupPolicy {
     /**
      * Enforce the `0x8006` component's `required_member_roles` mask over
      * the joining tree.
+     *
+     * The component is retired but still supported in the groups that carry
+     * it, and decoding it here also validates its state
+     * ([AgentTextStreamQuicPolicyV1.decode]).
      *
      * A group carrying the agent-text-stream component requires each named
      * role as an MLS leaf capability (`0xF2D1` receive, `0xF2D2` send,

@@ -21,12 +21,10 @@
 package com.vitorpamplona.marmot.appComponents.agentTextStream
 
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
-import com.vitorpamplona.quartz.nip01Core.core.toHexKey
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
-import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -118,229 +116,37 @@ class AgentTextStreamQuicPolicyV1Test {
 }
 
 /**
- * The QUIC variable-length integer is the length prefix for every field in the
- * stream wire formats, and it is also hashed into the transcript and the key
- * context — so a wrong prefix is not a parse error but a different key.
+ * The retirement's send rules and reserved identifiers
+ * (`agent-text-stream-quic-v1.md`, "What clients stop doing", "Reserved
+ * identifiers").
  */
-class QuicVarIntTest {
+class AgentTextStreamRetirementTest {
     @Test
-    fun encodesEachWidthAtItsBoundary() {
-        assertContentEquals(byteArrayOf(0x00), QuicVarInt.encode(0))
-        assertContentEquals(byteArrayOf(0x20), QuicVarInt.encode(32))
-        assertContentEquals(byteArrayOf(0x3f), QuicVarInt.encode(63))
-        assertContentEquals(byteArrayOf(0x40, 0x40), QuicVarInt.encode(64))
-        assertContentEquals(byteArrayOf(0x7f, 0xff.toByte()), QuicVarInt.encode(16_383))
-        assertContentEquals(byteArrayOf(0x80.toByte(), 0x00, 0x40, 0x00), QuicVarInt.encode(16_384))
+    fun theReservedIdentifiersKeepTheirValues() {
+        assertEquals(0x8006, AgentTextStreamRetirement.COMPONENT_ID)
+        assertEquals("marmot.group.agent-text-stream.quic.v1", AgentTextStreamRetirement.COMPONENT_NAME)
+        assertEquals(1200, AgentTextStreamRetirement.STREAM_START_KIND)
+        assertEquals("marmot", AgentTextStreamRetirement.EXPORTER_LABEL)
+        assertEquals("agent-text-stream-quic", AgentTextStreamRetirement.EXPORTER_CONTEXT)
+        assertEquals("marmot.quic_stream.v1", AgentTextStreamRetirement.ALPN_DIRECT)
+        assertEquals("marmot.quic_broker.v1", AgentTextStreamRetirement.ALPN_BROKER)
+        assertEquals(listOf(0xF2D1, 0xF2D2, 0xF2D4), AgentTextStreamRoles.ALL_CAPABILITIES)
     }
 
     @Test
-    fun roundTripsAcrossWidths() {
-        for (value in listOf(0L, 1L, 63L, 64L, 16_383L, 16_384L, 1_073_741_823L, 1_073_741_824L)) {
-            val encoded = QuicVarInt.encode(value)
-            val decoded = QuicVarInt.decode(encoded)
-            assertEquals(value, decoded.value)
-            assertEquals(encoded.size, decoded.length)
+    fun aStreamStartIsNeverSent() {
+        assertFailsWith<IllegalArgumentException> { AgentTextStreamRetirement.requireNotRetired(1200, emptyArray()) }
+    }
+
+    @Test
+    fun aKind9NeverCarriesAStreamTag() {
+        for (tag in listOf("stream", "stream-start", "stream-hash", "stream-chunks")) {
+            assertFailsWith<IllegalArgumentException>(tag) {
+                AgentTextStreamRetirement.requireNotRetired(9, arrayOf(arrayOf(tag, "00")))
+            }
         }
-    }
-
-    @Test
-    fun rejectsATruncatedPrefix() {
-        assertFailsWith<IllegalArgumentException> { QuicVarInt.decode(ByteArray(0)) }
-        assertFailsWith<IllegalArgumentException> { QuicVarInt.decode(byteArrayOf(0x40)) }
-    }
-}
-
-class AgentTextStreamRecordV1Test {
-    private val streamId = ByteArray(32) { 0x5a }
-
-    @Test
-    fun roundTripsAFrame() {
-        val record = AgentTextStreamRecordV1.textDelta(streamId, 7, "hello".encodeToByteArray())
-        val decoded = AgentTextStreamRecordV1.decode(record.encode())
-
-        assertEquals(record, decoded)
-        assertEquals(record.encodedLength(), record.encode().size)
-    }
-
-    /**
-     * A newer advisory record type must not tear down an otherwise valid
-     * preview stream, so framing accepts types it has no semantics for.
-     */
-    @Test
-    fun acceptsAnUnknownRecordType() {
-        val record = AgentTextStreamRecordV1(streamId, 1, recordType = 0x7f, frame = ByteArray(4))
-        assertEquals(0x7f, AgentTextStreamRecordV1.decode(record.encode()).recordType)
-    }
-
-    @Test
-    fun rejectsFramingItCannotTrust() {
-        val encoded = AgentTextStreamRecordV1.textDelta(streamId, 1, ByteArray(4)).encode()
-
-        // Trailing bytes: the sender and receiver disagree where the record ends.
-        assertFailsWith<IllegalArgumentException> { AgentTextStreamRecordV1.decode(encoded + 0x00) }
-        // Truncated.
-        assertFailsWith<IllegalArgumentException> { AgentTextStreamRecordV1.decode(encoded.copyOf(encoded.size - 1)) }
-        // A version we do not speak.
-        val wrongVersion = encoded.copyOf()
-        wrongVersion[0] = 2
-        assertFailsWith<IllegalArgumentException> { AgentTextStreamRecordV1.decode(wrongVersion) }
-        // An empty stream id names no stream.
-        assertFailsWith<IllegalArgumentException> {
-            AgentTextStreamRecordV1(ByteArray(0), 1, AgentTextStreamRecordV1.TYPE_TEXT_DELTA, frame = ByteArray(0))
-        }
-    }
-}
-
-class AgentTextStreamCryptoTest {
-    private val secret = ByteArray(32) { it.toByte() }
-    private val streamId = ByteArray(32) { 0x11 }
-    private val startEventId = ByteArray(32) { 0x22 }
-
-    private fun crypto(
-        epoch: Long = 3,
-        stream: ByteArray = streamId,
-    ) = AgentTextStreamCrypto(
-        secret,
-        AgentTextStreamKeyContextV1(
-            groupId = ByteArray(16) { 0x33 },
-            streamId = stream,
-            mlsEpoch = epoch,
-            senderId = ByteArray(32) { 0x44 },
-            startEventId = startEventId,
-        ),
-    )
-
-    @Test
-    fun sealAndOpenRoundTrip() {
-        val c = crypto()
-        val record = AgentTextStreamRecordV1.textDelta(streamId, 5, "streamed text".encodeToByteArray())
-        val sealed = c.seal(record)
-
-        assertTrue(sealed.frame.size == record.frame.size + AgentTextStreamRecordV1.AEAD_TAG_LEN)
-        assertContentEquals(record.frame, c.open(sealed).frame)
-    }
-
-    /**
-     * `seq` is in both the nonce and the AAD, so a replayed or reordered
-     * record does not merely look wrong — it fails to open.
-     */
-    @Test
-    fun aRecordDoesNotOpenAtADifferentSequence() {
-        val c = crypto()
-        val sealed = c.seal(AgentTextStreamRecordV1.textDelta(streamId, 5, "abc".encodeToByteArray()))
-        val replayed =
-            AgentTextStreamRecordV1(
-                streamId = sealed.streamId,
-                seq = 6,
-                recordType = sealed.recordType,
-                flags = sealed.flags,
-                frame = sealed.frame,
-            )
-        assertNull(c.openOrNull(replayed))
-    }
-
-    /** Nonce 0 is the base itself, and each seq flips only the low 64 bits. */
-    @Test
-    fun theNonceIsTheBaseXorTheSequence() {
-        val c = crypto()
-        val base = c.recordNonce(0)
-        val one = c.recordNonce(1)
-        assertEquals(AgentTextStreamCrypto.NONCE_LENGTH, base.size)
-        assertContentEquals(base.copyOf(11), one.copyOf(11))
-        assertEquals((base[11].toInt() xor 1).toByte(), one[11])
-    }
-
-    /**
-     * The key context is the only thing separating two streams that share one
-     * group exporter secret, so changing any part of it must change the key.
-     */
-    @Test
-    fun everyKeyContextFieldSeparatesTheKey() {
-        val base = crypto().recordKey().toHexKey()
-        assertTrue(crypto(epoch = 4).recordKey().toHexKey() != base)
-        assertTrue(crypto(stream = ByteArray(32) { 0x12 }).recordKey().toHexKey() != base)
-    }
-
-    @Test
-    fun refusesARecordFromAnotherStream() {
-        val c = crypto()
-        val foreign = AgentTextStreamRecordV1.textDelta(ByteArray(32) { 0x77 }, 1, ByteArray(4))
-        assertFailsWith<IllegalArgumentException> { c.seal(foreign) }
-    }
-
-    @Test
-    fun refusesAFrameOverTheGroupLimit() {
-        val c = crypto()
-        val record = AgentTextStreamRecordV1.textDelta(streamId, 1, ByteArray(5000))
-        assertFailsWith<IllegalArgumentException> { c.seal(record, maxPlaintextFrameLen = 4096) }
-    }
-}
-
-class AgentTextStreamTranscriptV1Test {
-    private val streamId = ByteArray(32) { 0x11 }
-    private val startEventId = ByteArray(32) { 0x22 }
-
-    @Test
-    fun foldsRecordsInOrder() {
-        val a = AgentTextStreamTranscriptV1.start(streamId, startEventId)
-        val b = AgentTextStreamTranscriptV1.start(streamId, startEventId)
-
-        a.append(0, AgentTextStreamRecordV1.TYPE_TEXT_DELTA, "one".encodeToByteArray())
-        a.append(1, AgentTextStreamRecordV1.TYPE_TEXT_DELTA, "two".encodeToByteArray())
-        b.append(1, AgentTextStreamRecordV1.TYPE_TEXT_DELTA, "two".encodeToByteArray())
-        b.append(0, AgentTextStreamRecordV1.TYPE_TEXT_DELTA, "one".encodeToByteArray())
-
-        assertEquals(2, a.chunkCount)
-        assertTrue(!a.hash.contentEquals(b.hash), "a reordered stream must not hash the same")
-    }
-
-    @Test
-    fun resumesFromDurableState() {
-        val original = AgentTextStreamTranscriptV1.start(streamId, startEventId)
-        original.append(0, AgentTextStreamRecordV1.TYPE_TEXT_DELTA, "one".encodeToByteArray())
-
-        val resumed = AgentTextStreamTranscriptV1.resume(streamId, startEventId, original.hash, original.chunkCount)
-        resumed.append(1, AgentTextStreamRecordV1.TYPE_TEXT_DELTA, "two".encodeToByteArray())
-        original.append(1, AgentTextStreamRecordV1.TYPE_TEXT_DELTA, "two".encodeToByteArray())
-
-        assertContentEquals(original.hash, resumed.hash)
-        assertEquals(original.chunkCount, resumed.chunkCount)
-    }
-}
-
-class AgentTextStreamStartTest {
-    @Test
-    fun readsTheAnchorTags() {
-        val tags =
-            AgentTextStreamStart.tags(
-                streamId = ByteArray(32) { 0x5a }.toHexKey(),
-                brokerCandidates = listOf("https://broker.example:4443", "https://alt.example:4443"),
-            )
-        val start = assertNotNull(AgentTextStreamStart.fromTags(AgentTextStreamStart.KIND, tags))
-
-        assertTrue(start.isQuicRoute)
-        assertEquals(2, start.brokerCandidates.size)
-        assertEquals(ByteArray(32) { 0x5a }.toHexKey(), start.streamId)
-    }
-
-    @Test
-    fun defaultsAMissingRouteToQuicButNeverAMissingStreamId() {
-        assertTrue(
-            assertNotNull(
-                AgentTextStreamStart.fromTags(AgentTextStreamStart.KIND, arrayOf(arrayOf("stream", "ab"))),
-            ).isQuicRoute,
-        )
-        assertNull(AgentTextStreamStart.fromTags(AgentTextStreamStart.KIND, arrayOf(arrayOf("route", "quic"))))
-        assertNull(AgentTextStreamStart.fromTags(9, arrayOf(arrayOf("stream", "ab"))))
-    }
-
-    @Test
-    fun readsTheFinalTranscriptTags() {
-        val tags = AgentTextStreamFinal.tags("aa", "bb", 12)
-        val final = assertNotNull(AgentTextStreamFinal.fromTags(tags))
-        assertEquals("aa", final.streamId)
-        assertEquals("bb", final.transcriptHash)
-        assertEquals(12, final.chunkCount)
-        assertNull(AgentTextStreamFinal.fromTags(arrayOf(arrayOf("stream", "aa"))))
+        // An ordinary kind 9, and these tag names on another kind, are fine.
+        AgentTextStreamRetirement.requireNotRetired(9, arrayOf(arrayOf("p", "00")))
+        AgentTextStreamRetirement.requireNotRetired(7, arrayOf(arrayOf("stream", "00")))
     }
 }

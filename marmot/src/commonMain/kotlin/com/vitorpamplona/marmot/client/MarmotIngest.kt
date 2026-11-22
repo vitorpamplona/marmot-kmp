@@ -23,6 +23,7 @@ package com.vitorpamplona.marmot.client
 import com.vitorpamplona.marmot.GroupEventResult
 import com.vitorpamplona.marmot.MarmotInboundProcessor
 import com.vitorpamplona.marmot.WelcomeResult
+import com.vitorpamplona.marmot.appComponents.agentTextStream.AgentTextStreamRetirement
 import com.vitorpamplona.quartz.marmot.mip02Welcome.WelcomeEvent
 import com.vitorpamplona.quartz.marmot.mip03GroupMessages.GroupEvent
 import com.vitorpamplona.quartz.nip01Core.core.Event
@@ -205,14 +206,23 @@ private suspend fun MarmotManager.joinFromWelcome(welcome: WelcomeEvent): Marmot
 
 private suspend fun MarmotManager.ingestGroupEvent(ge: GroupEvent): MarmotIngestResult =
     when (val result = processGroupEvent(ge)) {
+        // An older client's kind-1200 stream start. The live preview it
+        // announced is retired: it is not displayed, and its endpoint
+        // candidates are never contacted (`agent-text-stream-quic-v1.md`,
+        // "Receiving from older clients"). A kind 9 carrying stream tags is
+        // not caught here: it is an ordinary chat message.
         is GroupEventResult.ApplicationMessage -> {
-            // MLS ratchets once we decrypt; future reads of the same ciphertext
-            // would fail — persist the plaintext now so restarts/replays see it.
-            persistDecryptedMessage(result.groupId, result.innerEventJson, result.epoch)
-            // Traffic is the natural clock for expiry: a group that is being
-            // read is a group whose expired messages should already be gone.
-            pruneExpiredMessages(result.groupId)
-            MarmotIngestResult.Message(result)
+            if (isRetiredStreamStart(result.innerEventJson)) {
+                MarmotIngestResult.Ignored("retired agent text stream start")
+            } else {
+                // MLS ratchets once we decrypt; future reads of the same ciphertext
+                // would fail — persist the plaintext now so restarts/replays see it.
+                persistDecryptedMessage(result.groupId, result.innerEventJson, result.epoch)
+                // Traffic is the natural clock for expiry: a group that is being
+                // read is a group whose expired messages should already be gone.
+                pruneExpiredMessages(result.groupId)
+                MarmotIngestResult.Message(result)
+            }
         }
 
         is GroupEventResult.CommitProcessed -> {
@@ -257,3 +267,5 @@ private suspend fun MarmotManager.ingestGroupEvent(ge: GroupEvent): MarmotIngest
             MarmotIngestResult.Failure(result.message, result.cause)
         }
     }
+
+private fun isRetiredStreamStart(innerEventJson: String): Boolean = Event.fromJsonOrNull(innerEventJson)?.kind?.let(AgentTextStreamRetirement::isStreamStart) == true

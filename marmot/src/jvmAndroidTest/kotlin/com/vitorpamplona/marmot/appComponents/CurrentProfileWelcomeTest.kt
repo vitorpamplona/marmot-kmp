@@ -28,7 +28,6 @@ import com.vitorpamplona.marmot.appComponents.agentTextStream.AgentTextStreamQui
 import com.vitorpamplona.marmot.appComponents.agentTextStream.AgentTextStreamRoles
 import com.vitorpamplona.marmot.groups.MarmotCapabilities
 import com.vitorpamplona.marmot.groups.MarmotGroupPolicy
-import com.vitorpamplona.marmot.groups.agentTextStreamSecret
 import com.vitorpamplona.marmot.groups.currentGroupState
 import com.vitorpamplona.marmot.groups.currentMarmotData
 import com.vitorpamplona.marmot.groups.currentNostrGroupId
@@ -63,14 +62,29 @@ class CurrentProfileWelcomeTest {
 
     private val nostrGroupId = ByteArray(32) { 0x4d }
 
-    private fun aGroup(agentTextStream: AgentTextStreamQuicPolicyV1? = null) =
+    private fun aGroup() =
         runBlocking {
             CurrentProfileGroupFactory.createGroup(
                 signer = signer(0x11),
                 nostrGroupId = nostrGroupId,
                 relays = listOf("wss://relay.example"),
                 profile = GroupProfileV1("Routing", ""),
-                agentTextStream = agentTextStream,
+            )
+        }
+
+    /**
+     * A group as clients created them before the agent text stream's
+     * retirement, carrying `0x8006` with [agentTextStream] as its policy. New
+     * groups never do, but these keep existing, so joining one must still work.
+     */
+    private fun aLegacyGroup(agentTextStream: AgentTextStreamQuicPolicyV1) =
+        runBlocking {
+            LegacyAgentTextStreamGroup.create(
+                signer = signer(0x11),
+                nostrGroupId = nostrGroupId,
+                relays = listOf("wss://relay.example"),
+                profile = GroupProfileV1("Routing", ""),
+                policy = agentTextStream,
             )
         }
 
@@ -105,18 +119,16 @@ class CurrentProfileWelcomeTest {
      * refused at join — joining anyway lands us in a group where peers reject
      * every commit we make.
      *
-     * The gate is tested against a deliberately reduced leaf rather than
-     * against our own KeyPackage, because our own now advertises all three
-     * defined roles (see [aJoinerFillsEveryRoleTheProfileDefines]) and so
-     * cannot fail this check. Testing "we refuse what we cannot fill" through
-     * our own capability set would silently stop testing anything the moment
-     * that set changed — which is exactly what happened here.
+     * The gate is tested against a deliberately built leaf rather than
+     * against our own KeyPackage. Testing "we refuse what we cannot fill"
+     * through our own capability set would silently stop testing anything the
+     * moment that set changed — which is exactly what happened here.
      */
     @Test
     fun aJoinerRefusesAGroupWhoseStreamRolesItsLeafDoesNotAdvertise() =
         runBlocking<Unit> {
             val group =
-                aGroup(
+                aLegacyGroup(
                     AgentTextStreamQuicPolicyV1(
                         requiredMemberRoles = AgentTextStreamRolesFixture.RECEIVE_AND_SEND,
                         allowedMemberRoles = AgentTextStreamRolesFixture.RECEIVE_AND_SEND,
@@ -137,15 +149,14 @@ class CurrentProfileWelcomeTest {
         }
 
     /**
-     * Our published leaf advertises `receive`, `send` AND `fanout` — the same
-     * set MDK puts on every KeyPackage — so a group that requires any of them
-     * admits us.
+     * A leaf advertising `receive`, `send` AND `fanout`, as older clients'
+     * KeyPackages did, fills a group that requires all three.
      */
     @Test
     fun aLeafAdvertisingEveryRoleFillsAGroupThatRequiresThem() =
         runBlocking<Unit> {
             val group =
-                aGroup(
+                aLegacyGroup(
                     AgentTextStreamQuicPolicyV1(
                         requiredMemberRoles = AgentTextStreamRoles.MASK,
                         allowedMemberRoles = AgentTextStreamRoles.MASK,
@@ -163,20 +174,20 @@ class CurrentProfileWelcomeTest {
         }
 
     /**
-     * Our published KeyPackage satisfies the policy the reference client puts
-     * on EVERY group it creates.
+     * Our published KeyPackage satisfies the policy clients put on every
+     * group they created before the retirement.
      *
-     * `userToAgentDefault()` is not a hypothetical: `create_group` in the
-     * reference installs exactly it, requiring `receive` of every invitee, and
-     * refuses a KeyPackage that does not advertise `0xF2D1`. So this is the
-     * assertion that decides whether an Amethyst user can be invited into a
-     * group started by that client at all — it failed for real once, when the
-     * role was dropped from the default leaf.
+     * `userToAgentDefault()` is not a hypothetical: MDK's `create_group`
+     * installed exactly it until 0.19.0, requiring `receive` of every invitee,
+     * and refuses a KeyPackage that does not advertise `0xF2D1`. So this is the
+     * assertion that decides whether an Amethyst user can be invited into such
+     * a group at all — it failed for real once, when the role was dropped from
+     * the default leaf.
      */
     @Test
     fun ourDefaultLeafIsAdmittedByTheReferenceStreamPolicy() =
         runBlocking<Unit> {
-            val group = aGroup(AgentTextStreamQuicPolicyV1.userToAgentDefault())
+            val group = aLegacyGroup(AgentTextStreamQuicPolicyV1.userToAgentDefault())
             val invitee = CurrentProfileGroupFactory.createKeyPackage(signer(0x77))
 
             assertTrue(
@@ -194,16 +205,15 @@ class CurrentProfileWelcomeTest {
     /**
      * Where we stop: a group requiring `send` refuses our default leaf.
      *
-     * Advertising `receive` and not `send` is a deliberate line — we can be
-     * shown a preview, we do not originate one — and the refusal is its cost.
-     * Asserted rather than discovered, so that widening the default is a
-     * decision someone takes on purpose.
+     * `send` and `fanout` are retired roles that a client SHOULD stop
+     * advertising, and no group is known to require either; the refusal is the
+     * cost. Asserted rather than discovered.
      */
     @Test
     fun ourDefaultLeafIsRefusedByAGroupThatRequiresSend() =
         runBlocking<Unit> {
             val group =
-                aGroup(
+                aLegacyGroup(
                     AgentTextStreamQuicPolicyV1(
                         requiredMemberRoles = AgentTextStreamRoles.RECEIVE or AgentTextStreamRoles.SEND,
                         allowedMemberRoles = AgentTextStreamRoles.MASK,
@@ -291,7 +301,7 @@ class CurrentProfileWelcomeTest {
     @Test
     fun aLeafAdvertisingReceiveJoinsAGroupRequiringOnlyThatRole() =
         runBlocking<Unit> {
-            val group = aGroup(AgentTextStreamQuicPolicyV1.userToAgentDefault())
+            val group = aLegacyGroup(AgentTextStreamQuicPolicyV1.userToAgentDefault())
             val invitee = receiveOnlyKeyPackage(signer(0x55))
             group.proposeAdd(invitee.keyPackage.toTlsBytes())
             val welcome = assertNotNull(group.commit().welcomeBytes)
@@ -301,8 +311,7 @@ class CurrentProfileWelcomeTest {
                 AgentTextStreamQuicPolicyV1.userToAgentDefault(),
                 joined.currentGroupState().agentTextStream,
             )
-            // Both sides derive the same per-epoch stream secret.
-            assertEquals(group.agentTextStreamSecret().toHexKey(), joined.agentTextStreamSecret().toHexKey())
+            assertTrue(joined.currentGroupState().requires(AgentTextStreamQuicPolicyV1.COMPONENT_ID))
         }
 }
 
