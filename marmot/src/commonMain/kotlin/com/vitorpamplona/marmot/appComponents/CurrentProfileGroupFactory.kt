@@ -252,7 +252,7 @@ object CurrentProfileGroupFactory {
         ciphersuite: MlsCiphersuite = MlsCiphersuite.DEFAULT,
         /** The component ids the creator's leaf advertises. */
         supportedComponents: List<Int> = SUPPORTED_COMPONENTS,
-    ): MlsGroup = createGroup(signer, nostrGroupId, relays, profile, additionalAdmins, retention, encryptedMedia, agentTextStream, ciphersuite, supportedComponents) { emptyList() }
+    ): MlsGroup = createGroup(signer, nostrGroupId, relays, profile, additionalAdmins, retention, encryptedMedia, ciphersuite, supportedComponents) { emptyList() }
 
     /** [createGroup] whose creator leaf also carries [leafComponents] of its signature key (a device tag). */
     suspend fun createGroup(
@@ -263,7 +263,6 @@ object CurrentProfileGroupFactory {
         additionalAdmins: List<ByteArray>,
         retention: MessageRetentionV1?,
         encryptedMedia: EncryptedMediaPolicyV2?,
-        agentTextStream: AgentTextStreamQuicPolicyV1?,
         ciphersuite: MlsCiphersuite,
         supportedComponents: List<Int>,
         leafComponents: (signatureKey: ByteArray) -> List<ComponentData>,

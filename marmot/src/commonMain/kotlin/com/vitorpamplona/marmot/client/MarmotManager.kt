@@ -1413,7 +1413,6 @@ class MarmotManager(
                 additionalAdmins = additionalAdmins,
                 retention = retention,
                 encryptedMedia = null,
-                agentTextStream = null,
                 ciphersuite = MlsCiphersuite.DEFAULT,
                 supportedComponents = supportedComponents,
                 leafComponents = { key -> deviceGroups?.ownTagComponents(key).orEmpty() },
