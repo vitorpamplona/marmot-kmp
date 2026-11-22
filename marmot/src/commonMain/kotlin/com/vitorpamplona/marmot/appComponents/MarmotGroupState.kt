@@ -66,6 +66,10 @@ data class MarmotGroupState(
      */
     val encryptedMedia: EncryptedMediaPolicyV2?,
     val lifecycle: GroupLifecycleV1?,
+    /**
+     * The retired agent text stream policy (`0x8006`), in a group created
+     * before its retirement. Read so it is validated; nothing acts on it.
+     */
     val agentTextStream: AgentTextStreamQuicPolicyV1?,
 ) {
     /**
@@ -142,6 +146,9 @@ data class MarmotGroupState(
          * [requiredComponents] always gains `0x8009`: every current-profile
          * GroupContext must require the account identity proof even though its
          * data is leaf-only and never appears in this dictionary.
+         *
+         * It cannot carry the retired agent text stream component `0x8006`:
+         * creation MUST NOT include it (`protocol-core/group-setup.md`).
          */
         fun buildDictionary(
             adminPolicy: AdminPolicyV1,
@@ -152,11 +159,13 @@ data class MarmotGroupState(
             retention: MessageRetentionV1? = null,
             encryptedMedia: EncryptedMediaPolicyV2? = null,
             lifecycle: GroupLifecycleV1? = GroupLifecycleV1.ACTIVE,
-            agentTextStream: AgentTextStreamQuicPolicyV1? = null,
             extraRequiredComponents: Collection<Int> = emptyList(),
         ): AppDataDictionary {
             var dictionary = AppDataDictionary.EMPTY
 
+            require(AgentTextStreamQuicPolicyV1.COMPONENT_ID !in extraRequiredComponents) {
+                "a new group cannot require the retired agent text stream component 0x8006"
+            }
             val required = mutableSetOf(AppComponentIds.ACCOUNT_IDENTITY_PROOF_V2, AdminPolicyV1.COMPONENT_ID)
             required.addAll(extraRequiredComponents)
 
@@ -188,10 +197,6 @@ data class MarmotGroupState(
             lifecycle?.let {
                 required.add(GroupLifecycleV1.COMPONENT_ID)
                 dictionary = dictionary.with(GroupLifecycleV1.COMPONENT_ID, it.encode())
-            }
-            agentTextStream?.let {
-                required.add(AgentTextStreamQuicPolicyV1.COMPONENT_ID)
-                dictionary = dictionary.with(AgentTextStreamQuicPolicyV1.COMPONENT_ID, it.encode())
             }
 
             return dictionary.with(ComponentsList.APP_COMPONENTS_ID, ComponentsList.encode(required))

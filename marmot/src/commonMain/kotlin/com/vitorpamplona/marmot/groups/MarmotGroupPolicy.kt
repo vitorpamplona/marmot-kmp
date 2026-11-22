@@ -23,6 +23,7 @@ package com.vitorpamplona.marmot.groups
 import com.vitorpamplona.marmot.appComponents.AccountDevicesV1
 import com.vitorpamplona.marmot.appComponents.AdminPolicyV1
 import com.vitorpamplona.marmot.appComponents.AppComponentIds
+import com.vitorpamplona.marmot.appComponents.DeviceRosterRules
 import com.vitorpamplona.marmot.appComponents.MarmotProtocolProfile
 import com.vitorpamplona.marmot.appComponents.accountIdentityProof.AccountIdentityProofV2
 import com.vitorpamplona.marmot.appComponents.agentTextStream.AgentTextStreamQuicPolicyV1
@@ -90,6 +91,14 @@ object MarmotGroupPolicy : MlsGroupPolicy {
     override val commitExporter: MlsExporterLabel
         get() = MlsExporterLabel("marmot", "group-event".encodeToByteArray(), 32)
 
+    /** The device roster's diff (`device-roster-v1.md` "Update"); every other component replaces whole. */
+    override fun resolveAppDataUpdate(
+        parentExtensions: List<Extension>,
+        componentId: Int,
+        parentData: ByteArray?,
+        update: ByteArray,
+    ): ByteArray = DeviceRosterRules.resolveUpdate(parentExtensions, componentId, parentData, update)
+
     override fun authorizeCommit(
         group: GroupView,
         proposals: List<PendingProposal>,
@@ -112,7 +121,9 @@ object MarmotGroupPolicy : MlsGroupPolicy {
      *   introduces, in a current-profile group, and that the group stays on
      *   that profile;
      * - the admin–leaf coupling of `app-components/admin-policy-v1.md`: every
-     *   admin the resulting state names still holds a leaf.
+     *   admin the resulting state names still holds a leaf;
+     * - the retired agent text stream's `0x8006` state, when the group still
+     *   carries it, is valid (`agent-text-stream-quic-v1.md`, "Validation").
      */
     override fun validateResultingState(
         parentExtensions: List<Extension>,
@@ -121,8 +132,23 @@ object MarmotGroupPolicy : MlsGroupPolicy {
         resulting: GroupView,
     ) {
         AccountDevicesV1.validateResultingState(parentExtensions, proposals, resulting)
+        DeviceRosterRules.validateResultingState(parentExtensions, resulting)
         validateIntroducedLeafProofs(parentExtensions, proposals, committerLeafIndex, resulting)
         validateAdminLeafCoupling(parentExtensions, resulting)
+        validateAgentTextStreamState(resulting)
+    }
+
+    /**
+     * `agent-text-stream-quic-v1.md`, "What clients keep doing": a client that
+     * advertises `0x8006` validates its state on every Commit, so an older
+     * client's update is accepted only when valid. MDK checks the same bytes on
+     * every update it receives. The member-role half of "Validation" is checked
+     * at join ([requireAgentTextStreamRoles]); like MDK, not on received Commits.
+     */
+    private fun validateAgentTextStreamState(resulting: GroupView) {
+        AppDataDictionary.fromExtensionsOrEmpty(resulting.extensions)[AgentTextStreamQuicPolicyV1.COMPONENT_ID]?.let {
+            AgentTextStreamQuicPolicyV1.decode(it)
+        }
     }
 
     /**
@@ -266,6 +292,22 @@ object MarmotGroupPolicy : MlsGroupPolicy {
         groupInfoExtensions: List<Extension>,
     ) {
         validateJoin(group)
+        // `features/device-group.md` "Trust": a group that requires 0x800e is joined only through the
+        // Welcome a confirmed link names, which [DeviceGroupLinkJoinPolicy] checks instead.
+        check(!DeviceRosterRules.isRequired(group.extensions)) { "A device group is joined only through the Welcome of a confirmed link" }
+        validateJoinedChecks(group, groupInfoSigner, groupInfoExtensions)
+    }
+
+    /**
+     * Every join check but the device-group refusal: shared with the link join, which admits a
+     * device group under its own checks.
+     */
+    internal fun validateJoinedChecks(
+        group: GroupView,
+        groupInfoSigner: Int,
+        groupInfoExtensions: List<Extension>,
+    ) {
+        DeviceRosterRules.validateJoinedState(group)
         AccountDevicesV1.validateJoinedState(group, groupInfoExtensions)
         if (MarmotProtocolProfile.isCurrent(group.extensions)) {
             for (i in 0 until group.leafCount) {
@@ -444,6 +486,10 @@ object MarmotGroupPolicy : MlsGroupPolicy {
     /**
      * Enforce the `0x8006` component's `required_member_roles` mask over
      * the joining tree.
+     *
+     * The component is retired but still supported in the groups that carry
+     * it, and decoding it here also validates its state
+     * ([AgentTextStreamQuicPolicyV1.decode]).
      *
      * A group carrying the agent-text-stream component requires each named
      * role as an MLS leaf capability (`0xF2D1` receive, `0xF2D2` send,

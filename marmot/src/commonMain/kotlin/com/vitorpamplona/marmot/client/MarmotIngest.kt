@@ -23,6 +23,8 @@ package com.vitorpamplona.marmot.client
 import com.vitorpamplona.marmot.GroupEventResult
 import com.vitorpamplona.marmot.MarmotInboundProcessor
 import com.vitorpamplona.marmot.WelcomeResult
+import com.vitorpamplona.marmot.appComponents.agentTextStream.AgentTextStreamRetirement
+import com.vitorpamplona.marmot.features.deviceGroup.MarmotDeviceGroupKinds
 import com.vitorpamplona.quartz.marmot.mip02Welcome.WelcomeEvent
 import com.vitorpamplona.quartz.marmot.mip03GroupMessages.GroupEvent
 import com.vitorpamplona.quartz.nip01Core.core.Event
@@ -30,6 +32,8 @@ import com.vitorpamplona.quartz.nip01Core.core.HexKey
 import com.vitorpamplona.quartz.nip59Giftwrap.wraps.GiftWrapEvent
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlin.io.encoding.Base64
+import kotlin.io.encoding.ExperimentalEncodingApi
 
 /**
  * Outcome of routing a single inbound Nostr event through the Marmot pipeline.
@@ -178,7 +182,24 @@ private suspend fun MarmotManager.ingestGiftWrapUncached(wrap: GiftWrapEvent): M
         MarmotIngestResult.Failure("giftwrap unwrap failed: ${e.message}", e)
     }
 
-private suspend fun MarmotManager.joinFromWelcome(welcome: WelcomeEvent): MarmotIngestResult =
+@OptIn(ExperimentalEncodingApi::class)
+private suspend fun MarmotManager.joinFromWelcome(welcome: WelcomeEvent): MarmotIngestResult {
+    // A Welcome for the KeyPackage a confirmed link reserved joins only as that link's
+    // (`device-group.md` "Joining"); any other is refused and leaves the KeyPackage for the real one.
+    deviceGroups?.let { dg ->
+        if (dg.isReservedForLink(welcome.keyPackageEventId())) {
+            return try {
+                MarmotIngestResult.JoinedGroup(dg.joinLinkWelcome(Base64.decode(welcome.welcomeBase64())), needsKeyPackageRotation = true)
+            } catch (e: Exception) {
+                currentCoroutineContext().ensureActive()
+                MarmotIngestResult.Failure("not the link's Welcome: ${e.message}", e)
+            }
+        }
+    }
+    return joinFromOrdinaryWelcome(welcome)
+}
+
+private suspend fun MarmotManager.joinFromOrdinaryWelcome(welcome: WelcomeEvent): MarmotIngestResult =
     when (val result = processWelcome(welcome, welcome.nostrGroupId())) {
         is WelcomeResult.Joined -> {
             // Establish the baseline for this group's system rows without
@@ -203,16 +224,42 @@ private suspend fun MarmotManager.joinFromWelcome(welcome: WelcomeEvent): Marmot
         }
     }
 
-private suspend fun MarmotManager.ingestGroupEvent(ge: GroupEvent): MarmotIngestResult =
+private suspend fun MarmotManager.ingestGroupEvent(ge: GroupEvent): MarmotIngestResult {
+    val result = ingestGroupEventUnrefreshed(ge)
+    // A device-group Commit, applied directly or by a convergence pass, may change the roster.
+    deviceGroups?.refresh()
+    return result
+}
+
+private suspend fun MarmotManager.ingestGroupEventUnrefreshed(ge: GroupEvent): MarmotIngestResult =
     when (val result = processGroupEvent(ge)) {
+        // An older client's kind-1200 stream start. The live preview it
+        // announced is retired: it is not displayed, and its endpoint
+        // candidates are never contacted (`agent-text-stream-quic-v1.md`,
+        // "Receiving from older clients"). A kind 9 carrying stream tags is
+        // not caught here: it is an ordinary chat message.
         is GroupEventResult.ApplicationMessage -> {
-            // MLS ratchets once we decrypt; future reads of the same ciphertext
-            // would fail — persist the plaintext now so restarts/replays see it.
-            persistDecryptedMessage(result.groupId, result.innerEventJson, result.epoch)
-            // Traffic is the natural clock for expiry: a group that is being
-            // read is a group whose expired messages should already be gone.
-            pruneExpiredMessages(result.groupId)
-            MarmotIngestResult.Message(result)
+            val deviceGroups = deviceGroups
+            if (deviceGroups != null && deviceGroups.isTrustedDeviceGroup(result.groupId)) {
+                // The device group is not a chat: its traffic goes to the device-group flows and is
+                // never stored or surfaced as a message (`device-group.md` "Keeping it out of sight").
+                deviceGroups.onAppEvent(result.groupId, result.innerEventJson, result.senderLeafIndex, result.epoch)
+                MarmotIngestResult.Ignored("device-group traffic")
+            } else if (isRetiredStreamStart(result.innerEventJson)) {
+                MarmotIngestResult.Ignored("retired agent text stream start")
+            } else if (isDeviceGroupTraffic(result.innerEventJson)) {
+                // `features/device-group.md`: these kinds are read only in the device group the device
+                // trusts and ignored in every other group, so no chat projects one.
+                MarmotIngestResult.Ignored("device-group kind outside a trusted device group")
+            } else {
+                // MLS ratchets once we decrypt; future reads of the same ciphertext
+                // would fail — persist the plaintext now so restarts/replays see it.
+                persistDecryptedMessage(result.groupId, result.innerEventJson, result.epoch)
+                // Traffic is the natural clock for expiry: a group that is being
+                // read is a group whose expired messages should already be gone.
+                pruneExpiredMessages(result.groupId)
+                MarmotIngestResult.Message(result)
+            }
         }
 
         is GroupEventResult.CommitProcessed -> {
@@ -257,3 +304,8 @@ private suspend fun MarmotManager.ingestGroupEvent(ge: GroupEvent): MarmotIngest
             MarmotIngestResult.Failure(result.message, result.cause)
         }
     }
+
+private fun isRetiredStreamStart(innerEventJson: String): Boolean = Event.fromJsonOrNull(innerEventJson)?.kind?.let(AgentTextStreamRetirement::isStreamStart) == true
+
+/** Whether a decrypted inner event is a device-group app event (`MarmotDeviceGroupKinds`). */
+private fun isDeviceGroupTraffic(innerEventJson: String): Boolean = Event.fromJsonOrNull(innerEventJson)?.let { MarmotDeviceGroupKinds.isDeviceGroupKind(it.kind) } ?: false

@@ -41,7 +41,6 @@ magpie {
     group("com.vitorpamplona.schnorr256k1")
     group("com.vitorpamplona.negentropy")
     group("com.vitorpamplona.mls")
-    group("com.vitorpamplona.quic")
 }
 ```
 
@@ -63,17 +62,9 @@ marmot.restoreAll()
 The store interfaces live in `com.vitorpamplona.marmot.groups` and
 `com.vitorpamplona.marmot.mip00KeyPackages`; in-memory versions exist for tests.
 
-Agent text stream previews over raw QUIC (`transports/quic.md`) are a second artifact, for the JVM
-and Android only, on [quic-kmp](https://github.com/vitorpamplona/quic-kmp):
-
-```kotlin
-dependencies {
-    implementation("com.vitorpamplona.marmot:marmot-quic:<version>")
-}
-```
-
-See [marmot-quic/README.md](marmot-quic/README.md). [marmot-bench](marmot-bench/README.md) measures
-this library against MDK, operation for operation.
+The agent text stream over raw QUIC (`marmot-quic`, kind 1200 stream starts) is retired, as the
+spec and MDK 0.19.0 retired it: see [the plan](marmot/plans/2026-11-22-retire-agent-text-stream.md).
+[marmot-bench](marmot-bench/README.md) measures this library against MDK, operation for operation.
 
 ## Developer Setup
 

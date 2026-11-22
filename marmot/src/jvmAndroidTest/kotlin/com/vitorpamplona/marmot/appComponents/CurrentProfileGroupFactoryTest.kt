@@ -22,6 +22,7 @@ package com.vitorpamplona.marmot.appComponents
 
 import com.vitorpamplona.marmot.TestResourceLoader
 import com.vitorpamplona.marmot.appComponents.accountIdentityProof.AccountIdentityProofV2
+import com.vitorpamplona.marmot.appComponents.agentTextStream.AgentTextStreamQuicPolicyV1
 import com.vitorpamplona.marmot.appComponents.agentTextStream.AgentTextStreamRoles
 import com.vitorpamplona.marmot.groups.currentAdminIdentities
 import com.vitorpamplona.marmot.groups.currentGroupState
@@ -45,6 +46,8 @@ import kotlinx.serialization.Serializable
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -117,14 +120,13 @@ class CurrentProfileGroupFactoryTest {
             // hedge: a group refuses to add a leaf that does not advertise
             // what it requires. A legacy group REQUIRES `0xF2EE`, so without
             // it a current-profile KeyPackage would be un-addable to every
-            // legacy group that already exists. And the reference client puts
-            // `0x8006` with `required_member_roles = receive` into EVERY group
-            // it creates, so without `0xF2D1` an Amethyst user cannot be
-            // invited into one at all.
+            // legacy group that already exists. And clients put `0x8006` with
+            // `required_member_roles = receive` into every group they created
+            // before the agent text stream's retirement, so without `0xF2D1`
+            // an Amethyst user cannot be invited into one at all.
             //
-            // `send` and `fanout` stay absent: we can be shown a preview, we
-            // do not originate one, and a capability is a standing promise to
-            // every peer that reads this KeyPackage.
+            // `send` and `fanout` stay absent: they are retired roles a client
+            // SHOULD stop advertising (`agent-text-stream-quic-v1.md`).
             assertEquals(
                 listOf(
                     AppDataDictionary.EXTENSION_TYPE,
@@ -219,6 +221,49 @@ class CurrentProfileGroupFactoryTest {
             // GroupContext dictionary.
             assertTrue(state.requires(AppComponentIds.ACCOUNT_IDENTITY_PROOF_V2))
             assertNull(dictionary[AppComponentIds.ACCOUNT_IDENTITY_PROOF_V2])
+        }
+
+    /** `protocol-core/group-setup.md`: creation MUST NOT include the retired `0x8006`. */
+    @Test
+    fun aNewGroupDoesNotCarryTheRetiredAgentTextStream() =
+        runBlocking<Unit> {
+            val group =
+                CurrentProfileGroupFactory.createGroup(
+                    signer = signer,
+                    nostrGroupId = ByteArray(32) { 0x5b },
+                    relays = listOf("wss://relay.example"),
+                    profile = GroupProfileV1("no streams", ""),
+                )
+            val state = group.currentGroupState()
+            assertFalse(state.requires(AgentTextStreamQuicPolicyV1.COMPONENT_ID))
+            assertNull(group.appDataDictionary()[AgentTextStreamQuicPolicyV1.COMPONENT_ID])
+            assertNull(state.agentTextStream)
+
+            // Nor can a caller ask the dictionary builder to require it.
+            assertFailsWith<IllegalArgumentException> {
+                MarmotGroupState.buildDictionary(
+                    adminPolicy = AdminPolicyV1.of(listOf(signer.pubKey.hexToByteArray())),
+                    extraRequiredComponents = listOf(AgentTextStreamQuicPolicyV1.COMPONENT_ID),
+                )
+            }
+        }
+
+    /**
+     * "What clients keep doing": a KeyPackage still advertises support for
+     * `0x8006` and the `receive` role, so groups created before the retirement
+     * can keep adding us; it no longer advertises the retired `send` or `fanout`.
+     */
+    @Test
+    fun aKeyPackageAdvertises0x8006AndReceiveButNotSendOrFanout() =
+        runBlocking<Unit> {
+            val leaf = CurrentProfileGroupFactory.createKeyPackage(signer).keyPackage.leafNode
+            val supported = ComponentsList.supportedOrRequired(assertNotNull(AppDataDictionary.fromExtensions(leaf.extensions)))
+            assertTrue(AgentTextStreamQuicPolicyV1.COMPONENT_ID in supported, "0x8006 support stays advertised, got $supported")
+
+            val extensions = leaf.capabilities.extensions
+            assertTrue(AgentTextStreamRoles.RECEIVE_CAPABILITY in extensions)
+            assertFalse(AgentTextStreamRoles.SEND_CAPABILITY in extensions)
+            assertFalse(AgentTextStreamRoles.FANOUT_CAPABILITY in extensions)
         }
 
     @Test

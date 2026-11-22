@@ -14,14 +14,14 @@ on:
         description: 'The release tag to publish, e.g. v2.3.0'
         required: true
       modules:
-        description: 'The modules to publish, separated by spaces (marmot, marmot-quic)'
+        description: 'The modules to publish, separated by spaces (marmot)'
         required: true
-        default: 'marmot marmot-quic'
+        default: 'marmot'
 
 # The tag every job checks out and publishes: the pushed tag, or the one a manual run names.
 env:
   RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
-  RELEASE_MODULES: ${{ inputs.modules || 'marmot marmot-quic' }}
+  RELEASE_MODULES: ${{ inputs.modules || 'marmot' }}
 
 jobs:
   # A release must depend only on published artifacts: its POM names the Quartz and mls-kmp
@@ -43,8 +43,8 @@ jobs:
           fi
           for module in $RELEASE_MODULES; do
             case "$module" in
-              marmot|marmot-quic) ;;
-              *) echo "::error::Unknown module $module (marmot, marmot-quic)."; exit 1 ;;
+              marmot) ;;
+              *) echo "::error::Unknown module $module (marmot)."; exit 1 ;;
             esac
           done
 
@@ -144,7 +144,7 @@ jobs:
             :marmot:compileAppleMainKotlinMetadata
 
       - name: Check
-        run: ./gradlew :marmot:jvmTest :marmot:linuxX64Test :marmot-quic:jvmTest
+        run: ./gradlew :marmot:jvmTest :marmot:linuxX64Test
 
       # Tag v1.2.3 publishes version 1.2.3.
       - name: Set version for tag

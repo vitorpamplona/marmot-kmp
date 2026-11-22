@@ -72,16 +72,12 @@ interface MarmotMessageStore {
     /**
      * Remember which MLS epoch delivered [innerEventId].
      *
-     * Almost nothing needs this — the inner event is the message. Agent text
-     * streams do: their record key context binds `mls_epoch`, so a receiver
-     * that derives keys for a stream must use the epoch that carried the
-     * stream's kind:1200 anchor, not whatever epoch the group has reached by
-     * the time someone watches. A commit landing in between would otherwise
-     * silently produce a different key and an empty preview.
+     * An attachment's media key comes from the epoch of the message that
+     * carries it, so after a restart this is how a message finds its epoch
+     * again ([recordMediaSecret]).
      *
-     * Optional: a store that does not keep it simply cannot render a live
-     * preview for a stream anchored in an older epoch, which is a degraded
-     * feature and not a broken group.
+     * Optional: a store that does not keep it falls back to the group's
+     * current epoch, which opens only media the group can still decrypt.
      */
     suspend fun recordEpoch(
         nostrGroupId: String,

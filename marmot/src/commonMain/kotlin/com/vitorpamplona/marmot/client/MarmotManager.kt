@@ -43,11 +43,10 @@ import com.vitorpamplona.marmot.appComponents.GroupProfileV1
 import com.vitorpamplona.marmot.appComponents.MarmotGroupState
 import com.vitorpamplona.marmot.appComponents.MarmotProtocolProfile
 import com.vitorpamplona.marmot.appComponents.MessageRetentionV1
-import com.vitorpamplona.marmot.appComponents.agentTextStream.AgentTextStreamCrypto
-import com.vitorpamplona.marmot.appComponents.agentTextStream.AgentTextStreamFinal
-import com.vitorpamplona.marmot.appComponents.agentTextStream.AgentTextStreamKeyContextV1
-import com.vitorpamplona.marmot.appComponents.agentTextStream.AgentTextStreamStart
 import com.vitorpamplona.marmot.client.MarmotGroupImage
+import com.vitorpamplona.marmot.features.deviceGroup.MarmotDeviceGroupConfig
+import com.vitorpamplona.marmot.features.deviceGroup.MarmotDeviceGroupKinds
+import com.vitorpamplona.marmot.features.deviceGroup.MarmotDeviceGroupManager
 import com.vitorpamplona.marmot.foundation.appEvents.MarmotAdminDeletion
 import com.vitorpamplona.marmot.foundation.appEvents.MarmotAppEvent
 import com.vitorpamplona.marmot.foundation.appEvents.MarmotGroupSnapshot
@@ -61,7 +60,6 @@ import com.vitorpamplona.marmot.groups.MarmotGroupPolicy
 import com.vitorpamplona.marmot.groups.MarmotMessageStore
 import com.vitorpamplona.marmot.groups.MlsGroupManager
 import com.vitorpamplona.marmot.groups.MlsGroupStateStore
-import com.vitorpamplona.marmot.groups.agentTextStreamSecret
 import com.vitorpamplona.marmot.groups.currentGroupState
 import com.vitorpamplona.marmot.groups.currentMarmotData
 import com.vitorpamplona.marmot.mip00KeyPackages.KeyPackageBundleStore
@@ -69,6 +67,7 @@ import com.vitorpamplona.marmot.mip00KeyPackages.KeyPackageRotationManager
 import com.vitorpamplona.marmot.mip00KeyPackages.KeyPackageUtils
 import com.vitorpamplona.marmot.mip00KeyPackages.buildCurrentProfileFrom
 import com.vitorpamplona.marmot.mip01Groups.MarmotGroupData
+import com.vitorpamplona.marmot.mip01Groups.MlsCiphersuite
 import com.vitorpamplona.marmot.mip03GroupMessages.GroupEventEncryption
 import com.vitorpamplona.marmot.protocolCore.GroupLifecycleState
 import com.vitorpamplona.marmot.protocolCore.LocalOutboundGate
@@ -79,6 +78,7 @@ import com.vitorpamplona.marmot.protocolCore.PublishOutcome
 import com.vitorpamplona.mls.components.ComponentsList
 import com.vitorpamplona.mls.group.MlsGroup
 import com.vitorpamplona.mls.messages.CommitResult
+import com.vitorpamplona.mls.messages.KeyPackageBundle
 import com.vitorpamplona.mls.messages.MlsKeyPackage
 import com.vitorpamplona.mls.tree.Credential
 import com.vitorpamplona.quartz.marmot.mip00KeyPackages.KeyPackageEvent
@@ -169,8 +169,33 @@ class MarmotManager(
      * KeyPackage it makes. Defaults to [CurrentProfileGroupFactory.SUPPORTED_COMPONENTS];
      * the conformance runner passes fewer to play an older client.
      */
-    val supportedComponents: List<Int> = CurrentProfileGroupFactory.SUPPORTED_COMPONENTS,
+    supportedComponents: List<Int> = CurrentProfileGroupFactory.SUPPORTED_COMPONENTS,
+    /**
+     * The device-group switch. Null (the default) keeps device groups off: no KeyPackage or leaf
+     * advertises `0x800e`/`0x800f`, and every device-group app event is ignored. A config turns
+     * them on: [deviceGroups] runs linking, private KeyPackages and sibling Welcomes, and every
+     * KeyPackage and leaf advertises both components and carries this device's tag once it can.
+     */
+    val deviceGroupConfig: MarmotDeviceGroupConfig? = null,
 ) {
+    /** The 2.4 constructor, kept so code compiled against it still links. */
+    @Deprecated("Use the constructor with deviceGroupConfig. Removed in 3.0.0.", level = DeprecationLevel.HIDDEN)
+    constructor(
+        signer: NostrSigner,
+        store: MlsGroupStateStore,
+        messageStore: MarmotMessageStore?,
+        keyPackageStore: KeyPackageBundleStore?,
+        publisher: MarmotPublisher,
+        publishObligationStore: MarmotPublishObligationStore?,
+        ingestDedupStore: MarmotIngestDedupStore?,
+        scope: CoroutineScope?,
+        supportedComponents: List<Int>,
+    ) : this(signer, store, messageStore, keyPackageStore, publisher, publishObligationStore, ingestDedupStore, scope, supportedComponents, null)
+
+    /** The component ids this client's leaves advertise: [deviceGroupConfig] adds `0x800e`/`0x800f`. */
+    val supportedComponents: List<Int> =
+        if (deviceGroupConfig == null) supportedComponents else (supportedComponents + CurrentProfileGroupFactory.DEVICE_GROUP_SUPPORTED_COMPONENTS).distinct()
+
     /** The 2.x constructor, kept so code compiled against it still links. */
     @Deprecated("Use the constructor with supportedComponents. Removed in 3.0.0.", level = DeprecationLevel.HIDDEN)
     constructor(
@@ -184,12 +209,15 @@ class MarmotManager(
         scope: CoroutineScope? = null,
     ) : this(signer, store, messageStore, keyPackageStore, publisher, publishObligationStore, ingestDedupStore, scope, CurrentProfileGroupFactory.SUPPORTED_COMPONENTS)
 
-    val groupManager = MlsGroupManager(store, supportedComponents)
-    val keyPackageRotationManager = KeyPackageRotationManager(keyPackageStore, supportedComponents)
+    val groupManager = MlsGroupManager(store, this.supportedComponents)
+    val keyPackageRotationManager = KeyPackageRotationManager(keyPackageStore, this.supportedComponents)
     val subscriptionManager = MarmotSubscriptionManager(signer.pubKey)
     val inboundProcessor = MarmotInboundProcessor(groupManager, keyPackageRotationManager)
     val outboundProcessor = MarmotOutboundProcessor(groupManager)
     val welcomeSender = MarmotWelcomeSender(signer)
+
+    /** Device groups, when [deviceGroupConfig] turns them on. Call its `start()` once at launch. */
+    val deviceGroups: MarmotDeviceGroupManager? = deviceGroupConfig?.let { MarmotDeviceGroupManager(this, it) }
 
     /**
      * Called for every kind:1210 row this client DERIVES, so a front end can
@@ -592,6 +620,7 @@ class MarmotManager(
             // survive every restart.
             publishGate.clearGate(result.nostrGroupId)
             subscriptionManager.subscribeGroup(result.nostrGroupId)
+            deviceGroups?.onChatAdmitted(result.nostrGroupId, founded = false)
             Log.d("MarmotManager") { "Joined group ${result.nostrGroupId}" }
         }
 
@@ -614,6 +643,11 @@ class MarmotManager(
         expectedEpoch: Long? = null,
     ): OutboundGroupEvent {
         requireOutboundAllowed(nostrGroupId, "send a message")
+        // Device-group app events go only to the account's own device group, which this client
+        // does not run yet; every receiver ignores one anywhere else (`features/device-group.md`).
+        require(!MarmotDeviceGroupKinds.isDeviceGroupKind(innerEvent.kind) || deviceGroups?.isTrustedDeviceGroup(nostrGroupId) == true) {
+            "kind ${innerEvent.kind} is sent only in this device's device group"
+        }
         return outboundProcessor.buildGroupEvent(nostrGroupId, innerEvent, expectedEpoch)
     }
 
@@ -741,117 +775,7 @@ class MarmotManager(
             )
     }
 
-    /**
-     * Build the hidden kind:1200 payload that anchors one agent text stream.
-     *
-     * The start payload is what makes a live preview renderable at all: its
-     * own Marmot app event id goes into [AgentTextStreamKeyContextV1], so a
-     * receiver can only derive record keys for a stream it has already seen
-     * announced inside the group. That is also why the anchor is an ordinary
-     * in-group payload rather than something the broker hands out — the broker
-     * relays ciphertext and learns nothing.
-     *
-     * The returned bundle's `innerEvent.id` IS the `start_event_id`; a caller
-     * needs it before it can derive the stream's crypto, which is why this
-     * returns the built payload instead of publishing and forgetting it.
-     *
-     * @param brokerCandidates `quic://host:port` endpoints a receiver may try,
-     *   in preference order. Zero is valid — the preview is then unavailable
-     *   and every member still gets the final message.
-     * @param parentEventId the prompt this stream answers, when there is one.
-     */
-    suspend fun buildAgentStreamStart(
-        nostrGroupId: HexKey,
-        streamId: HexKey,
-        brokerCandidates: List<String> = emptyList(),
-        parentEventId: HexKey? = null,
-        persistOwn: Boolean = true,
-    ): TextMessageBundle {
-        val template =
-            com.vitorpamplona.quartz.nip01Core.signers
-                .eventTemplate<Event>(kind = AgentTextStreamStart.KIND, description = "") {
-                    AgentTextStreamStart
-                        .tags(streamId, brokerCandidates, parentEventId = parentEventId)
-                        .forEach { addUnique(it) }
-                }
-        val innerEvent =
-            com.vitorpamplona.quartz.nip59Giftwrap.rumors.RumorAssembler
-                .assembleRumor<Event>(signer.pubKey, template)
-        // The epoch this went out at is the one the stream's key context binds,
-        // so remember it the same way an inbound anchor's epoch is remembered.
-        val epoch = currentEpoch(nostrGroupId)
-        val outbound = buildGroupMessage(nostrGroupId, innerEvent)
-        if (persistOwn) persistDecryptedMessage(nostrGroupId, innerEvent.toJson(), outbound.epoch ?: epoch)
-        return TextMessageBundle(outbound = outbound, innerEvent = innerEvent)
-    }
-
-    /**
-     * Build the durable kind:9 that closes an agent text stream out.
-     *
-     * This is the authoritative message. A receiver that rendered a preview
-     * compares its own fold against [transcriptHash] / [chunkCount]: agreement
-     * means it saw exactly the stream the publisher sent, disagreement means
-     * records were dropped, reordered or injected even though each one opened.
-     * A receiver that skipped the preview just reads this as normal chat.
-     */
-    suspend fun buildAgentStreamFinal(
-        nostrGroupId: HexKey,
-        streamId: HexKey,
-        transcriptHash: HexKey,
-        chunkCount: Long,
-        text: String,
-        persistOwn: Boolean = true,
-    ): TextMessageBundle {
-        val template =
-            com.vitorpamplona.quartz.nip01Core.signers
-                .eventTemplate<Event>(kind = 9, description = text) {
-                    AgentTextStreamFinal
-                        .tags(streamId, transcriptHash, chunkCount)
-                        .forEach { addUnique(it) }
-                }
-        val innerEvent =
-            com.vitorpamplona.quartz.nip59Giftwrap.rumors.RumorAssembler
-                .assembleRumor<Event>(signer.pubKey, template)
-        val outbound = buildGroupMessage(nostrGroupId, innerEvent)
-        if (persistOwn) persistDecryptedMessage(nostrGroupId, innerEvent.toJson(), outbound.epoch)
-        return TextMessageBundle(outbound = outbound, innerEvent = innerEvent)
-    }
-
-    /**
-     * The record AEAD for one stream in [nostrGroupId].
-     *
-     * The stream secret is the group's own
-     * `MLS-Exporter("marmot", "agent-text-stream-quic", 32)`, so every member
-     * of the epoch derives the same one and no key ever crosses the wire. All
-     * the per-stream separation comes from the key context: change the stream,
-     * the epoch, the sender or the anchoring kind:1200 event and the record
-     * key changes with it.
-     *
-     * [senderPubKey] is the stream's author, which is not necessarily us — a
-     * receiver derives the publisher's context, not its own.
-     */
-    fun agentTextStreamCrypto(
-        nostrGroupId: HexKey,
-        streamId: ByteArray,
-        startEventId: ByteArray,
-        senderPubKey: HexKey = signer.pubKey,
-        epoch: Long? = null,
-    ): AgentTextStreamCrypto {
-        val group = groupManager.getGroup(nostrGroupId) ?: error("not a member of group $nostrGroupId")
-        return AgentTextStreamCrypto(
-            streamSecret = group.agentTextStreamSecret(),
-            context =
-                AgentTextStreamKeyContextV1(
-                    groupId = group.groupId,
-                    streamId = streamId,
-                    mlsEpoch = epoch ?: group.epoch,
-                    senderId = senderPubKey.hexToByteArray(),
-                    startEventId = startEventId,
-                ),
-        )
-    }
-
-    /** The group's current MLS epoch, which the stream key context binds. */
+    /** The group's current MLS epoch, or null when we are not a member. */
     fun currentEpoch(nostrGroupId: HexKey): Long? = groupManager.getGroup(nostrGroupId)?.epoch
 
     /**
@@ -1101,6 +1025,11 @@ class MarmotManager(
         require(invites.map { it.keyPackageEventId }.toSet().size == invites.size) {
             "addMemberInvites: the same KeyPackage appears twice in one commit"
         }
+        // `device-group.md` "Creating a chat": a client implementing device groups never adds its own
+        // account's PUBLISHED KeyPackages; its siblings join with private ones ([addWithSiblings]).
+        require(deviceGroupConfig == null || invites.none { it.memberPubKey == signer.pubKey }) {
+            "addMemberInvites: in device-group mode this account's devices are added only with private KeyPackages"
+        }
 
         // Verify that each KeyPackage credential matches the expected member
         // pubkey. Accepts either framing — a peer's published KeyPackage is an
@@ -1250,11 +1179,153 @@ class MarmotManager(
                 )
             }
 
+        lastFoundingWelcome = staged.result.welcomeBytes
+        // The founding admission's generation is the post-founding (epoch 1) context.
+        deviceGroups?.onChatAdmitted(nostrGroupId, founded = true)
         return Pair(null, welcomeDeliveries)
+    }
+
+    /** The Welcome bytes of the last founding Add, for the sibling Welcomes [addWithSiblings] sends. */
+    private var lastFoundingWelcome: ByteArray? = null
+
+    /** What [addWithSiblings] did. */
+    class SiblingAddResult(
+        /** The commit to publish; null for a founding Add, which publishes none. */
+        val event: OutboundGroupEvent?,
+        /** The Welcomes of other accounts' invitees, as [addMemberInvites] returns them. */
+        val welcomes: List<WelcomeDelivery>,
+        /**
+         * The Welcome for the siblings added with private KeyPackages: sent only inside the device
+         * group, never as a kind 444 (`device-group.md` "Sending a sibling Welcome"). Null when the
+         * commit was not confirmed.
+         */
+        val siblingWelcome: ByteArray?,
+    )
+
+    /**
+     * [addMemberInvites] that also adds this account's own linked devices with the private
+     * KeyPackages they handed this device ([siblingKeyPackages], already admitted by the device
+     * group's rules). In the founding Add they join beside [invites]; later, with no [invites], the
+     * Commit is a same-account Add, which a group requiring `0x800d` accepts from any member.
+     */
+    suspend fun addWithSiblings(
+        nostrGroupId: HexKey,
+        invites: List<MemberInvite>,
+        siblingKeyPackages: List<ByteArray>,
+        relays: List<NormalizedRelayUrl>,
+    ): SiblingAddResult {
+        require(invites.isNotEmpty() || siblingKeyPackages.isNotEmpty()) { "addWithSiblings: nothing to add" }
+        val siblings = siblingKeyPackages.map { KeyPackageUtils.decodeKeyPackage(it) }
+        for (kp in siblings) {
+            val credential = kp.leafNode.credential
+            require(credential is Credential.Basic && credential.identity.toHexKey() == signer.pubKey) { "a sibling KeyPackage is this account's" }
+        }
+        if (siblings.isEmpty()) {
+            val (event, welcomes) = addMemberInvites(nostrGroupId, invites, relays)
+            return SiblingAddResult(event, welcomes, null)
+        }
+        if (isFoundingAdd(nostrGroupId)) {
+            val decoded = invites.map { KeyPackageUtils.decodeKeyPackage(it.keyPackageBytes) }
+            lastFoundingWelcome = null
+            val (_, welcomes) = commitFoundingAdd(nostrGroupId, invites, relays, (decoded + siblings).map { it.toTlsBytes() }, decoded + siblings)
+            return SiblingAddResult(null, welcomes, lastFoundingWelcome)
+        }
+        require(invites.isEmpty()) { "addWithSiblings: add other accounts and siblings in separate commits" }
+        val publication =
+            commitAndPublish(nostrGroupId, relays) {
+                groupManager.stageOwn(nostrGroupId) { clone ->
+                    siblings.forEach { clone.proposeAdd(it.toTlsBytes()) }
+                    clone.commit()
+                }
+            }
+        return SiblingAddResult(publication.event, emptyList(), if (publication.confirmed) publication.commitResult.welcomeBytes else null)
+    }
+
+    // --- Device-group plumbing: the device group is an ordinary MLS group to the publish gate,
+    // convergence and subscriptions, so its commits fork and settle like any group's (MDK runs it
+    // through the same CGKA engine: `marmot-app/src/client/device_group.rs` host_may_see_group,
+    // `cgka-engine/src/commit_class.rs` priority). Only its traffic is routed elsewhere.
+
+    /** Registers a device group this device just created at epoch 0. */
+    internal suspend fun adoptCreatedDeviceGroup(
+        nostrGroupId: HexKey,
+        group: MlsGroup,
+    ) {
+        groupManager.adoptGroup(nostrGroupId, group)
+        publishGate.satisfyEmptyObligation(nostrGroupId)
+        inboundProcessor.trackGroup(nostrGroupId)
+        desync.seed(nostrGroupId, TimeUtils.now())
+        subscriptionManager.subscribeGroup(nostrGroupId)
+    }
+
+    /** Registers a device group this device joined through its link's Welcome. */
+    internal suspend fun adoptJoinedDeviceGroup(
+        nostrGroupId: HexKey,
+        group: MlsGroup,
+    ) {
+        groupManager.adoptGroup(nostrGroupId, group)
+        inboundProcessor.trackGroup(nostrGroupId)
+        desync.seed(nostrGroupId, TimeUtils.now())
+        publishGate.clearGate(nostrGroupId)
+        subscriptionManager.subscribeGroup(nostrGroupId)
+    }
+
+    /** The founding Add of a device group: merged locally with an empty publish obligation. */
+    internal suspend fun installDeviceGroupFounding(
+        nostrGroupId: HexKey,
+        staged: MlsGroupManager.StagedCommit,
+    ) {
+        groupManager.installState(nostrGroupId, staged.pendingState)
+        publishGate.satisfyEmptyObligation(nostrGroupId)
+    }
+
+    /** Publishes a staged device-group Commit under publish-before-apply; null when no relay confirmed it. */
+    internal suspend fun publishDeviceGroupCommit(
+        nostrGroupId: HexKey,
+        staged: MlsGroupManager.StagedCommit,
+    ): OutboundGroupEvent? {
+        val publication = commitAndPublish(nostrGroupId, groupRelays(nostrGroupId)) { staged }
+        return if (publication.confirmed) publication.event else null
+    }
+
+    /** The kind 444 for a device group's Add, to this account itself (`device-group.md` "Approving"). */
+    internal suspend fun wrapDeviceGroupWelcome(
+        nostrGroupId: HexKey,
+        welcomeBytes: ByteArray,
+        keyPackageEventId: HexKey,
+    ): WelcomeDelivery = welcomeSender.wrapWelcomeBytes(welcomeBytes, signer.pubKey, keyPackageEventId, groupRelays(nostrGroupId), nostrGroupId)
+
+    /** Drops a device group this device was removed from, or reset. */
+    internal suspend fun discardDeviceGroup(nostrGroupId: HexKey) {
+        subscriptionManager.unsubscribeGroup(nostrGroupId)
+        publishGate.forget(nostrGroupId)
+        groupManager.removeGroupState(nostrGroupId)
+        desync.forget(nostrGroupId)
+    }
+
+    /**
+     * Joins a chat through a sibling Welcome the device group admitted, with the private KeyPackage
+     * [bundle] this device issued (`device-group.md` "Receiving a sibling Welcome"). Joining consumes
+     * the KeyPackage; the caller deletes it.
+     */
+    suspend fun joinSiblingWelcome(
+        welcomeBytes: ByteArray,
+        bundle: KeyPackageBundle,
+    ): WelcomeResult {
+        val result = inboundProcessor.joinWithBundle(welcomeBytes, bundle)
+        if (result is WelcomeResult.Joined) {
+            desync.seed(result.nostrGroupId, TimeUtils.now())
+            publishGate.clearGate(result.nostrGroupId)
+            subscriptionManager.subscribeGroup(result.nostrGroupId)
+            recordRetentionForCurrentEpoch(result.nostrGroupId)
+            syncGroupSystemRows(result.nostrGroupId)
+        }
+        return result
     }
 
     /**
      * `protocol-core/group-setup.md`: a creator that supports
+
      * `marmot.group.account-devices.v1` MUST require it when its own leaf and
      * every founding KeyPackage advertise it; never in a legacy group. When
      * that founding Add would then break the component's own rules (an account
@@ -1341,7 +1412,10 @@ class MarmotManager(
                 profile = profile,
                 additionalAdmins = additionalAdmins,
                 retention = retention,
+                encryptedMedia = null,
+                ciphersuite = MlsCiphersuite.DEFAULT,
                 supportedComponents = supportedComponents,
+                leafComponents = { key -> deviceGroups?.ownTagComponents(key).orEmpty() },
             )
         groupManager.adoptGroup(nostrGroupId, group)
         // Same empty-obligation exception as [createGroup]: a one-member
@@ -1352,6 +1426,8 @@ class MarmotManager(
         desync.seed(nostrGroupId, TimeUtils.now())
         subscriptionManager.subscribeGroup(nostrGroupId)
         markCreatedLocally(nostrGroupId)
+        // A solo creation's generation is its epoch 0; a founding Add replaces it with epoch 1's.
+        deviceGroups?.onChatAdmitted(nostrGroupId, founded = true)
         return nostrGroupId
     }
 
@@ -1502,6 +1578,8 @@ class MarmotManager(
                     "convergence settled group=${resolution.groupId.take(8)}… " +
                         "epoch=${resolution.canonicalEpoch} rewound=${resolution.rewound}"
                 }
+                // The device group's own branch lost: what it sent on it is owed again.
+                if (resolution.rewound) deviceGroups?.onDeviceGroupRewound(resolution.groupId)
                 // Settlement is the only moment a pending disband can be
                 // decided: the branch is chosen, so the request has either won,
                 // lost and needs regenerating, or become impossible. Doing it
@@ -1787,9 +1865,9 @@ class MarmotManager(
         innerEventJson: String,
         /**
          * The MLS epoch that delivered this payload, when the caller knows it.
-         * Only agent text streams read it back — their record key context
-         * binds the epoch, so a receiver has to derive keys under the epoch
-         * that carried the stream's anchor rather than the group's current one.
+         * The media key of an attachment and the admin set that authorizes a
+         * removal are both those of the delivering epoch, not the group's
+         * current one.
          */
         epoch: Long? = null,
     ) {

@@ -21,7 +21,6 @@
 package com.vitorpamplona.marmot.groups
 
 import com.vitorpamplona.marmot.appComponents.MarmotGroupState
-import com.vitorpamplona.marmot.appComponents.agentTextStream.AgentTextStreamCrypto
 import com.vitorpamplona.marmot.mip01Groups.MarmotGroupData
 import com.vitorpamplona.mls.group.MlsGroup
 import com.vitorpamplona.quartz.nip01Core.core.HexKey
@@ -64,16 +63,3 @@ fun MlsGroup.currentAdminIdentities(): Set<String> = MarmotGroupPolicy.adminIden
 
 /** True if the local member is an active admin. */
 fun MlsGroup.isLocalAdmin(): Boolean = MarmotGroupPolicy.isLocalAdmin(view())
-
-/**
- * `MLS-Exporter("marmot", "agent-text-stream-quic", 32)` — the secret every
- * member of this epoch derives per-stream record keys from. Per-stream and
- * per-record separation is entirely in the HKDF key context, so this one
- * secret covers every stream in the epoch.
- */
-fun MlsGroup.agentTextStreamSecret(): ByteArray =
-    exporterSecret(
-        AgentTextStreamCrypto.EXPORTER_LABEL,
-        AgentTextStreamCrypto.EXPORTER_CONTEXT,
-        AgentTextStreamCrypto.SECRET_LENGTH,
-    )

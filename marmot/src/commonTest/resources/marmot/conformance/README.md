@@ -37,8 +37,3 @@ need a runner that can drive our client through a scripted trace and project
 its state per `marmot/foundation/conformance.md` ("Canonical snapshot"). That
 is a separate piece of work, and it is where the convergence and crash/restart
 coverage lives.
-
-`tests/agent_text_stream_vectors.rs` pins the key context encoding, the HKDF
-record-key derivation, the record AAD, the transcript hash and the broker
-control envelope as literal bytes. It is Rust source rather than a data file,
-so adopting it means transcribing the expected values.

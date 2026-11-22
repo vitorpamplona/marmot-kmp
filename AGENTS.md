@@ -33,23 +33,17 @@ checked against MDK, the reference implementation (<https://github.com/marmot-pr
     `RecipientRelayFetcher`.
   - `client/`: the headless client a front end drives: `MarmotManager` (group lifecycle, send,
     ingest, restore), `MarmotReceiver` (what every client does with an ingest result: replay
-    after a commit, commit staged departures), `MarmotSyncPolicy`, `MarmotPushCoordinator`,
-    `MarmotAgentStreamWatcher`.
+    after a commit, commit staged departures), `MarmotSyncPolicy`, `MarmotPushCoordinator`.
   - Tests: `commonTest`, `jvmAndroidTest` (JUnit, the in-process test relay in `testing/`),
     `jvmTest` (the `client/` suites and the scenario vectors in `jvmTest/resources/marmot/vectors`).
   - `marmot/tools/mdk-vector-gen`: Rust generator for the MDK vectors. `marmot/plans/`: design docs.
-- `marmot-quic/`: the raw QUIC binding of agent text stream previews (`transports/quic.md`),
-  published as `com.vitorpamplona.marmot:marmot-quic`. A module of its own because it sits on
-  [quic-kmp](https://github.com/vitorpamplona/quic-kmp), which builds for the JVM and Android only;
-  the codecs it frames stay in `marmot`'s `appComponents/agentTextStream`. JVM target 21, quic-kmp's.
-  Its interop tests run against MDK's `marmot-quic-broker` and `wn` and skip without them.
 - `marmot-bench/`: marmot-kmp against MDK, operation for operation (`./gradlew :marmot-bench:run`).
   Not published.
 - `gradle/kmp-purity.gradle.kts`: the `verifyKmpPurity` task, the same file as Quartz's.
 - `tools/ci/quartz-args.sh`: points the build at a Quartz checkout while the pinned Quartz release is
   not out yet (CI and the pre-push hook call it). `tools/ci/mls-kmp-args.sh` does the same for
   mls-kmp. Both count a GitHub tag as released.
-- Quartz, mls-kmp, crypto-kmp, negentropy-kmp, libschnorr256k1-kotlin, quic-kmp and this library are
+- Quartz, mls-kmp, crypto-kmp, negentropy-kmp, libschnorr256k1-kotlin and this library are
   released on Nostr + Blossom: the Magpie settings plugin (`settings.gradle.kts`) serves their
   groups, and `gradle/magpie.lock` pins their release key and files. Commit the lock's changes;
   a lock failure means a key or a release changed, so ask before editing it.
@@ -75,8 +69,12 @@ checked against MDK, the reference implementation (<https://github.com/marmot-pr
   keystore, the account wiring (which relays, which signer, the outbox), chatroom models, feeds,
   notifications, UI and the `amy` verbs. A test that needs Amethyst code or both bindings lives
   there; a test, bench or vector that exercises only this library lives here.
-- `:marmot` must keep building for every native target, so nothing JVM-only (quic-kmp included)
-  goes into it; a JVM/Android-only transport is a module beside it, like `marmot-quic`.
+- `:marmot` must keep building for every native target, so nothing JVM-only goes into it; a
+  JVM/Android-only transport is a module beside it.
+- **The agent text stream over QUIC (`0x8006`, kind 1200) is retired**
+  (`app-components/agent-text-stream-quic-v1.md`, "Retirement"): never create, send or connect it;
+  keep validating `0x8006` in existing groups and advertising it with the `receive` role. See
+  `marmot/plans/2026-11-22-retire-agent-text-stream.md`.
 - **Reuse Quartz's relay operations** (`fetchAll`, `fetchFirst`, `publishAndConfirm`, …, the
   `INostrClient` extensions in Quartz's `nip01Core/relay/client/accessories/`) instead of writing
   subscribe/collect loops.
@@ -85,8 +83,8 @@ checked against MDK, the reference implementation (<https://github.com/marmot-pr
   and Quartz's `PlatformLock`/`ConcurrentMap`.
 - Persisted formats are API: a store's bytes, a marker string, a derivation label. Changing one
   breaks every device that already wrote it.
-- JVM target is 21, Quartz's and quic-kmp's: a library can't target a lower JVM than its dependencies. Releases follow semantic versioning; `marmot`
-  and `marmot-quic` release together at one version, and Amethyst pins it.
+- JVM target is 21, Quartz's: a library can't target a lower JVM than its dependencies. Releases
+  follow semantic versioning, and Amethyst pins a version.
 - Commits: conventional commits (`feat:`, `fix:`, …). Never `--no-verify`.
 
 ## Verify, don't guess
@@ -102,15 +100,13 @@ it before stating it: write the failing case first, watch it fail, then explain.
 ./gradlew :marmot:jvmTest                       # also `./gradlew test`
 ./gradlew :marmot:verifyKmpPurity :marmot:compileCommonMainKotlinMetadata :marmot:compileAppleMainKotlinMetadata
 ./gradlew :marmot:linuxX64Test                  # the whole suite on Linux Native
-./gradlew :marmot-quic:jvmTest                  # add -DmarmotQuicBroker=host:port to run interop
 ./gradlew :marmot-bench:run                     # the MDK head-to-head
 ./gradlew :marmot:iosSimulatorArm64Test         # macOS only
 ```
 
 Until the Quartz version in `gradle/libs.versions.toml` is released, add
 `-PquartzDir=../quartz` (a checkout beside this repo); `-PmlsKmpDir` and `-PcryptoKmpDir` work the
-same way, and so does `-PquicKmpDir`. To try a change in Amethyst, build Amethyst with
-`-PmarmotKmpDir=../marmot-kmp` (it substitutes both `marmot` and `marmot-quic`).
+same way. To try a change in Amethyst, build Amethyst with `-PmarmotKmpDir=../marmot-kmp`.
 
 ## Dependency licensing
 

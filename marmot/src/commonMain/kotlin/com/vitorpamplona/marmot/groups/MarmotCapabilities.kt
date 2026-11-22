@@ -109,13 +109,13 @@ object MarmotCapabilities {
      * `0xF2D1` is the agent-text-stream RECEIVE role, for the same reason:
      * a group carrying component `0x8006` with `required_member_roles`
      * naming `receive` refuses a leaf that does not advertise it. The
-     * reference client puts exactly that policy into EVERY group it
-     * creates, so without this line an Amethyst KeyPackage cannot be
-     * invited into one at all.
+     * stream is retired and new groups no longer carry the component, but
+     * clients put exactly that policy into every group they created before,
+     * so the spec keeps the role advertised ("What clients keep doing").
+     * It needs no QUIC code.
      *
-     * We stop at receive. `send` and `fanout` are not here because we do
-     * not originate previews from the app, and a capability is a standing
-     * promise rather than a hedge.
+     * We stop at receive. `send` and `fanout` are retired roles, and a
+     * client SHOULD stop advertising them.
      */
     fun currentProfileLeaf(): Capabilities =
         Capabilities(

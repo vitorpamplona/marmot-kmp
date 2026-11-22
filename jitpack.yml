@@ -1,3 +1,3 @@
-# JitPack defaults to JDK 17; every module targets JVM 21 (Quartz's and quic-kmp's target).
+# JitPack defaults to JDK 17; every module targets JVM 21 (Quartz's target).
 jdk:
   - openjdk21

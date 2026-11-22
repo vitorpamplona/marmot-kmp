@@ -6,7 +6,7 @@ pluginManagement {
     }
 }
 
-// Quartz, mls-kmp, quic-kmp, crypto-kmp, negentropy-kmp and libschnorr256k1-kotlin are released
+// Quartz, mls-kmp, crypto-kmp, negentropy-kmp and libschnorr256k1-kotlin are released
 // on Nostr + Blossom: the Magpie settings plugin serves their groups, trusting only the release key
 // vitorpamplona.com names as `releases`, and gradle/magpie.lock pins that key and every resolved
 // version's files. It also puts
@@ -21,7 +21,6 @@ magpie {
     group("com.vitorpamplona.crypto")
     group("com.vitorpamplona.schnorr256k1")
     group("com.vitorpamplona.mls")
-    group("com.vitorpamplona.quic")
     group("com.vitorpamplona.negentropy")
 }
 
@@ -34,13 +33,11 @@ dependencyResolutionManagement {
 
 rootProject.name = "marmot-kmp"
 include(":marmot")
-// The raw QUIC binding of agent text streams, published as marmot-quic. JVM and Android only.
-include(":marmot-quic")
 // marmot-kmp against MDK, head to head. Not published.
 include(":marmot-bench")
 
-// Quartz (vitorpamplona/quartz), mls-kmp (vitorpamplona/mls-kmp), crypto-kmp
-// (vitorpamplona/crypto-kmp) and quic-kmp (vitorpamplona/quic-kmp) come from Nostr + Blossom. To
+// Quartz (vitorpamplona/quartz), mls-kmp (vitorpamplona/mls-kmp) and crypto-kmp
+// (vitorpamplona/crypto-kmp) come from Nostr + Blossom. To
 // change one alongside Marmot, point Gradle at a local checkout and it builds that checkout instead of the published artifact:
 //   ./gradlew -PquartzDir=../quartz :marmot:jvmTest
 // When this build is itself an included build (Amethyst's -PmarmotKmpDir), the same -P flags reach
@@ -60,15 +57,6 @@ providers.gradleProperty("mlsKmpDir").orNull?.takeUnless { isIncludedBuild }?.le
     includeBuild(dir) {
         dependencySubstitution {
             substitute(module("com.vitorpamplona.mls:mls")).using(project(":mls"))
-        }
-    }
-}
-
-//   ./gradlew -PquicKmpDir=../quic-kmp :marmot-quic:jvmTest
-providers.gradleProperty("quicKmpDir").orNull?.takeUnless { isIncludedBuild }?.let { dir ->
-    includeBuild(dir) {
-        dependencySubstitution {
-            substitute(module("com.vitorpamplona.quic:quic")).using(project(":quic"))
         }
     }
 }

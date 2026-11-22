@@ -21,6 +21,7 @@
 package com.vitorpamplona.marmot
 
 import com.vitorpamplona.crypto.sha2.sha256
+import com.vitorpamplona.marmot.appComponents.agentTextStream.AgentTextStreamRetirement
 import com.vitorpamplona.marmot.foundation.appEvents.MarmotAppEvent
 import com.vitorpamplona.marmot.groups.MlsGroupManager
 import com.vitorpamplona.marmot.groups.currentGroupState
@@ -54,7 +55,7 @@ data class OutboundGroupEvent(
     /**
      * The MLS epoch the payload was encrypted under, which is the source epoch
      * a receiver attributes it to. Keys derived per epoch (an attachment's media
-     * key, an agent stream's record key) must use this epoch, not whatever epoch
+     * key) must use this epoch, not whatever epoch
      * the group reaches by the time someone reads the message. Null for
      * handshake messages, whose epoch is the one they create.
      */
@@ -118,7 +119,13 @@ class MarmotOutboundProcessor(
         nostrGroupId: HexKey,
         appEvent: MarmotAppEvent,
         expectedEpoch: Long? = null,
-    ): OutboundGroupEvent = buildGroupEventFromBytes(nostrGroupId, appEvent.encodeToPayload(), expectedEpoch)
+    ): OutboundGroupEvent {
+        // The agent text stream is retired: no kind-1200 start and no stream
+        // tags on a kind 9, including a send queued before an upgrade
+        // (`agent-text-stream-quic-v1.md`, "What clients stop doing").
+        AgentTextStreamRetirement.requireNotRetired(appEvent.kind, appEvent.tags)
+        return buildGroupEventFromBytes(nostrGroupId, appEvent.encodeToPayload(), expectedEpoch)
+    }
 
     /**
      * Encrypt raw bytes and build a GroupEvent for publishing.

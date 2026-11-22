@@ -29,6 +29,7 @@ import com.vitorpamplona.marmot.mip01Groups.MlsCiphersuite
 import com.vitorpamplona.mls.codec.TlsReader
 import com.vitorpamplona.mls.codec.TlsWriter
 import com.vitorpamplona.mls.components.AppDataDictionary
+import com.vitorpamplona.mls.components.ComponentData
 import com.vitorpamplona.mls.components.ComponentsList
 import com.vitorpamplona.mls.crypto.MlsCryptoProvider
 import com.vitorpamplona.mls.messages.KeyPackageBundle
@@ -46,6 +47,7 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlin.concurrent.Volatile
 
 /**
  * Manages KeyPackage creation and rotation lifecycle (MIP-00).
@@ -75,6 +77,13 @@ class KeyPackageRotationManager(
     /** The 2.x constructor, kept so code compiled against it still links. */
     @Deprecated("Use the constructor with supportedComponents. Removed in 3.0.0.", level = DeprecationLevel.HIDDEN)
     constructor(store: KeyPackageBundleStore? = null) : this(store, CurrentProfileGroupFactory.SUPPORTED_COMPONENTS)
+
+    /**
+     * Extra leaf dictionary entries for each KeyPackage this manager mints, from its leaf signature
+     * key: in device-group mode, this device's `0x800f` tag (`device-tag-v1.md` "Producing tags").
+     */
+    @Volatile
+    var leafComponents: ((signatureKey: ByteArray) -> List<ComponentData>)? = null
 
     private val mutex = Mutex()
     private val activeBundles = mutableMapOf<String, KeyPackageBundle>()
@@ -491,7 +500,7 @@ class KeyPackageRotationManager(
         dTagSlot: String = KeyPackageUtils.PRIMARY_SLOT,
         ciphersuite: MlsCiphersuite = MlsCiphersuite.DEFAULT,
     ): KeyPackageBundle {
-        val bundle = CurrentProfileGroupFactory.createKeyPackage(signer, ciphersuite = ciphersuite, supportedComponents = supportedComponents)
+        val bundle = CurrentProfileGroupFactory.createKeyPackage(signer, true, ciphersuite, supportedComponents) { key -> leafComponents?.invoke(key).orEmpty() }
         mutex.withLock {
             installIntoSlotUnlocked(dTagSlot, bundle)
             persistUnlocked()

@@ -29,8 +29,9 @@ package com.vitorpamplona.marmot.features.devicePairing
  * Named here, beside the rest of the binding, so every client that does not
  * link devices recognises the same kinds as pairing traffic for another
  * client of the same account and keeps them out of its chats, instead of each
- * hardcoding the range. This client does not pair devices; only the kinds are
- * defined.
+ * hardcoding the range. The exchange itself is [NewDevicePairing] and
+ * [ExistingDevicePairing], over [PairingMessage] and [PairingCrypto]; carrying the
+ * rumors over Nostr and acting on a confirmed link are the caller's.
  */
 object MarmotDevicePairingKinds {
     /** Sent by the new device. */

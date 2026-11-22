@@ -25,6 +25,7 @@ import com.vitorpamplona.marmot.appComponents.AdminPolicyV1
 import com.vitorpamplona.marmot.appComponents.CurrentProfileGroupFactory
 import com.vitorpamplona.marmot.appComponents.GroupLifecycleV1
 import com.vitorpamplona.marmot.appComponents.MarmotProtocolProfile
+import com.vitorpamplona.marmot.appComponents.agentTextStream.AgentTextStreamQuicPolicyV1
 import com.vitorpamplona.marmot.groups.MlsGroupManager.Companion.EPOCH_RETENTION_WINDOW
 import com.vitorpamplona.marmot.groups.currentAdminIdentities
 import com.vitorpamplona.marmot.groups.currentNostrGroupId
@@ -528,6 +529,16 @@ class MlsGroupManager(
             clone.commit()
         }
 
+    /**
+     * Stage a Commit that [prepare] builds on a clone carrying exactly its own proposals, for the
+     * device-group flows whose Commits combine proposals no other helper does (the founding Add with
+     * its roster entry, a new device's first Commit). See [StagedCommit].
+     */
+    internal suspend fun stageOwn(
+        nostrGroupId: HexKey,
+        prepare: (MlsGroup) -> CommitResult,
+    ): StagedCommit = stage(nostrGroupId, sweepPool = false, prepare)
+
     /** Stage a Remove. See [StagedCommit] for why this does not apply. */
     suspend fun stageRemoveMember(
         nostrGroupId: HexKey,
@@ -663,13 +674,29 @@ class MlsGroupManager(
      * other's work just by racing.
      *
      * Passing null [data] removes the component.
+     *
+     * Refuses to replace the state of the retired agent text stream component
+     * `0x8006` or to add it to the required `app_components`
+     * (`agent-text-stream-quic-v1.md`, "What clients stop doing"). Its removal
+     * stays possible, for an admin whose user asks for it ("Removing the
+     * component from a group").
      */
     suspend fun stageAppDataUpdate(
         nostrGroupId: HexKey,
         componentId: Int,
         data: ByteArray?,
     ): StagedCommit {
-        requireAdminForExtensionChange(requireGroup(nostrGroupId))
+        val group = requireGroup(nostrGroupId)
+        requireAdminForExtensionChange(group)
+        require(componentId != AgentTextStreamQuicPolicyV1.COMPONENT_ID || data == null) {
+            "the agent text stream component 0x8006 is retired: its state is never replaced"
+        }
+        if (componentId == ComponentsList.APP_COMPONENTS_ID && data != null) {
+            val retired = AgentTextStreamQuicPolicyV1.COMPONENT_ID
+            require(retired !in ComponentsList.decode(data) || retired in ComponentsList.supportedOrRequired(group.appDataDictionary())) {
+                "the agent text stream component 0x8006 is retired: it is never added to the required components"
+            }
+        }
         return stage(nostrGroupId) { clone ->
             if (data == null) clone.proposeAppDataRemoval(componentId) else clone.proposeAppDataUpdate(componentId, data)
             clone.commit()

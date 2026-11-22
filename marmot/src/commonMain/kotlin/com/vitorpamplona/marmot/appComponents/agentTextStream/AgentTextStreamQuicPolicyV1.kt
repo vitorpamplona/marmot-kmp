@@ -24,14 +24,15 @@ import com.vitorpamplona.marmot.appComponents.AppComponentIds
 import com.vitorpamplona.mls.components.ComponentData
 
 /**
- * `marmot.group.agent-text-stream.quic.v1` (component `0x8006`).
+ * `marmot.group.agent-text-stream.quic.v1` (component `0x8006`), retired.
  *
- * A group carrying this component streams an agent's text as it is produced,
- * over QUIC, out of band from the kind-445 group timeline; a kind-1200 event
- * anchors each stream and a kind-9 chat carries its final transcript. The
- * component itself is only the group's POLICY for those streams: which member
- * roles are required and allowed, and the record bounds every participant
- * enforces.
+ * The live preview this component configured is gone
+ * ([AgentTextStreamRetirement]), and new groups MUST NOT include it. But clients
+ * that implemented it put it into every group they created, with the `receive`
+ * role required, so a client still validates this state on every Commit and in
+ * every joined group ("What clients keep doing"). That validation is all this
+ * class is now: the frame, replay and padding fields no longer affect anything,
+ * but are still checked against their bounds.
  *
  * Twelve bytes, fixed:
  *
@@ -132,8 +133,8 @@ class AgentTextStreamQuicPolicyV1(
         const val STATE_LENGTH = 12
 
         /**
-         * App-profile cap on one frame's plaintext. 65519 keeps the ciphertext
-         * (plaintext + the 16-byte AEAD tag) inside the record's
+         * The v1 cap on one frame's plaintext. 65519 kept the ciphertext
+         * (plaintext + the 16-byte AEAD tag) inside the retired record's
          * `ciphertext<0..2^16-1>` wire field.
          */
         const val MAX_PLAINTEXT_FRAME_LEN = 65519L
@@ -141,8 +142,10 @@ class AgentTextStreamQuicPolicyV1(
         const val MAX_PADDING_BUCKET_BYTES = 4096
 
         /**
-         * The policy a user-to-agent group installs: every member must be able
-         * to receive, and a member may additionally send.
+         * The policy clients installed in every group they created before the
+         * retirement: every member must be able to receive, and a member may
+         * additionally send. Never put into a new group; it describes the
+         * groups that already carry it, for validation and tests.
          */
         fun userToAgentDefault() =
             AgentTextStreamQuicPolicyV1(
@@ -190,7 +193,11 @@ class AgentTextStreamQuicPolicyV1(
 
 /**
  * The three agent-text-stream roles, and the MLS leaf capability that backs
- * each one.
+ * each one. Their extension types and names are reserved.
+ *
+ * Only `receive` is still advertised: groups created before the retirement
+ * require it, and supporting it needs no QUIC code. `send` and `fanout` are
+ * retired and no longer advertised ("What clients keep doing").
  *
  * Each role is a distinct private-use MLS extension type rather than one flag
  * on the component, so a member can advertise `receive` without claiming
@@ -209,6 +216,11 @@ object AgentTextStreamRoles {
     const val RECEIVE_CAPABILITY = 0xF2D1
     const val SEND_CAPABILITY = 0xF2D2
     const val FANOUT_CAPABILITY = 0xF2D4
+
+    /** The role capability names, reserved with their extension types. */
+    const val RECEIVE_NAME = "marmot.feature.agent_text_stream_quic.receive.v1"
+    const val SEND_NAME = "marmot.feature.agent_text_stream_quic.send.v1"
+    const val FANOUT_NAME = "marmot.feature.agent_text_stream_quic.fanout.v1"
 
     /**
      * Every role capability, for callers that need to ask "does this leaf

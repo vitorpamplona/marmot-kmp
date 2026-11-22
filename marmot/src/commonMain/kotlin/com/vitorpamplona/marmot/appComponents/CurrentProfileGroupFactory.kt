@@ -65,14 +65,6 @@ object CurrentProfileGroupFactory {
      * invisible, and one we list but do not implement is a lie that surfaces
      * later as a group we cannot actually participate in. Add an id here only
      * when the component is implemented.
-     *
-     * `0x8006` (agent-text-stream over QUIC) is deliberately absent even
-     * though it is implemented. Nothing in the deployed network uses the QUIC
-     * preview path, and this list is a promise rather than a description: a
-     * group may require any id we advertise, and we would then owe every peer
-     * behaviour for a feature no one exercises. The code stays (`:marmotQuic`,
-     * the codecs, `amy marmot stream`), and the id goes back on the list the
-     * day the feature is actually used.
      */
     val SUPPORTED_COMPONENTS: List<Int> =
         listOf(
@@ -92,14 +84,23 @@ object CurrentProfileGroupFactory {
             // invite a KeyPackage without it into a group that requires it, and
             // every group its users create requires it when they all support it.
             AppComponentIds.ACCOUNT_DEVICES_V1,
-            // `0x8006` agent-text-stream-QUIC is a SUPPORT claim, not a
-            // running service. Nothing in the app dials a broker — see
-            // `marmotQuic/README.md` — but the reference client puts this
-            // component into the required set of every group it creates and
-            // refuses an invitee whose KeyPackage omits it. Dropping it here
-            // makes an Amethyst user un-addable to any group they start.
+            // `0x8006`, the retired agent text stream: a SUPPORT claim, not a
+            // running service. New groups never include it, but every group
+            // created before its retirement requires it (with the `receive`
+            // role, `MarmotCapabilities.currentProfileLeaf`) and refuses an
+            // invitee whose KeyPackage omits it, so support stays advertised
+            // ("What clients keep doing"). It needs no QUIC code: it is the
+            // validation in `AgentTextStreamQuicPolicyV1` and `MarmotGroupPolicy`.
             AppComponentIds.AGENT_TEXT_STREAM_QUIC_V1,
         )
+
+    /**
+     * [SUPPORTED_COMPONENTS] plus the device-group components, `0x800e` (device roster) and `0x800f`
+     * (device tag). NOT advertised by default: a device that advertises `0x800e` can be linked into a
+     * device group and must then run the device-group flows, so a client opts in by passing this list
+     * where it creates KeyPackages and leaves, once it does (`plans/2026-11-21-device-groups.md`).
+     */
+    val DEVICE_GROUP_SUPPORTED_COMPONENTS: List<Int> = SUPPORTED_COMPONENTS + listOf(AppComponentIds.DEVICE_ROSTER_V1, AppComponentIds.DEVICE_TAG_V1)
 
     /** A leaf keypair plus the account proof authorizing it. */
     class LeafIdentity(
@@ -118,6 +119,17 @@ object CurrentProfileGroupFactory {
         signer: NostrSigner,
         ciphersuite: MlsCiphersuite = MlsCiphersuite.DEFAULT,
         supportedComponents: List<Int> = SUPPORTED_COMPONENTS,
+    ): LeafIdentity = newLeafIdentity(signer, ciphersuite, supportedComponents) { emptyList() }
+
+    /**
+     * [newLeafIdentity] with more leaf dictionary entries, built from the new leaf's signature key:
+     * a linked device's `0x800f` device tag, which is bound to that key.
+     */
+    suspend fun newLeafIdentity(
+        signer: NostrSigner,
+        ciphersuite: MlsCiphersuite,
+        supportedComponents: List<Int>,
+        leafComponents: (signatureKey: ByteArray) -> List<ComponentData>,
     ): LeafIdentity {
         val keyPair = Ed25519.generateKeyPair()
         val proof = AccountIdentityProofV2.create(signer, ciphersuite, keyPair.publicKey)
@@ -128,7 +140,7 @@ object CurrentProfileGroupFactory {
                     ComponentData(ComponentsList.APP_COMPONENTS_ID, ComponentsList.encode(supportedComponents)),
                     ComponentData(ComponentsList.SAFE_AAD_ID, ComponentsList.encode(emptyList())),
                     ComponentData(AppComponentIds.ACCOUNT_IDENTITY_PROOF_V2, proof.encode()),
-                ),
+                ) + leafComponents(keyPair.publicKey),
             )
         return LeafIdentity(keyPair, listOf(dictionary.toExtension()))
     }
@@ -147,9 +159,18 @@ object CurrentProfileGroupFactory {
         ciphersuite: MlsCiphersuite = MlsCiphersuite.DEFAULT,
         /** The component ids the KeyPackage's leaf advertises; an older release advertised fewer. */
         supportedComponents: List<Int> = SUPPORTED_COMPONENTS,
+    ): KeyPackageBundle = createKeyPackage(signer, lastResort, ciphersuite, supportedComponents) { emptyList() }
+
+    /** [createKeyPackage] whose leaf also carries [leafComponents] of its signature key (a device tag). */
+    suspend fun createKeyPackage(
+        signer: NostrSigner,
+        lastResort: Boolean,
+        ciphersuite: MlsCiphersuite,
+        supportedComponents: List<Int>,
+        leafComponents: (signatureKey: ByteArray) -> List<ComponentData>,
     ): KeyPackageBundle {
         val identity = signer.pubKey.hexToByteArray()
-        val leaf = newLeafIdentity(signer, ciphersuite, supportedComponents)
+        val leaf = newLeafIdentity(signer, ciphersuite, supportedComponents, leafComponents)
 
         val keyPackageExtensions =
             if (lastResort) {
@@ -192,9 +213,10 @@ object CurrentProfileGroupFactory {
         additionalAdmins: List<ByteArray> = emptyList(),
         retention: MessageRetentionV1? = null,
         encryptedMedia: EncryptedMediaPolicyV2? = null,
-        agentTextStream: AgentTextStreamQuicPolicyV1? = null,
+        // Retired: never put into a new group ("Retirement"), so it is ignored.
+        @Suppress("UNUSED_PARAMETER") agentTextStream: AgentTextStreamQuicPolicyV1? = null,
         ciphersuite: MlsCiphersuite = MlsCiphersuite.DEFAULT,
-    ): MlsGroup = createGroup(signer, nostrGroupId, relays, profile, additionalAdmins, retention, encryptedMedia, agentTextStream, ciphersuite, SUPPORTED_COMPONENTS)
+    ): MlsGroup = createGroup(signer, nostrGroupId, relays, profile, additionalAdmins, retention, encryptedMedia, ciphersuite, SUPPORTED_COMPONENTS)
 
     /**
      * Create a current-profile group with [signer]'s account as its sole
@@ -204,7 +226,8 @@ object CurrentProfileGroupFactory {
      * proposal `0x0008`, and a GroupContext dictionary with the required
      * component list plus admin policy, routing, and the rest of the initial
      * state. The creator's leaf carries its own dictionary with the identity
-     * proof.
+     * proof. It never carries the retired agent text stream component
+     * `0x8006` (`protocol-core/group-setup.md`).
      */
     suspend fun createGroup(
         signer: NostrSigner,
@@ -226,13 +249,26 @@ object CurrentProfileGroupFactory {
          * media policy commits one, which is also how it gets changed later.
          */
         encryptedMedia: EncryptedMediaPolicyV2? = null,
-        agentTextStream: AgentTextStreamQuicPolicyV1? = null,
         ciphersuite: MlsCiphersuite = MlsCiphersuite.DEFAULT,
         /** The component ids the creator's leaf advertises. */
         supportedComponents: List<Int> = SUPPORTED_COMPONENTS,
+    ): MlsGroup = createGroup(signer, nostrGroupId, relays, profile, additionalAdmins, retention, encryptedMedia, ciphersuite, supportedComponents) { emptyList() }
+
+    /** [createGroup] whose creator leaf also carries [leafComponents] of its signature key (a device tag). */
+    suspend fun createGroup(
+        signer: NostrSigner,
+        nostrGroupId: ByteArray,
+        relays: List<String>,
+        profile: GroupProfileV1?,
+        additionalAdmins: List<ByteArray>,
+        retention: MessageRetentionV1?,
+        encryptedMedia: EncryptedMediaPolicyV2?,
+        ciphersuite: MlsCiphersuite,
+        supportedComponents: List<Int>,
+        leafComponents: (signatureKey: ByteArray) -> List<ComponentData>,
     ): MlsGroup {
         val identity = signer.pubKey.hexToByteArray()
-        val leaf = newLeafIdentity(signer, ciphersuite, supportedComponents)
+        val leaf = newLeafIdentity(signer, ciphersuite, supportedComponents, leafComponents)
 
         val dictionary =
             MarmotGroupState.buildDictionary(
@@ -242,7 +278,6 @@ object CurrentProfileGroupFactory {
                 retention = retention,
                 encryptedMedia = encryptedMedia,
                 lifecycle = GroupLifecycleV1.ACTIVE,
-                agentTextStream = agentTextStream,
             )
 
         return MlsGroup.create(
