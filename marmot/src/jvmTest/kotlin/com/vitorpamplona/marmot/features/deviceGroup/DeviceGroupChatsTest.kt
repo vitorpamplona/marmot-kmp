@@ -345,6 +345,41 @@ class DeviceGroupChatsTest {
         }
 
     @Test
+    fun theNewDeviceTagsUnderItsLinkLeafKey() =
+        runBlocking<Unit> {
+            // MDK takes a link as made only when the first Commit sets exactly the linked leaf's key.
+            val keys = KeyPair()
+            val a = Device(keys)
+            val b = Device(keys)
+            a.groups.start()
+            b.groups.start()
+            val linked = pair(a, b)
+            val welcome = assertNotNull(a.groups.applyStaged(a.groups.approve(linked.link, Base64.decode(linked.keyPackage.content), b.slot(), "B", now)).welcome)
+            assertIs<MarmotIngestResult.JoinedGroup>(b.manager.ingest(welcome.giftWrapEvent))
+            a.manager.ingest(assertNotNull(b.groups.applyStaged(b.groups.stageFirstCommit()).event).signedEvent)
+            val leafKey =
+                KeyPackageUtils
+                    .decodeKeyPackage(Base64.decode(linked.keyPackage.content))
+                    .leafNode.signatureKey
+                    .toHexKey()
+            assertEquals(
+                leafKey,
+                a.groups
+                    .roster()!!
+                    .device(b.slot())!!
+                    .tagSignatureKey,
+            )
+            assertEquals(
+                DeviceGroupTrust.Outcome.MADE,
+                a.groups
+                    .trust()
+                    .approvals
+                    .single()
+                    .outcome,
+            )
+        }
+
+    @Test
     fun aWithdrawnDeviceGroupBranchOwesTheSmallStateAgain() =
         runBlocking<Unit> {
             val (a, b, _) = linkedPair()

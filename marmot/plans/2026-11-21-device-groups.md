@@ -250,3 +250,30 @@ Library, before an app turns `deviceGroupConfig` on for users:
 
 So the library is ready for an opt-in, test-account rollout behind the switch, not for a default-on
 release.
+
+## Fifth pass: rebase onto the stream retirement, MDK 0.19.0, and the first live link (2026-11-22)
+
+Rebased onto `753239d` (agent text stream retired). The device group is built through
+`MarmotGroupState.buildDictionary`, which refuses `0x8006`, so it never includes it; the
+leaf-component `createGroup` overload lost its unused `agentTextStream` input. Ingest checks the
+trusted device group first, then the retired kind 1200, then device-group kinds elsewhere.
+
+MDK `bf4778a3`..0.19.0 (`3fce9546`), device-group changes:
+
+| MDK | What | Here |
+|---|---|---|
+| `0b223879` (mdk#3594) | A withdrawn device-group commit owes the small state again | **ported**: `onDeviceGroupRewound`, called when convergence rewinds the trusted device group, queues every item on `drainOutbox` |
+| `2346c6a8` | One check decides whether maintenance runs (unlinked, sign-out held, frozen) | scheduling, no wire change: the app's tick skips the passes once `trust().unlinked` |
+| `ff5320a8`, `f170e0cc` | Stream retirement | already `753239d` |
+| `470d4b4d`, `0e22bcd5` | Due times; sender-side Welcome audit rows | before `bf4778a3`; scheduling and local audit only, skipped |
+| `46d29b19`, `1ad676ac` | Tagged local sends, draft attachments | not device groups |
+
+Spec #511/#512 were already in (rows 1.12, 1.15).
+
+**Interop fix found live against `wn devices link`:** MDK takes a link as made only when the new
+device's first Commit sets `tag_signature_key` to the signature key of the leaf the link added
+(`marmot-app` `device_pairing/live.rs` `link_verdict`), and finds a device's pre-link leaves by that
+key. The spec only says "each device makes its own tag signature key pair". With a fresh pair the
+White Noise approver kept the link `linking` and never added the Amethyst device to its chats. The
+new device now uses the confirmed KeyPackage's leaf key as its tag key (`linkTagSeed`). Our own
+approver still accepts any key, as the spec allows.

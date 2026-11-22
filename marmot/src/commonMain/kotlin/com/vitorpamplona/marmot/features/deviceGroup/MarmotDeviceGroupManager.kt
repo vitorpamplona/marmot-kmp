@@ -401,7 +401,7 @@ class MarmotDeviceGroupManager internal constructor(
             t.copy(
                 trustedGroupId = pending.link.deviceGroupId,
                 trustedNostrGroupId = nostrId,
-                tagSigningSeed = RandomInstance.bytes(32).toHexKey(),
+                tagSigningSeed = linkTagSeed(bundle).toHexKey(),
                 pendingLink = null,
                 linkedKeyPackageRef = pending.link.keyPackageRef,
                 unlinked = false,
@@ -409,6 +409,18 @@ class MarmotDeviceGroupManager internal constructor(
         )
         refresh()
         return nostrId
+    }
+
+    /**
+     * The new device's tag signing key is the signature key of the leaf the link added, the
+     * confirmed KeyPackage's: MDK takes a link as made only when the first Commit sets exactly
+     * that key as `tag_signature_key` (`marmot-app` `link_verdict`), and finds the device's
+     * pre-link leaves by it ("Adding the new device to chats"). The spec lets each device make
+     * its own pair; reusing the leaf's is the choice both readings accept.
+     */
+    private fun linkTagSeed(bundle: KeyPackageBundle): ByteArray {
+        val seed = bundle.signaturePrivateKey.copyOfRange(0, 32)
+        return if (Ed25519.keyPairFromSeed(seed).publicKey.contentEquals(bundle.keyPackage.leafNode.signatureKey)) seed else RandomInstance.bytes(32)
     }
 
     /** Whether [keyPackageEventId] is the KeyPackage this device's pending link reserved. */
