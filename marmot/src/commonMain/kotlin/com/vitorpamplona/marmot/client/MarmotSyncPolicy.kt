@@ -213,6 +213,9 @@ class MarmotSyncPolicy(
             }
         }
 
+        // The receive ratchets this batch moved, written once for the batch.
+        marmot.groupManager.flushReceivedState()
+
         // A member's SelfRemove only takes effect once an admin commits it; one commit per
         // group for the whole batch.
         for ((gid, commit) in receiver.commitStagedProposals()) {
