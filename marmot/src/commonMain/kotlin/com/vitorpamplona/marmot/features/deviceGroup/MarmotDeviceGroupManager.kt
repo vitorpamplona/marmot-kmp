@@ -854,6 +854,10 @@ class MarmotDeviceGroupManager internal constructor(
      * Brings everything that follows from the device group's current state up to date: links made,
      * removed slots, a removal of this device. `MarmotManager.ingest` calls it after every group event;
      * call it after anything else that may move the device group (a convergence pass).
+     *
+     * It stages no Commit: a Commit must be published before it applies, and only the front end
+     * publishes. The ones a roster change makes due ([stageMoveFollowUp], [stageMovedCleanup],
+     * [stageInactivity], …) are the front end's maintenance tick to stage, publish and [applyStaged].
      */
     suspend fun refresh() {
         if (cached == null) start()
