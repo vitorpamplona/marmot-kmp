@@ -429,8 +429,14 @@ class MarmotConvergenceEngine(
             if (ctx.canonicalCommits.any { it.id == candidate.id }) return@withLock ConvergenceAdmission.NOT_A_CANDIDATE
 
             // Parentage is derived, not claimed: a commit is a candidate here
-            // only because some retained state actually authenticates it.
-            val hasParent = ctx.retained.any { stateEngine.authenticatesAgainst(it, commitBytes) }
+            // only because some retained state actually authenticates it. A
+            // state a divergent commit produced counts too: a competing branch
+            // two Commits deep reaches us one Commit at a time, and its second
+            // authenticates only against the first's result. Refusing it
+            // scored that branch one Commit short, so a member that had not
+            // seen it settled on the shorter branch alone.
+            val parents = ctx.retained + ctx.candidateStates.values
+            val hasParent = parents.any { stateEngine.authenticatesAgainst(it, commitBytes) }
             if (!hasParent) return@withLock ConvergenceAdmission.NOT_A_CANDIDATE
 
             ctx.divergent[candidate.id] = candidate
@@ -438,7 +444,7 @@ class MarmotConvergenceEngine(
             // what an app message on this branch decrypts against, and
             // witnesses have to accumulate DURING the pass to influence the
             // selection that pass makes.
-            for (parent in ctx.retained) {
+            for (parent in parents) {
                 if (!stateEngine.authenticatesAgainst(parent, commitBytes)) continue
                 if (!stateEngine.isAuthorized(parent, commitBytes)) continue
                 val child = stateEngine.replay(parent, commitBytes) ?: continue
