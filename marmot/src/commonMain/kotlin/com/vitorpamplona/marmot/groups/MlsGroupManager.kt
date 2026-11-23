@@ -1570,7 +1570,16 @@ class MlsGroupManager(
      */
     private suspend fun noteReceived(nostrGroupId: HexKey) {
         val count = (receivedSinceSave[nostrGroupId] ?: 0) + 1
-        if (count >= RECEIVED_PERSIST_BATCH) persistGroup(nostrGroupId) else receivedSinceSave[nostrGroupId] = count
+        receivedSinceSave[nostrGroupId] = count
+        if (count < RECEIVED_PERSIST_BATCH) return
+        // The message is already open: a failed write must not lose it, only
+        // leave the count standing so the next one tries again.
+        try {
+            persistGroup(nostrGroupId)
+        } catch (e: Exception) {
+            currentCoroutineContext().ensureActive()
+            Log.w(TAG, "could not write $nostrGroupId after opening $count messages", e)
+        }
     }
 
     /**
