@@ -650,7 +650,26 @@ class MarmotManager(
         require(!MarmotDeviceGroupKinds.isDeviceGroupKind(innerEvent.kind) || deviceGroups?.isTrustedDeviceGroup(nostrGroupId) == true) {
             "kind ${innerEvent.kind} is sent only in this device's device group"
         }
-        return outboundProcessor.buildGroupEvent(nostrGroupId, innerEvent, expectedEpoch)
+        val outbound = outboundProcessor.buildGroupEvent(nostrGroupId, innerEvent, expectedEpoch)
+        rememberOwnGroupEvent(outbound)
+        return outbound
+    }
+
+    /**
+     * Our own application message is never ours to read back: the sender's ratchet generation
+     * was spent encrypting it, so its relay echo decrypts on no epoch here. Unmarked, every echo
+     * came back as a "decrypts on no canonical epoch" failure, logged as an error and counted
+     * by [MarmotDesyncDetector] against a group that was fine, newer than the last message we
+     * decrypted, so a member who only sent could see a healthy group flagged out of sync.
+     *
+     * Marked twice: by Marmot message id, for this process ([MarmotInboundProcessor] answers
+     * [GroupEventResult.Duplicate]), and by the event's id in the durable ingest markers, so a
+     * client that runs one command per process (`amy`) skips the echo on its next sync. The
+     * signed event is ours, so its id names exactly these bytes.
+     */
+    private suspend fun rememberOwnGroupEvent(outbound: OutboundGroupEvent) {
+        inboundProcessor.markMessageProcessed(outbound.marmotMessageId)
+        markTerminallyIngested(outbound.signedEvent.id)
     }
 
     /**

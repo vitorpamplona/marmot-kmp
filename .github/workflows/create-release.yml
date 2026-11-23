@@ -25,8 +25,8 @@ env:
 
 jobs:
   # A release must depend only on published artifacts: its POM names the Quartz and mls-kmp
-  # versions it was built against, so those have to be released (both on Nostr + Blossom; a
-  # GitHub tag marks the release) before this one can be.
+  # versions it was built against, so those have to be resolvable from Nostr + Blossom before
+  # this one can be.
   check-dependencies:
     runs-on: ubuntu-latest
     steps:
@@ -48,21 +48,20 @@ jobs:
             esac
           done
 
-      - name: Quartz release is published
-        run: |
-          args=$(tools/ci/quartz-args.sh 2>/dev/null || echo missing)
-          if [ -n "$args" ]; then
-            echo "::error::The Quartz version in gradle/libs.versions.toml is not released. Release Quartz first."
-            exit 1
-          fi
+      - name: Set up JDK 21
+        uses: actions/setup-java@v6.1.0
+        with:
+          distribution: 'temurin'
+          java-version: 21
 
-      - name: mls-kmp release is published
-        run: |
-          args=$(tools/ci/mls-kmp-args.sh 2>/dev/null || echo missing)
-          if [ -n "$args" ]; then
-            echo "::error::The mls-kmp version in gradle/libs.versions.toml is not released. Release mls-kmp first."
-            exit 1
-          fi
+      - uses: gradle/actions/setup-gradle@v6
+
+      # Resolves the exact pinned versions through Magpie, with no -PquartzDir/-PmlsKmpDir: each
+      # needs its signed release event on Nostr and its files on Blossom. A GitHub tag alone is
+      # not enough, since it is pushed before the Nostr publish, which can fail or wait on the
+      # signer.
+      - name: Quartz and mls-kmp releases are published
+        run: ./gradlew verifyDependenciesPublished
 
   # The Apple tests run on macOS before anything publishes.
   test-apple:

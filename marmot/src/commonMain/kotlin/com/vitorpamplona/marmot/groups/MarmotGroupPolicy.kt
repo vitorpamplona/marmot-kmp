@@ -24,6 +24,7 @@ import com.vitorpamplona.marmot.appComponents.AccountDevicesV1
 import com.vitorpamplona.marmot.appComponents.AdminPolicyV1
 import com.vitorpamplona.marmot.appComponents.AppComponentIds
 import com.vitorpamplona.marmot.appComponents.DeviceRosterRules
+import com.vitorpamplona.marmot.appComponents.GroupContextComponents
 import com.vitorpamplona.marmot.appComponents.MarmotProtocolProfile
 import com.vitorpamplona.marmot.appComponents.accountIdentityProof.AccountIdentityProofV2
 import com.vitorpamplona.marmot.appComponents.agentTextStream.AgentTextStreamQuicPolicyV1
@@ -123,7 +124,9 @@ object MarmotGroupPolicy : MlsGroupPolicy {
      * - the admin–leaf coupling of `app-components/admin-policy-v1.md`: every
      *   admin the resulting state names still holds a leaf;
      * - the retired agent text stream's `0x8006` state, when the group still
-     *   carries it, is valid (`agent-text-stream-quic-v1.md`, "Validation").
+     *   carries it, is valid (`agent-text-stream-quic-v1.md`, "Validation");
+     * - every GroupContext component the commit wrote holds bytes its decoder
+     *   accepts ([GroupContextComponents]), as MDK validates each AppDataUpdate.
      */
     override fun validateResultingState(
         parentExtensions: List<Extension>,
@@ -136,6 +139,7 @@ object MarmotGroupPolicy : MlsGroupPolicy {
         validateIntroducedLeafProofs(parentExtensions, proposals, committerLeafIndex, resulting)
         validateAdminLeafCoupling(parentExtensions, resulting)
         validateAgentTextStreamState(resulting)
+        GroupContextComponents.validateChanged(parentExtensions, resulting.extensions)
     }
 
     /**
@@ -265,7 +269,14 @@ object MarmotGroupPolicy : MlsGroupPolicy {
         }
     }
 
+    /**
+     * What any join checks of the joined state alone: the agent text stream roles, and, as MDK's
+     * join does (`validate_app_component_dictionary`), that every GroupContext component the
+     * Welcome installs holds valid bytes. A Welcome installs the whole dictionary at once, so no
+     * commit check has seen it.
+     */
     override fun validateJoin(group: GroupView) {
+        GroupContextComponents.validateAll(group.extensions)
         requireAgentTextStreamRoles(group)
     }
 

@@ -60,7 +60,7 @@ fn main() {
             ExtensionType::LastResort,
         ]),
         Some(&[openmls::prelude::ProposalType::SelfRemove]),
-        None,
+        Some(&[openmls::prelude::CredentialType::Basic]),
     );
     let bundle = KeyPackage::builder()
         .leaf_node_capabilities(capabilities)

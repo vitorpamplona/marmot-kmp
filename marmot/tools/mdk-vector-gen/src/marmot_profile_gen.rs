@@ -298,13 +298,14 @@ fn required_components() -> Vec<u16> {
 fn leaf_capabilities() -> Capabilities {
     // RFC 9420 section 7.2 forbids advertising default extension types, so
     // only the draft app_data_dictionary extension and app_data_update
-    // proposal appear here.
+    // proposal appear here. The credential type is named, as MDK's leaves name
+    // it: OpenMLS refuses a leaf whose credential its capabilities omit.
     Capabilities::new(
         None,
         Some(&[CS]),
         Some(&[ExtensionType::AppDataDictionary]),
         Some(&[ProposalType::AppDataUpdate]),
-        None,
+        Some(&[CredentialType::Basic]),
     )
 }
 
