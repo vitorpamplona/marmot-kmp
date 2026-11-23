@@ -429,8 +429,11 @@ class KeyPackageRotationManager(
      */
     suspend fun getOrCreateSlotDTag(logicalSlotName: String): String =
         mutex.withLock {
-            namedSlotDTags.getOrPut(logicalSlotName) {
-                KeyPackageUtils.generateRandomDTag().also { persistUnlocked() }
+            namedSlotDTags[logicalSlotName] ?: KeyPackageUtils.generateRandomDTag().also {
+                // In the map before the snapshot is written: persisting from inside getOrPut's
+                // default saved the map without it, and a restart gave the device another slot.
+                namedSlotDTags[logicalSlotName] = it
+                persistUnlocked()
             }
         }
 
