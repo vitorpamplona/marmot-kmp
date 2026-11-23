@@ -29,6 +29,8 @@ import com.vitorpamplona.quartz.marmot.mip02Welcome.WelcomeEvent
 import com.vitorpamplona.quartz.marmot.mip03GroupMessages.GroupEvent
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.core.HexKey
+import com.vitorpamplona.quartz.nip01Core.crypto.verify
+import com.vitorpamplona.quartz.nip59Giftwrap.seals.SealEvent
 import com.vitorpamplona.quartz.nip59Giftwrap.wraps.GiftWrapEvent
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -167,12 +169,27 @@ private fun MarmotIngestResult.isTerminalForWelcome(): Boolean =
 
 private suspend fun MarmotManager.ingestGiftWrapUncached(wrap: GiftWrapEvent): MarmotIngestResult =
     try {
-        // NIP-59 wraps carry two encryption layers (kind:1059 → kind:13 → rumor).
-        // [unwrapAndUnsealOrNull] peels both so we land directly on the inner
-        // kind:444 Welcome rumor. Checking `isWelcomeEvent` on the seal itself
-        // (the old bug) always took the Ignored branch and silently dropped
-        // every inbound Welcome.
-        val rumor = wrap.unwrapAndUnsealOrNull(signer) ?: return MarmotIngestResult.Ignored("gift wrap is not for us")
+        // NIP-59 wraps carry two encryption layers (kind:1059 → kind:13 → rumor),
+        // and MIP-02 requires both: the Welcome rumor is sealed by the
+        // inviter. A wrap whose inner event is not a seal carries a Welcome
+        // nobody signed for, so it is refused here rather than read as one
+        // (Quartz's unwrapAndUnsealOrNull handed such an inner event back
+        // as-is). The seal's signature is checked, and the rumor must claim
+        // the seal's author (NIP-59's impersonation rule).
+        val seal = wrap.unwrapOrNull(signer) ?: return MarmotIngestResult.Ignored("gift wrap is not for us")
+        if (seal !is SealEvent) return MarmotIngestResult.Ignored("gift wrap does not carry a seal")
+        if (!seal.verify()) return MarmotIngestResult.Ignored("gift wrap's seal is not signed by its author")
+        val unsealed =
+            try {
+                seal.unsealRumorThrowing(signer)
+            } catch (e: Exception) {
+                currentCoroutineContext().ensureActive()
+                return MarmotIngestResult.Ignored("gift wrap's seal does not open")
+            }
+        if (unsealed.pubKey != null && unsealed.pubKey != seal.pubKey) {
+            return MarmotIngestResult.Ignored("gift wrap's rumor claims another author than its seal")
+        }
+        val rumor = seal.unsealed(unsealed)
         if (!MarmotInboundProcessor.isWelcomeEvent(rumor) || rumor !is WelcomeEvent) {
             return MarmotIngestResult.Ignored("gift wrap does not carry a Welcome")
         }

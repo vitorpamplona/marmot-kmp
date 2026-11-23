@@ -167,6 +167,25 @@ class MarmotAuditFixesTest {
         }
 
     @Test
+    fun `a gift wrap whose inner event is a bare Welcome with no seal is refused`() =
+        runBlocking<Unit> {
+            val alice = Member()
+            val bob = Member()
+            alice.createGroup()
+            val (_, bobWelcome) = alice.manager.addMember(nostrGroupId, bob.keyPackage(), emptyList())
+            val welcome = assertIs<WelcomeEvent>((bobWelcome!!.giftWrapEvent as GiftWrapEvent).unwrapAndUnsealOrNull(bob.signer))
+
+            // The same Welcome, wrapped straight to Bob with no seal: nobody signed for it.
+            val unsealed = GiftWrapEvent.create(welcome, bob.signer.pubKey)
+            val result = bob.manager.ingest(unsealed)
+            assertIs<MarmotIngestResult.Ignored>(result)
+            assertFalse(bob.manager.groupManager.isMember(nostrGroupId))
+
+            // The sealed one still joins.
+            assertIs<MarmotIngestResult.JoinedGroup>(bob.manager.ingest(bobWelcome.giftWrapEvent))
+        }
+
+    @Test
     fun `a batch of messages reads the group's expiry table once, not once per message`() =
         runBlocking<Unit> {
             val alice = Member()
