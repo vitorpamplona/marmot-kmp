@@ -363,7 +363,7 @@ class MlsGroupManager(
             if (live.contentEquals(state.groupContext.toTlsBytes())) return@withLock true
             if (!live.contentEquals(expected.groupContext.toTlsBytes())) return@withLock false
             val outgoing = current.retainedSecrets()
-            groups[nostrGroupId] = MlsGroup.restore(state, MarmotGroupPolicy)
+            putGroup(nostrGroupId, MlsGroup.restore(state, MarmotGroupPolicy))
             pushRetainedEpoch(nostrGroupId, outgoing)
             persistGroup(nostrGroupId)
             true
