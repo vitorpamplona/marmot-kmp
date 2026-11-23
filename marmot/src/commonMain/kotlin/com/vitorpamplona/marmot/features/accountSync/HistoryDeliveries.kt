@@ -24,6 +24,8 @@ import com.vitorpamplona.crypto.chacha.ChaCha20Poly1305
 import com.vitorpamplona.crypto.curve25519.X25519KeyPair
 import com.vitorpamplona.crypto.random.RandomInstance
 import com.vitorpamplona.crypto.sha2.sha256
+import com.vitorpamplona.marmot.appComponents.EncryptedMediaReferenceV2
+import com.vitorpamplona.marmot.appComponents.EncryptedMediaV2
 import com.vitorpamplona.marmot.features.deviceGroup.MarmotDeviceGroupKinds
 import com.vitorpamplona.mls.codec.TlsReader
 import com.vitorpamplona.mls.codec.TlsWriter
@@ -94,11 +96,23 @@ data class HistoryPosition(
     }
 }
 
-/** One event a bundle carries: the inner event, the epoch it was sent in, its retention if held. */
+/** An attachment key (`account-sync.md` "History bundles"): one media reference's `ciphertext_sha256` and its `file_key`. */
+data class HistoryAttachmentKey(
+    val ciphertextSha256: HexKey,
+    val fileKey: HexKey,
+)
+
+/**
+ * One event a bundle carries: the inner event, the epoch it was sent in, its retention if held, the
+ * moderation verdict held for a review label or admin removal ([grant]), and the `file_key` of each
+ * encrypted-media attachment the sender can give ([keys]).
+ */
 class HistoryEvent(
     val event: Event,
     val epoch: Long,
     val retention: Long? = null,
+    val grant: Boolean? = null,
+    val keys: List<HistoryAttachmentKey> = emptyList(),
 ) {
     val position: HistoryPosition get() = HistoryPosition.of(event, epoch)
 }
@@ -106,8 +120,8 @@ class HistoryEvent(
 /**
  * History bundles (`account-sync.md` "History bundles"): one stretch of one chat's history, as one
  * UTF-8 JSON object, encrypted with ChaCha20-Poly1305 under a fresh key, a zero nonce and the
- * `marmot history bundle v1` associated data. Attachment keys and moderation grants are not sent
- * by this client (both are optional); received ones are checked and then ignored.
+ * `marmot history bundle v1` associated data, with each event's moderation `grant` and attachment
+ * `keys` when the sender holds them.
  */
 object HistoryBundles {
     const val MAX_BYTES = 8_388_608
@@ -153,7 +167,29 @@ object HistoryBundles {
             put("event", eventJson(e.event))
             put("epoch", e.epoch)
             e.retention?.let { put("retention", it) }
+            if (carriesGrant(e.event.kind)) e.grant?.let { put("grant", it) }
+            if (e.keys.isNotEmpty()) {
+                put(
+                    "keys",
+                    buildJsonArray {
+                        e.keys.forEach { k ->
+                            add(
+                                buildJsonObject {
+                                    put("ciphertext_sha256", k.ciphertextSha256)
+                                    put("key", k.fileKey)
+                                },
+                            )
+                        }
+                    },
+                )
+            }
         }
+
+    /** Kinds whose authority a bundle carries as `grant`: a review label (1985) and an admin removal (4891). */
+    fun carriesGrant(kind: Int) = kind == 1985 || kind == 4891
+
+    /** The `encrypted-media-v2` references of [event]'s `imeta` tags that parse. */
+    fun mediaReferences(event: Event): List<EncryptedMediaReferenceV2> = event.tags.mapNotNull { tag -> if (tag.isNotEmpty() && tag[0] == "imeta") EncryptedMediaV2.parseImetaTagOrNull(tag) else null }
 
     /** One bundle's plaintext, members in the order the spec shows. */
     fun encode(
@@ -181,9 +217,24 @@ object HistoryBundles {
         maxBytes: Int = INLINE_MAX_PLAINTEXT,
     ): List<String> {
         val sorted = events.filter { it.epoch <= MAX_NUMBER && it.event.createdAt in 0..MAX_NUMBER && (it.retention ?: 0) in 0..MAX_NUMBER }.sortedBy { it.position }
+        val items = sorted.map { itemJson(it).toString().encodeToByteArray().size }
         val out = ArrayList<String>()
         var current = ArrayList<HistoryEvent>()
+        var currentBytes = 0
         var start: HistoryPosition? = null
+
+        // A bundle's length: its frame with no events, plus each item and a comma between two.
+        fun frame(
+            from: HistoryPosition,
+            to: HistoryPosition,
+        ) = encode(chat, from, to, emptyList()).encodeToByteArray().size
+
+        fun size(
+            from: HistoryPosition,
+            to: HistoryPosition,
+            itemBytes: Int,
+            count: Int,
+        ) = frame(from, to) + itemBytes + (count - 1).coerceAtLeast(0)
 
         fun flush() {
             if (current.isEmpty()) return
@@ -191,17 +242,14 @@ object HistoryBundles {
             out.add(encode(chat, from, current.last().position, current))
             start = current.last().position
             current = ArrayList()
+            currentBytes = 0
         }
-        for (e in sorted) {
-            val alone = encode(chat, start ?: e.position, e.position, listOf(e))
-            if (alone.encodeToByteArray().size > maxBytes) continue
+        for ((i, e) in sorted.withIndex()) {
+            if (size(start ?: e.position, e.position, items[i], 1) > maxBytes) continue
+            val from = start ?: current.firstOrNull()?.position ?: e.position
+            if (current.isNotEmpty() && size(from, e.position, currentBytes + items[i], current.size + 1) > maxBytes) flush()
             current.add(e)
-            val from = start ?: current.first().position
-            if (encode(chat, from, e.position, current).encodeToByteArray().size > maxBytes) {
-                current.removeAt(current.size - 1)
-                flush()
-                current.add(e)
-            }
+            currentBytes += items[i]
         }
         flush()
         return out
@@ -259,7 +307,7 @@ object HistoryBundles {
             val retention = if ("retention" in item.keys) number(item["retention"]) ?: return null else null
             val grant = item["grant"]
             if (grant != null && (grant !is JsonPrimitive || grant.isString || (grant.content != "true" && grant.content != "false"))) return null
-            item["keys"]?.let { keys -> if (!validKeys(keys)) return null }
+            val keys = item["keys"]?.let { keys -> keysOf(keys) ?: return null }.orEmpty()
             val event = eventOf(ev) ?: return null
             // Per-event checks: the event alone is left out.
             if (!event.verifyId()) continue
@@ -268,18 +316,22 @@ object HistoryBundles {
             if (grant != null && event.kind != 1985 && event.kind != 4891) continue
             if (retention != null && retention > 0 && event.createdAt + retention <= now) continue
             if (MarmotDeviceGroupKinds.isDeviceGroupKind(event.kind)) continue
-            kept.add(HistoryEvent(event, epoch, retention))
+            // An attachment key that names none of the event's media references is dropped alone.
+            val references = if (keys.isEmpty()) emptySet() else mediaReferences(event).map { it.ciphertextSha256.toHexKey() }.toSet()
+            kept.add(HistoryEvent(event, epoch, retention, (grant as? JsonPrimitive)?.content?.toBooleanStrictOrNull(), keys.filter { it.ciphertextSha256 in references }))
         }
         return Parsed(bundleChat, from, to, kept)
     }
 
-    private fun validKeys(keys: Any): Boolean {
-        val array = keys as? JsonArray ?: return false
-        if (array.isEmpty()) return false
-        return array.all { k ->
-            val o = k as? JsonObject ?: return false
-            o.keys == setOf("ciphertext_sha256", "key") &&
-                o.values.all { v -> v is JsonPrimitive && v.isString && isHex(v.content, 32) }
+    /** The attachment keys of a `keys` member, or null when it breaks the encoding (an empty one included). */
+    private fun keysOf(keys: Any): List<HistoryAttachmentKey>? {
+        val array = keys as? JsonArray ?: return null
+        if (array.isEmpty()) return null
+        return array.map { k ->
+            val o = k as? JsonObject ?: return null
+            if (o.keys != setOf("ciphertext_sha256", "key")) return null
+            if (!o.values.all { v -> v is JsonPrimitive && v.isString && isHex(v.content, 32) }) return null
+            HistoryAttachmentKey((o["ciphertext_sha256"] as JsonPrimitive).content, (o["key"] as JsonPrimitive).content)
         }
     }
 

@@ -34,6 +34,7 @@ import com.vitorpamplona.marmot.appComponents.DeviceRosterUpdateV1
 import com.vitorpamplona.marmot.appComponents.DeviceRosterV1
 import com.vitorpamplona.marmot.appComponents.DeviceStatusV1
 import com.vitorpamplona.marmot.appComponents.DeviceTagV1
+import com.vitorpamplona.marmot.appComponents.EncryptedMediaV2
 import com.vitorpamplona.marmot.appComponents.GroupLifecycleV1
 import com.vitorpamplona.marmot.appComponents.GroupProfileV1
 import com.vitorpamplona.marmot.appComponents.MarmotGroupState
@@ -44,6 +45,7 @@ import com.vitorpamplona.marmot.appComponents.RosterOperationV1
 import com.vitorpamplona.marmot.client.MarmotManager
 import com.vitorpamplona.marmot.features.accountSync.AccountSyncState
 import com.vitorpamplona.marmot.features.accountSync.AccountSyncStore
+import com.vitorpamplona.marmot.features.accountSync.HistoryAttachmentKey
 import com.vitorpamplona.marmot.features.accountSync.HistoryBundles
 import com.vitorpamplona.marmot.features.accountSync.HistoryDelivery
 import com.vitorpamplona.marmot.features.accountSync.HistoryEvent
@@ -59,6 +61,7 @@ import com.vitorpamplona.marmot.groups.MlsGroupManager
 import com.vitorpamplona.marmot.groups.currentNostrGroupId
 import com.vitorpamplona.marmot.mip00KeyPackages.KeyPackageUtils
 import com.vitorpamplona.marmot.mip01Groups.MlsCiphersuite
+import com.vitorpamplona.marmot.protocolCore.GroupLifecycleState
 import com.vitorpamplona.mls.codec.TlsWriter
 import com.vitorpamplona.mls.components.AppDataDictionary
 import com.vitorpamplona.mls.components.ComponentData
@@ -105,6 +108,7 @@ class MarmotDeviceGroupManager internal constructor(
     private val relayProvider: (suspend () -> List<String>)? = null,
     private val client: String = "",
     private val platform: String = "",
+    private val workStore: DeviceGroupWorkStore = InMemoryDeviceGroupWorkStore(),
 ) {
     /** The device group of [manager], as its config sets it up. Call [start] before use. */
     constructor(manager: MarmotManager, config: MarmotDeviceGroupConfig) :
@@ -120,6 +124,7 @@ class MarmotDeviceGroupManager internal constructor(
             config.relayProvider,
             config.client,
             config.platform,
+            config.workStore,
         )
 
     /** Linking only, over a bare [MlsGroupManager], with this device's slot given. */
@@ -153,6 +158,7 @@ class MarmotDeviceGroupManager internal constructor(
         if (slot == null && m != null) slot = m.keyPackageRotationManager.getOrCreateSlotDTag(KeyPackageUtils.PRIMARY_SLOT)
         cached = trustStore.load() ?: DeviceGroupTrust(ownSlot)
         m?.keyPackageRotationManager?.leafComponents = { key -> ownTagComponents(key) }
+        loadWork()
     }
 
     suspend fun trust(): DeviceGroupTrust = cached ?: (trustStore.load() ?: DeviceGroupTrust(ownSlot)).also { cached = it }
@@ -168,6 +174,18 @@ class MarmotDeviceGroupManager internal constructor(
     fun isTrustedDeviceGroup(nostrGroupId: HexKey): Boolean = cached?.let { !it.unlinked && it.trustedNostrGroupId == nostrGroupId } == true
 
     suspend fun deviceGroupNostrId(): HexKey? = trust().trustedNostrGroupId
+
+    /**
+     * Whether [nostrGroupId] is a device group, which no chat list, count or notification shows
+     * (`device-group.md` "Keeping it out of sight"): the trusted one, the destination of a move not
+     * made yet, the one a move left, or any group whose state carries a device roster (`0x800e`).
+     */
+    fun isOwnDeviceGroup(nostrGroupId: HexKey): Boolean {
+        val t = cached
+        if (t != null && (t.trustedNostrGroupId == nostrGroupId || t.move?.nostrGroupId == nostrGroupId || t.movedFrom?.nostrGroupId == nostrGroupId)) return true
+        val group = groupManager.getGroup(nostrGroupId) ?: return false
+        return DeviceRosterRules.rosterOf(group.view().extensions) != null
+    }
 
     suspend fun isDeviceGroup(nostrGroupId: HexKey): Boolean = trust().trustedNostrGroupId == nostrGroupId
 
@@ -289,6 +307,7 @@ class MarmotDeviceGroupManager internal constructor(
         check(keyPackage.reference().toHexKey() == link.keyPackageRef) { "A device group adds only the KeyPackage the link confirmed" }
         val t = trust()
         check(t.pendingLink == null) { "A device waiting for its own link answers no request" }
+        check(t.move == null) { "A device moving to another device group answers no request" }
         val nostrId = t.trustedNostrGroupId ?: create(link, now, ownLabel)
         val group = checkNotNull(groupManager.getGroup(nostrId))
         check(group.groupId.toHexKey() == link.deviceGroupId) { "The link names another group" }
@@ -446,6 +465,13 @@ class MarmotDeviceGroupManager internal constructor(
         val nostrId = checkNotNull(joined.currentNostrGroupId()) { "The device group carries no routing" }
         val restored = MlsGroup.restore(joined.saveState(), MarmotGroupPolicy)
         if (manager != null) manager.adoptJoinedDeviceGroup(nostrId, restored) else groupManager.adoptGroup(nostrId, restored)
+        if (t.trustsDeviceGroup && !t.unlinked) {
+            // `Moving between device groups`: joining records the destination admission; the original
+            // group stays the sole trusted one until the move is made.
+            saveTrust(t.copy(pendingLink = null, move = DeviceGroupTrust.Move(pending.link.deviceGroupId, nostrId, linkTagSeed(bundle).toHexKey(), pending.link.keyPackageRef)))
+            refresh()
+            return nostrId
+        }
         saveTrust(
             t.copy(
                 trustedGroupId = pending.link.deviceGroupId,
@@ -491,8 +517,9 @@ class MarmotDeviceGroupManager internal constructor(
      */
     suspend fun stageFirstCommit(): Staged {
         val t = trust()
-        val nostrId = checkNotNull(t.trustedNostrGroupId) { "No device group is trusted" }
-        val seed = checkNotNull(t.tagSigningSeed).hexToByteArray()
+        // A moving device makes its first Commit in the destination, under the destination's seed.
+        val nostrId = t.move?.nostrGroupId ?: checkNotNull(t.trustedNostrGroupId) { "No device group is trusted" }
+        val seed = checkNotNull(t.move?.tagSigningSeed ?: t.tagSigningSeed).hexToByteArray()
         val group = checkNotNull(groupManager.getGroup(nostrId))
         val view = group.view()
         val roster = checkNotNull(DeviceRosterRules.rosterOf(view.extensions))
@@ -511,6 +538,19 @@ class MarmotDeviceGroupManager internal constructor(
         return Staged(nostrId, staged)
     }
 
+    /**
+     * Whether this device joined a device group through its link (a new link, or a move's destination)
+     * and its first Commit is still to make: the roster there lists it without its `tag_signature_key`.
+     */
+    suspend fun firstCommitDue(): Boolean {
+        val t = trust()
+        val nostrId = t.move?.nostrGroupId ?: t.trustedNostrGroupId?.takeIf { !t.unlinked } ?: return false
+        val group = groupManager.getGroup(nostrId) ?: return false
+        if (!group.isLocalMember()) return false
+        val own = DeviceRosterRules.rosterOf(group.view().extensions)?.device(t.ownSlot) ?: return false
+        return own.tagSignatureKey == null
+    }
+
     // =================================================================================================
     // Roster commits: link failure, slot announcements, removal, sign-out, rejections
     // =================================================================================================
@@ -518,8 +558,9 @@ class MarmotDeviceGroupManager internal constructor(
     private suspend fun stageRosterUpdate(
         removeLeaves: List<Int>,
         ops: List<RosterOperationV1>,
+        group: HexKey? = null,
     ): Staged {
-        val nostrId = checkNotNull(trust().trustedNostrGroupId) { "No device group is trusted" }
+        val nostrId = group ?: checkNotNull(trust().trustedNostrGroupId) { "No device group is trusted" }
         val update = DeviceRosterUpdateV1.of(ops).encode()
         val staged =
             groupManager.stageOwn(nostrId) { clone ->
@@ -599,16 +640,89 @@ class MarmotDeviceGroupManager internal constructor(
      * A user's rename of [slot], its own entry included (`Labels, clients and platforms`): the Commit
      * that sets the entry's `label` and a fresh `rename_id`, every other field as the roster holds it.
      * Null when the label is already [label]. Publish, then [applyStaged].
+     *
+     * The edit is kept, from before its Commit goes out, with the `rename_id` it writes and the one it
+     * replaces, so a fork that drops it is noticed and the rename made again ([stageEditRecovery]).
      */
     suspend fun stageRename(
         slot: HexKey,
         label: String,
     ): Staged? {
         val entry = checkNotNull(roster()?.device(slot)) { "The roster does not list that device" }
-        if (entry.label == label) return null
-        val renamed = entry.copy(label = label, renameId = RandomInstance.bytes(DeviceRosterV1.RENAME_ID_SIZE).toHexKey())
+        loadWork()
+        if (entry.label == label) {
+            // The roster already reads as the user wants: an earlier lost edit to another label is cancelled.
+            if (edits.removeAll { it.slot == slot && entry.renameId !in it.written }) saveWork()
+            return null
+        }
+        val renameId = RandomInstance.bytes(DeviceRosterV1.RENAME_ID_SIZE).toHexKey()
+        val earlier = edits.firstOrNull { it.slot == slot }
+        val replaced = LinkedHashSet<HexKey>()
+        // The entry still holds an id the earlier edit kept: that edit's ids stand in for it now.
+        if (earlier != null && (entry.renameId in earlier.written || entry.renameId in earlier.replaced)) {
+            replaced.addAll(earlier.replaced)
+            replaced.addAll(earlier.written)
+        }
+        // Last, so trimming never forgets the id the entry held when this edit was built.
+        entry.renameId?.let {
+            replaced.remove(it)
+            replaced.add(it)
+        }
+        edits.removeAll { it.slot == slot }
+        edits.add(DeviceGroupWork.KeptEdit(slot, label, null, listOf(renameId), replaced.toList().takeLast(MAX_KEPT_RENAME_IDS)))
+        saveWork()
+        val renamed = entry.copy(label = label, renameId = renameId)
         return stageRosterUpdate(emptyList(), listOf(RosterOperationV1.SetDevice(renamed)))
     }
+
+    /**
+     * User-edit recovery (`Labels, clients and platforms`): reads where each kept rename stands from the
+     * entry's `rename_id`, while the device group is `Stable` with no Commit of this device unresolved.
+     * One this device wrote: the edit applied, and is kept in case a later fork drops it. One it
+     * replaced: the edit lost a fork and no other edit followed, so it is made again with a fresh
+     * `rename_id` (the Commit returned; publish, then [applyStaged]) unless the entry already holds the
+     * label. Any other: another user edit won and stands, and the kept edit is dropped, as is one for
+     * a device the roster no longer lists. Null when there is nothing to make again.
+     */
+    suspend fun stageEditRecovery(): Staged? {
+        loadWork()
+        if (edits.isEmpty()) return null
+        val nostrId = trust().trustedNostrGroupId ?: return null
+        val m = manager
+        if (m != null && m.lifecycle(nostrId) != GroupLifecycleState.STABLE) return null
+        val roster = roster() ?: return null
+        var changed = false
+        var again: Pair<DeviceGroupWork.KeptEdit, DeviceEntryV1>? = null
+        for (edit in edits.toList()) {
+            val entry = roster.device(edit.slot)
+            val id = entry?.renameId
+            when {
+                entry == null || id == null -> {
+                    edits.remove(edit)
+                    changed = true
+                }
+                id in edit.written -> {}
+                id in edit.replaced -> if (entry.label != edit.label && again == null) again = edit to entry
+                else -> {
+                    edits.remove(edit)
+                    changed = true
+                }
+            }
+        }
+        val (edit, entry) =
+            again ?: run {
+                if (changed) saveWork()
+                return null
+            }
+        val renameId = RandomInstance.bytes(DeviceRosterV1.RENAME_ID_SIZE).toHexKey()
+        edits[edits.indexOf(edit)] = edit.copy(written = (edit.written + renameId).takeLast(MAX_KEPT_RENAME_IDS))
+        saveWork()
+        Log.d(TAG) { "a rename of ${edit.slot.take(8)} lost a fork; making it again" }
+        return stageRosterUpdate(emptyList(), listOf(RosterOperationV1.SetDevice(entry.copy(label = edit.label, renameId = renameId))))
+    }
+
+    /** The user edits this device keeps for recovery, by slot and label (for tests and diagnostics). */
+    fun keptEdits(): List<Pair<HexKey, String>> = edits.map { it.slot to it.label }
 
     /**
      * The account's relays changed: the Commit that moves the trusted device group's routing to
@@ -745,6 +859,7 @@ class MarmotDeviceGroupManager internal constructor(
         if (cached == null) start()
         recordEpochClaims()
         afterRosterChange()
+        checkMove()
         // A delivery read before its chat's Welcome imports once the chat is held.
         if (keptDeliveries.isNotEmpty()) importKeptHistory(TimeUtils.now(), fetch = false)
     }
@@ -800,10 +915,140 @@ class MarmotDeviceGroupManager internal constructor(
         val roster = DeviceRosterRules.rosterOf(group.view().extensions)
         val linkFailed = roster != null && roster.device(t.ownSlot) == null && roster.rejectedSlot(t.ownSlot) == null && t.linkedKeyPackageRef != null
         t.trustedNostrGroupId?.let { discard(it) }
-        val reset = DeviceGroupTrust(ownSlot = t.ownSlot, unlinked = !linkFailed, ownRejections = t.ownRejections, firstCheckSlots = t.firstCheckSlots)
+        // A move still pending keeps going: its destination is another group (`Failure`).
+        val reset = DeviceGroupTrust(ownSlot = t.ownSlot, unlinked = !linkFailed, ownRejections = t.ownRejections, firstCheckSlots = t.firstCheckSlots, move = t.move)
         saveTrust(reset)
         keyPackageStore.save(PrivateKeyPackages())
         Log.w(TAG) { if (linkFailed) "linking this device failed" else "this device was unlinked from its account" }
+    }
+
+    // =================================================================================================
+    // Moving between device groups (device-group.md "Moving between device groups")
+    // =================================================================================================
+
+    /**
+     * `Joining and becoming made`: once this device's first Commit in the move's destination stands
+     * (the roster there lists it with its tag key, and the destination is `Stable`), the move is made,
+     * and the trust record switches to the destination in one write: its ids and seed, the old
+     * roster's `not_me` and `removed` records to carry ([CarriedRejection]), and the group left
+     * ([DeviceGroupTrust.MovedFrom]) for the `moved` status still to commit there. Old-group work
+     * (owed histories, kept edits) stays behind. Removed from the destination before that: the move
+     * failed, the destination is forgotten and the original trust is left as it was.
+     */
+    private suspend fun checkMove() {
+        val t = trust()
+        val move = t.move ?: return
+        val group = groupManager.getGroup(move.nostrGroupId)
+        if (group == null || !group.isLocalMember()) {
+            if (group != null) discard(move.nostrGroupId)
+            saveTrust(t.copy(move = null))
+            Log.w(TAG) { "moving this device to another device group failed" }
+            return
+        }
+        val roster = DeviceRosterRules.rosterOf(group.view().extensions) ?: return
+        val own = roster.device(t.ownSlot) ?: return
+        val tagKey = Ed25519.keyPairFromSeed(move.tagSigningSeed.hexToByteArray()).publicKey.toHexKey()
+        if (own.tagSignatureKey != tagKey) return
+        val m = manager
+        if (m != null && m.lifecycle(move.nostrGroupId) != GroupLifecycleState.STABLE) return
+
+        val oldNostrId = t.trustedNostrGroupId?.takeIf { !t.unlinked }
+        val oldRoster = oldNostrId?.let { groupManager.getGroup(it) }?.let { DeviceRosterRules.rosterOf(it.view().extensions) }
+        val carried =
+            oldRoster
+                ?.rejectedSlots
+                .orEmpty()
+                .filter { it.slot != t.ownSlot }
+                .map { DeviceGroupTrust.CarriedRejection(it.slot, it.reason.code, it.rejectedAt, it.tagSignatureKey) }
+        val movedFrom = if (oldNostrId != null && t.trustedGroupId != null) DeviceGroupTrust.MovedFrom(t.trustedGroupId, oldNostrId) else null
+        saveTrust(
+            DeviceGroupTrust(
+                ownSlot = t.ownSlot,
+                trustedGroupId = move.groupId,
+                trustedNostrGroupId = move.nostrGroupId,
+                tagSigningSeed = move.tagSigningSeed,
+                linkedKeyPackageRef = move.linkedKeyPackageRef,
+                firstCheckSlots = t.firstCheckSlots,
+                ownRejections = t.ownRejections,
+                movedFrom = movedFrom,
+                carriedRejections = carried,
+            ),
+        )
+        // `Old-group work`: none of it becomes destination work.
+        loadWork()
+        owedHistories.clear()
+        edits.clear()
+        saveWork()
+        epochClaims.clear()
+        claims.clear()
+        inventory = null
+        Log.d(TAG) { "moved this device to device group ${move.nostrGroupId.take(8)}" }
+        // Destination activation broadcasts the small state and asks the new siblings for theirs.
+        if (manager != null) outbox.addAll(broadcastDue(TimeUtils.now(), start = true))
+    }
+
+    /** Whether this device waits to make a move it joined ([DeviceGroupTrust.move]); it answers no pairing Request meanwhile. */
+    suspend fun isMoving(): Boolean = trust().move != null
+
+    /**
+     * After a made move, the Commits it still owes, one at a time (publish, then [applyStaged]): first
+     * the carried rejections into the destination roster (`What it brings`: skipped for a slot the
+     * destination lists as a device, which the confirmed link overrode, or already rejects), then this
+     * device's old entry set to `moved` in the group it left (`Leaving the old device group`). Once
+     * `moved` stands there, or that group no longer lists this device, its copy is discarded. Null
+     * when nothing is due now.
+     */
+    suspend fun stageMoveFollowUp(): Staged? {
+        val t = trust()
+        val m = manager
+        val nostrId = t.trustedNostrGroupId
+        if (t.carriedRejections.isNotEmpty() && nostrId != null && !t.unlinked) {
+            val roster = roster() ?: return null
+            if (m == null || m.lifecycle(nostrId) == GroupLifecycleState.STABLE) {
+                t.carriedRejections.filter { roster.device(it.slot) != null }.forEach {
+                    Log.d(TAG) { "a confirmed link overrode the old rejection of ${it.slot.take(8)}" }
+                }
+                val ops =
+                    t.carriedRejections
+                        .filter { it.slot != t.ownSlot && roster.device(it.slot) == null && roster.rejectedSlot(it.slot) == null }
+                        .map { RosterOperationV1.SetRejectedSlot(RejectedSlotV1(it.slot, RejectionReasonV1.of(it.reason), it.rejectedAt, it.tagSignatureKey)) }
+                if (ops.isNotEmpty()) return stageRosterUpdate(emptyList(), ops)
+                saveTrust(t.copy(carriedRejections = emptyList()))
+            }
+        }
+        val from = trust().movedFrom ?: return null
+        val old = groupManager.getGroup(from.nostrGroupId)
+        val entry = old?.takeIf { it.isLocalMember() }?.let { DeviceRosterRules.rosterOf(it.view().extensions) }?.device(t.ownSlot)
+        if (old == null || entry == null) {
+            // The old group's selected branch no longer includes this device: nothing is left to say there.
+            if (old != null) discard(from.nostrGroupId)
+            saveTrust(trust().copy(movedFrom = null))
+            return null
+        }
+        if (m != null && m.lifecycle(from.nostrGroupId) != GroupLifecycleState.STABLE) return null
+        if (entry.status == DeviceStatusV1.MOVED) {
+            discard(from.nostrGroupId)
+            saveTrust(trust().copy(movedFrom = null))
+            Log.d(TAG) { "left the old device group ${from.nostrGroupId.take(8)}" }
+            return null
+        }
+        // Its own inline Commit, every other field (rename_id included) kept; the old leaf keeps its key and tag.
+        return stageRosterUpdate(emptyList(), listOf(RosterOperationV1.SetDevice(entry.copy(status = DeviceStatusV1.MOVED))), from.nostrGroupId)
+    }
+
+    /**
+     * An old sibling's side of a move: a device the roster lists as `moved` goes, its leaf and its
+     * entry in one Commit, with no rejection recorded, no chat leaf removed and no slot deleted.
+     * Null when no sibling moved, or while the device group is not `Stable`.
+     */
+    suspend fun stageMovedCleanup(): Staged? {
+        val nostrId = trust().trustedNostrGroupId ?: return null
+        val roster = roster() ?: return null
+        val moved = roster.devices.firstOrNull { it.slot != ownSlot && it.status == DeviceStatusV1.MOVED } ?: return null
+        val m = manager
+        if (m != null && m.lifecycle(nostrId) != GroupLifecycleState.STABLE) return null
+        val leaf = leafClaims(nostrId).firstOrNull { it.second == DeviceTagV1.Claim.Device(moved.slot) }?.first
+        return stageRosterUpdate(listOfNotNull(leaf), listOf(RosterOperationV1.RemoveDevice(moved.slot)))
     }
 
     /**
@@ -1148,7 +1393,7 @@ class MarmotDeviceGroupManager internal constructor(
         val relayUrls = AppDataDictionary.fromExtensionsOrEmpty(group.view().extensions)[NostrRoutingV1.COMPONENT_ID]?.let { NostrRoutingV1.decode(it).relays }.orEmpty()
         val result = m.addWithSiblings(nostrGroupId, emptyList(), listOf(held.keyPackage), m.groupRelays(nostrGroupId))
         // The Commit's publication succeeded: this device owes the sibling the chat's history.
-        if (result.siblingWelcome != null) owedHistories.add(OwedHistory(nostrGroupId, slot, now))
+        if (result.siblingWelcome != null) owe(nostrGroupId, slot, now)
         return SiblingAdd(result, siblingWelcomes(nostrGroupId, result.siblingWelcome, listOf(slot to held), relayUrls, now), emptyList())
     }
 
@@ -1605,28 +1850,73 @@ class MarmotDeviceGroupManager internal constructor(
 
     // ---- history deliveries (account-sync.md "History deliveries") ------------------------------------
 
-    private class OwedHistory(
-        val chat: HexKey,
-        val slot: HexKey,
-        val owedAt: Long,
-    )
-
-    /**
-     * Histories this device owes the siblings its own Commits added to chats. Memory only: a restart
-     * before [historyDeliveries] runs forgets them (the spec's limits already allow a lost history).
-     */
-    private val owedHistories = ArrayList<OwedHistory>()
-
     private class KeptDelivery(
         val delivery: HistoryDelivery,
+        val content: String,
         val key: ByteArray,
         val hash: ByteArray,
         val readAt: Long,
         var ciphertext: ByteArray?,
     )
 
-    /** Deliveries read that cannot be imported yet: their chat is not held, or their blob not fetched. Memory only. */
+    /** Histories this device owes the siblings its own Commits added to chats; persisted in [workStore]. */
+    private val owedHistories = ArrayList<DeviceGroupWork.OwedHistory>()
+
+    /** Deliveries read that cannot be imported yet: their chat is not held, or their blob not fetched. Persisted. */
     private val keptDeliveries = ArrayList<KeptDelivery>()
+
+    /** User edits of roster entries, kept until another edit of that entry stands ([stageEditRecovery]). Persisted. */
+    private val edits = ArrayList<DeviceGroupWork.KeptEdit>()
+
+    /** (chat Nostr id, ciphertext_sha256) to the `file_key` an imported history brought. Persisted. */
+    private val attachmentKeys = LinkedHashMap<Pair<HexKey, HexKey>, HexKey>()
+
+    private var workLoaded = false
+
+    private suspend fun loadWork() {
+        if (workLoaded) return
+        workLoaded = true
+        val work =
+            try {
+                workStore.load()
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                Log.w(TAG, "unreadable device-group work; starting without it", e)
+                null
+            } ?: return
+        owedHistories.addAll(work.owed)
+        work.kept.forEach { k ->
+            HistoryDelivery.parse(k.content)?.let { keptDeliveries.add(KeptDelivery(it, k.content, k.key, k.hash, k.readAt, it.bundle)) }
+        }
+        edits.addAll(work.edits)
+        work.attachmentKeys.forEach { attachmentKeys[it.chat to it.ciphertextSha256] = it.fileKey }
+    }
+
+    private suspend fun saveWork() {
+        val work =
+            DeviceGroupWork(
+                owed = owedHistories.toList(),
+                kept = keptDeliveries.map { DeviceGroupWork.KeptDelivery(it.content, it.key, it.hash, it.readAt) },
+                edits = edits.toList(),
+                attachmentKeys = attachmentKeys.map { (k, v) -> DeviceGroupWork.AttachmentKey(k.first, k.second, v) },
+            )
+        try {
+            workStore.save(work)
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            Log.w(TAG, "could not save the device-group work", e)
+        }
+    }
+
+    private suspend fun owe(
+        nostrGroupId: HexKey,
+        slot: HexKey,
+        now: Long,
+    ) {
+        loadWork()
+        owedHistories.add(DeviceGroupWork.OwedHistory(nostrGroupId, slot, now))
+        saveWork()
+    }
 
     /** Events a history delivery brought into [nostrGroupId], already in the message store. */
     class ImportedHistory(
@@ -1646,6 +1936,17 @@ class MarmotDeviceGroupManager internal constructor(
     @Volatile
     var historyBlobFetcher: (suspend (url: String, maxBytes: Long) -> ByteArray?)? = null
 
+    /**
+     * Uploads one bundle's ciphertext to Blossom servers of the app's choosing (BUD-02 `/upload`),
+     * returning the base URLs of the servers that hold it now (one to four), or null when no upload
+     * succeeded. Set by an app with Blossom servers: a history longer than [MAX_HISTORY_BUNDLES]
+     * inline bundles then goes out as up to [MAX_HISTORY_BUNDLES] bundles of up to
+     * [BLOSSOM_BUNDLE_MAX_PLAINTEXT] bytes each through Blossom. Without it the newest inline
+     * bundles go and the older history is left out.
+     */
+    @Volatile
+    var historyBlobUploader: (suspend (ciphertext: ByteArray) -> List<String>?)? = null
+
     /** The histories imported since the last call, for the app to show. */
     fun drainImportedHistory(): List<ImportedHistory> = imported.toList().also { imported.clear() }
 
@@ -1656,48 +1957,109 @@ class MarmotDeviceGroupManager internal constructor(
     fun keptHistoryCount(): Int = keptDeliveries.size
 
     /**
+     * The `file_key` an imported history gave for the attachment whose ciphertext hashes to
+     * [ciphertextSha256] in [nostrGroupId], for a file of an epoch this device never held.
+     */
+    fun importedFileKey(
+        nostrGroupId: HexKey,
+        ciphertextSha256: HexKey,
+    ): ByteArray? = attachmentKeys[nostrGroupId to ciphertextSha256]?.hexToByteArray()
+
+    /**
      * `Sending`: the deliveries of every history this device owes, while its own leaf is tagged: each
      * sibling still in the roster with "bring chat history" on and a history key gets the chat as this
-     * device holds it, in inline bundles, the newest [MAX_HISTORY_BUNDLES] when it needs more. Returns
-     * the events to publish in the device group; a history is forgotten once its deliveries are built.
+     * device holds it, with its moderation grants and attachment keys. A history that fits
+     * [MAX_HISTORY_BUNDLES] inline bundles goes inline; a longer one goes through Blossom when the app
+     * set a [historyBlobUploader] (its newest [MAX_HISTORY_BUNDLES] bundles), else as its newest
+     * inline bundles. Returns the events to publish in the device group; a history is forgotten once
+     * its deliveries are built, and stays owed when an upload failed.
      */
     suspend fun historyDeliveries(now: Long): List<OutboundGroupEvent> {
-        owedHistories.removeAll { now >= it.owedAt + HistoryDelivery.LIFETIME_SECS }
-        if (owedHistories.isEmpty() || !ownLeafTagged()) return emptyList()
+        loadWork()
+        val expired = owedHistories.removeAll { now >= it.owedAt + HistoryDelivery.LIFETIME_SECS }
+        if (owedHistories.isEmpty() || !ownLeafTagged()) {
+            if (owedHistories.isNotEmpty()) {
+                val nostrId = trust().trustedNostrGroupId
+                val view = nostrId?.let { groupManager.getGroup(it) }?.view()
+                val leaf = view?.let { it.leafNode(it.myLeafIndex) }
+                val claim = leaf?.let { l -> roster()?.let { DeviceTagV1.read(l, it) } }
+                Log.d(TAG) { "${owedHistories.size} owed histories wait for this device's leaf to carry its tag (group ${view != null}, claim $claim, slot ${ownSlot.take(8)})" }
+            }
+            if (expired) saveWork()
+            return emptyList()
+        }
         val roster = roster() ?: return emptyList()
         val out = ArrayList<OutboundGroupEvent>()
         for (owed in owedHistories.toList()) {
+            val built =
+                try {
+                    deliveriesFor(owed, roster, now)
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                    Log.w(TAG, "could not build the history of ${owed.chat.take(8)} for ${owed.slot.take(8)}", e)
+                    emptyList()
+                }
+            // Null: an upload failed, so the history stays owed and goes again on a later pass.
+            if (built == null) continue
             owedHistories.remove(owed)
-            try {
-                out.addAll(deliveriesFor(owed, roster, now))
-            } catch (e: Exception) {
-                Log.w(TAG, "could not build the history of ${owed.chat.take(8)} for ${owed.slot.take(8)}", e)
-            }
+            out.addAll(built)
         }
+        saveWork()
         return out
     }
 
     private suspend fun deliveriesFor(
-        owed: OwedHistory,
+        owed: DeviceGroupWork.OwedHistory,
         roster: DeviceRosterV1,
         now: Long,
-    ): List<OutboundGroupEvent> {
-        val entry = roster.device(owed.slot) ?: return emptyList()
-        if (!entry.bringHistory) return emptyList()
-        val historyKey = entry.historyKey?.takeIf { it.length == 64 }?.hexToByteArray() ?: return emptyList()
-        val group = groupManager.getGroup(owed.chat) ?: return emptyList()
-        val chat = group.groupId.toHexKey()
-        if (!HistoryBundles.isChat(chat)) return emptyList()
-        val bundles = HistoryBundles.split(chat, historyOf(owed.chat, now)).takeLast(MAX_HISTORY_BUNDLES)
-        return bundles.mapNotNull { plaintext ->
-            val (key, ciphertext) = HistoryBundles.encrypt(plaintext.encodeToByteArray())
-            val sealed = HistoryDelivery.seal(historyKey, ownSlot, owed.slot, chat, key, HistoryDelivery.hash(ciphertext))
-            val content = HistoryDelivery(ownSlot, owed.slot, chat, sealed, ciphertext, null).content()
-            if (content.encodeToByteArray().size > HistoryDelivery.MAX_CONTENT_BYTES) null else deviceGroupEvent(HistoryDelivery.KIND, content, now)
+    ): List<OutboundGroupEvent>? {
+        val entry = roster.device(owed.slot)
+        val historyKey = entry?.historyKey?.takeIf { it.length == 64 }?.hexToByteArray()
+        val group = groupManager.getGroup(owed.chat)
+        val chat = group?.groupId?.toHexKey()
+        if (entry == null || !entry.bringHistory || historyKey == null || chat == null || !HistoryBundles.isChat(chat)) {
+            Log.d(TAG) { "history of ${owed.chat.take(8)} for ${owed.slot.take(8)} forgotten: device ${entry != null}, bring ${entry?.bringHistory}, key ${historyKey != null}, chat ${chat != null}" }
+            return emptyList()
         }
+        val events = historyOf(owed.chat, now)
+        Log.d(TAG) { "history of ${owed.chat.take(8)} for ${owed.slot.take(8)}: ${events.size} event(s)" }
+        val inline = HistoryBundles.split(chat, events)
+        val uploader = historyBlobUploader
+        if (inline.size <= MAX_HISTORY_BUNDLES || uploader == null) {
+            return inline.takeLast(MAX_HISTORY_BUNDLES).mapNotNull { plaintext ->
+                val (key, ciphertext) = HistoryBundles.encrypt(plaintext.encodeToByteArray())
+                val sealed = HistoryDelivery.seal(historyKey, ownSlot, owed.slot, chat, key, HistoryDelivery.hash(ciphertext))
+                val content = HistoryDelivery(ownSlot, owed.slot, chat, sealed, ciphertext, null).content()
+                if (content.encodeToByteArray().size > HistoryDelivery.MAX_CONTENT_BYTES) null else deviceGroupEvent(HistoryDelivery.KIND, content, now)
+            }
+        }
+        val out = ArrayList<OutboundGroupEvent>()
+        for (plaintext in HistoryBundles.split(chat, events, BLOSSOM_BUNDLE_MAX_PLAINTEXT).takeLast(MAX_HISTORY_BUNDLES)) {
+            val (key, ciphertext) = HistoryBundles.encrypt(plaintext.encodeToByteArray())
+            val hash = HistoryDelivery.hash(ciphertext)
+            val servers =
+                try {
+                    uploader(ciphertext)
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                    Log.w(TAG, "could not upload a history bundle of ${owed.chat.take(8)}", e)
+                    null
+                }?.filter { HistoryDelivery.isServerUrl(it) }
+                    ?.distinct()
+                    ?.take(HistoryDelivery.MAX_SERVERS)
+            // `Sending`: a bundle whose upload fails leaves the history owed, to be sent again.
+            if (servers.isNullOrEmpty()) return null
+            val sealed = HistoryDelivery.seal(historyKey, ownSlot, owed.slot, chat, key, hash)
+            out.add(deviceGroupEvent(HistoryDelivery.KIND, HistoryDelivery(ownSlot, owed.slot, chat, sealed, null, servers).content(), now))
+        }
+        return out
     }
 
-    /** Every app event of the chat this device holds with its epoch, unexpired, in chat order. */
+    /**
+     * Every app event of the chat this device holds with its epoch, unexpired, in chat order, with the
+     * moderation verdict this device holds for a review label or an admin removal (`grant`) and the
+     * `file_key` of each encrypted-media attachment it can open (`keys`).
+     */
     private suspend fun historyOf(
         nostrGroupId: HexKey,
         now: Long,
@@ -1713,9 +2075,27 @@ class MarmotDeviceGroupManager internal constructor(
                 if (MarmotDeviceGroupKinds.isDeviceGroupKind(event.kind)) return@mapNotNull null
                 val expiry = expiries[event.id]
                 if (expiry != null && expiry <= now) return@mapNotNull null
-                HistoryEvent(event, epoch, expiry?.let { (it - event.createdAt).coerceAtLeast(1) })
+                val grant = if (HistoryBundles.carriesGrant(event.kind)) m.moderationVerdict(nostrGroupId, event.id) else null
+                HistoryEvent(event, epoch, expiry?.let { (it - event.createdAt).coerceAtLeast(1) }, grant, attachmentKeysOf(m, nostrGroupId, event, epoch))
             }.distinctBy { it.event.id }
             .sortedBy { it.position }
+    }
+
+    /** The `file_key` of each encrypted-media attachment of [event] this device can give. */
+    private suspend fun attachmentKeysOf(
+        m: MarmotManager,
+        nostrGroupId: HexKey,
+        event: Event,
+        epoch: Long,
+    ): List<HistoryAttachmentKey> {
+        val references = HistoryBundles.mediaReferences(event)
+        if (references.isEmpty()) return emptyList()
+        val secret = m.mediaSecretAtEpoch(nostrGroupId, epoch)
+        return references.mapNotNull { reference ->
+            val hash = reference.ciphertextSha256.toHexKey()
+            val key = secret?.let { EncryptedMediaV2.fileKeyOf(it, reference) } ?: importedFileKey(nostrGroupId, hash) ?: return@mapNotNull null
+            HistoryAttachmentKey(hash, key.toHexKey())
+        }
     }
 
     private suspend fun onHistoryDelivery(
@@ -1723,12 +2103,15 @@ class MarmotDeviceGroupManager internal constructor(
         event: Event,
         now: Long,
     ) {
+        loadWork()
         val delivery = HistoryDelivery.parse(event.content) ?: return
         if (delivery.to != ownSlot || delivery.from != sender) return
         val seed = trust().tagSigningSeed?.hexToByteArray() ?: return
         val (key, hash) = HistoryDelivery.open(HistoryKeys.keyPair(seed).privateKey, delivery.from, delivery.to, delivery.chat, delivery.sealed) ?: return
+        if (keptDeliveries.any { it.content == event.content }) return
         if (keptDeliveries.size >= MAX_KEPT_DELIVERIES) keptDeliveries.removeAt(0)
-        keptDeliveries.add(KeptDelivery(delivery, key, hash, now, delivery.bundle))
+        keptDeliveries.add(KeptDelivery(delivery, event.content, key, hash, now, delivery.bundle))
+        saveWork()
         importKeptHistory(now, fetch = false)
     }
 
@@ -1741,26 +2124,38 @@ class MarmotDeviceGroupManager internal constructor(
         now: Long,
         fetch: Boolean = true,
     ) {
-        keptDeliveries.removeAll { now >= it.readAt + HistoryDelivery.LIFETIME_SECS }
-        if (keptDeliveries.isEmpty()) return
+        loadWork()
+        var changed = keptDeliveries.removeAll { now >= it.readAt + HistoryDelivery.LIFETIME_SECS }
+        if (keptDeliveries.isEmpty()) {
+            if (changed) saveWork()
+            return
+        }
         val roster = roster()
         for (kept in keptDeliveries.toList()) {
             if (roster?.device(kept.delivery.from) == null) {
                 keptDeliveries.remove(kept)
+                changed = true
                 continue
             }
             val nostrId = nostrIdOf(kept.delivery.chat) ?: continue
             val ciphertext = kept.ciphertext ?: (if (fetch) fetchBlob(kept) else null) ?: continue
             if (!HistoryDelivery.hash(ciphertext).contentEquals(kept.hash)) {
                 // Other bytes than the sealed hash: an inline one is dropped, a fetched one is tried again.
-                if (kept.delivery.bundle != null) keptDeliveries.remove(kept) else kept.ciphertext = null
+                if (kept.delivery.bundle != null) {
+                    keptDeliveries.remove(kept)
+                    changed = true
+                } else {
+                    kept.ciphertext = null
+                }
                 continue
             }
             keptDeliveries.remove(kept)
+            changed = true
             val plaintext = HistoryBundles.decrypt(ciphertext, kept.key) ?: continue
             val bundle = HistoryBundles.parse(plaintext.decodeToString(), kept.delivery.chat, now) ?: continue
             importBundle(nostrId, bundle)
         }
+        if (changed) saveWork()
     }
 
     private suspend fun fetchBlob(kept: KeptDelivery): ByteArray? {
@@ -1778,7 +2173,11 @@ class MarmotDeviceGroupManager internal constructor(
         return null
     }
 
-    /** Adds the events of [bundle] this device does not hold yet; never touches the ones it holds. */
+    /**
+     * Adds the events of [bundle] this device does not hold yet; never touches the ones it holds. A
+     * review label's or admin removal's `grant` becomes its recorded authority before the event is
+     * stored, and the attachment keys are kept for files of epochs this device never held.
+     */
     private suspend fun importBundle(
         nostrGroupId: HexKey,
         bundle: HistoryBundles.Parsed,
@@ -1788,7 +2187,19 @@ class MarmotDeviceGroupManager internal constructor(
         m.loadStoredMessages(nostrGroupId).forEach { json -> Event.fromJsonOrNull(json)?.let { held.add(it.id) } }
         val fresh = bundle.events.filter { held.add(it.event.id) }
         if (fresh.isEmpty()) return
-        fresh.forEach { m.persistDecryptedMessage(nostrGroupId, it.event.toJson(), it.epoch) }
+        var keysAdded = false
+        fresh.forEach {
+            it.grant?.let { granted -> m.recordImportedModerationVerdict(nostrGroupId, it.event.id, granted) }
+            it.keys.forEach { k ->
+                attachmentKeys[nostrGroupId to k.ciphertextSha256] = k.fileKey
+                keysAdded = true
+            }
+            m.persistDecryptedMessage(nostrGroupId, it.event.toJson(), it.epoch)
+        }
+        if (keysAdded) {
+            while (attachmentKeys.size > MAX_ATTACHMENT_KEYS) attachmentKeys.remove(attachmentKeys.keys.first())
+            saveWork()
+        }
         imported.add(ImportedHistory(nostrGroupId, fresh.map { it.event }, fresh.associate { it.event.id to it.epoch }))
         Log.d(TAG) { "imported ${fresh.size} event(s) of history into ${nostrGroupId.take(8)}" }
     }
@@ -1915,6 +2326,15 @@ class MarmotDeviceGroupManager internal constructor(
 
         /** Deliveries a device keeps while it waits for their chat or blob. */
         const val MAX_KEPT_DELIVERIES = 256
+
+        /** The plaintext bound of a bundle sent through Blossom: the longest a bundle may be. */
+        const val BLOSSOM_BUNDLE_MAX_PLAINTEXT = HistoryBundles.MAX_BYTES
+
+        /** `rename_id`s kept per edit, written and replaced each; the newest stay. */
+        const val MAX_KEPT_RENAME_IDS = 16
+
+        /** Imported attachment keys kept; the oldest go first. */
+        const val MAX_ATTACHMENT_KEYS = 8192
 
         /** The longest bundle's ciphertext: 8 MiB and its 16-byte tag. */
         const val MAX_BUNDLE_CIPHERTEXT = HistoryBundles.MAX_BYTES + 16

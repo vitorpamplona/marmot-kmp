@@ -36,6 +36,7 @@ import com.vitorpamplona.marmot.appComponents.CurrentProfileGroupFactory
 import com.vitorpamplona.marmot.appComponents.EncryptedMediaPolicyV2
 import com.vitorpamplona.marmot.appComponents.EncryptedMediaReferenceV2
 import com.vitorpamplona.marmot.appComponents.EncryptedMediaV2
+import com.vitorpamplona.marmot.appComponents.EncryptedMediaV2Cipher
 import com.vitorpamplona.marmot.appComponents.GroupAvatarUrlV1
 import com.vitorpamplona.marmot.appComponents.GroupBlossomImageV1
 import com.vitorpamplona.marmot.appComponents.GroupLifecycleV1
@@ -2120,6 +2121,32 @@ class MarmotManager(
         return if (isAuthorizedAdminAction(nostrGroupId, event)) reportIds else emptyList()
     }
 
+    /** The authority verdict this device holds for [eventId], a kind 4891 or 1985, or null when it decided none. */
+    internal suspend fun moderationVerdict(
+        nostrGroupId: HexKey,
+        eventId: HexKey,
+    ): Boolean? = moderationMutex.withLock { moderationVerdictsUnlocked(nostrGroupId)[eventId] }
+
+    /**
+     * An imported history's `grant` for [eventId] (`account-sync.md` "History bundles"): the recorded
+     * verdict of its author's authority, kept like one this device decided. A verdict already held wins.
+     */
+    internal suspend fun recordImportedModerationVerdict(
+        nostrGroupId: HexKey,
+        eventId: HexKey,
+        granted: Boolean,
+    ) = moderationMutex.withLock {
+        val verdicts = moderationVerdictsUnlocked(nostrGroupId)
+        if (verdicts.containsKey(eventId)) return@withLock
+        verdicts[eventId] = granted
+        try {
+            messageStore?.recordModerationVerdict(nostrGroupId, eventId, granted)
+        } catch (e: Exception) {
+            currentCoroutineContext().ensureActive()
+            Log.w("MarmotManager", "Failed to persist the imported verdict of $eventId for $nostrGroupId", e)
+        }
+    }
+
     private suspend fun isAuthorizedAdminAction(
         nostrGroupId: HexKey,
         event: Event,
@@ -2320,6 +2347,27 @@ class MarmotManager(
                 else -> null
             }
         }
+
+    /** [epoch]'s media secret of [nostrGroupId]: captured, or derived now while the epoch is held. */
+    internal suspend fun mediaSecretAtEpoch(
+        nostrGroupId: HexKey,
+        epoch: Long,
+    ): ByteArray? = mediaKeyMutex.withLock { mediaSecretAtUnlocked(nostrGroupId, epoch) }
+
+    /**
+     * The cipher that opens [reference], an attachment of [innerEventId] in [nostrGroupId]: under the
+     * media secret of the epoch that carried it ([mediaSecretForMessage]), or, for a message a
+     * linked sibling's history brought from an epoch this device never held, under the `file_key`
+     * that history gave for it. Null when neither is at hand.
+     */
+    suspend fun mediaCipherForMessage(
+        nostrGroupId: HexKey,
+        innerEventId: HexKey,
+        reference: EncryptedMediaReferenceV2,
+    ): EncryptedMediaV2Cipher? {
+        mediaSecretForMessage(nostrGroupId, innerEventId)?.let { return EncryptedMediaV2Cipher(it, reference) }
+        return deviceGroups?.importedFileKey(nostrGroupId, reference.ciphertextSha256.toHexKey())?.let { EncryptedMediaV2Cipher.withFileKey(it, reference) }
+    }
 
     /** Inner event id → delivering MLS epoch, for whatever the store kept. */
     suspend fun storedEpochs(nostrGroupId: HexKey): Map<String, Long> =
