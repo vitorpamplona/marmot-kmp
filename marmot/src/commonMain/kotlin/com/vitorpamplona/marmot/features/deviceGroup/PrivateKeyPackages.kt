@@ -186,8 +186,29 @@ class InMemoryPrivateKeyPackageStore(
 class MarmotDeviceGroupConfig(
     val trustStore: DeviceGroupTrustStore,
     val privateKeyPackageStore: PrivateKeyPackageStore,
-    /** The relays of a device group this device creates. */
+    /** The relays of a device group this device creates, when [relayProvider] is null or names none. */
     val relays: List<String>,
     /** Small state shared with siblings (`account-sync.md`): invitation decisions, read, pin, mute, archive. */
     val accountSyncStore: AccountSyncStore = InMemoryAccountSyncStore(),
-)
+    /**
+     * The account's relays as they are now, read when this device creates its device group: an app
+     * whose relay lists load after the account is built passes them here, so the group does not
+     * start on a default set. [MarmotDeviceGroupManager.stageRelays] moves an existing group.
+     */
+    val relayProvider: (suspend () -> List<String>)? = null,
+    /**
+     * This device's `client` and `platform` for its own roster entry (`device-group.md` "Labels,
+     * clients and platforms"): the client name its KeyPackages carry, and a short platform name such
+     * as `Android`. Written in its founding entry, its first Commit and its slot announcements.
+     */
+    val client: String = "",
+    val platform: String = "",
+) {
+    @Deprecated("Kept for binary compatibility", level = DeprecationLevel.HIDDEN)
+    constructor(
+        trustStore: DeviceGroupTrustStore,
+        privateKeyPackageStore: PrivateKeyPackageStore,
+        relays: List<String>,
+        accountSyncStore: AccountSyncStore,
+    ) : this(trustStore, privateKeyPackageStore, relays, accountSyncStore, null, "", "")
+}

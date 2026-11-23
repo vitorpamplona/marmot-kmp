@@ -277,3 +277,11 @@ key. The spec only says "each device makes its own tag signature key pair". With
 White Noise approver kept the link `linking` and never added the Amethyst device to its chats. The
 new device now uses the confirmed KeyPackage's leaf key as its tag key (`linkTagSeed`). Our own
 approver still accepts any key, as the spec allows.
+
+## Sixth pass: own roster fields, renames, relay moves and history deliveries (2026-11-23)
+
+| Gap | Now |
+|---|---|
+| 1.19 labels, clients, platforms | **done**: `MarmotDeviceGroupConfig.client`/`platform` go in this device's founding entry, its first Commit, its slot announcements and `stageOwnEntryRefresh` (only its own entry); `approve(…, ownLabel)` names the founding entry; `stageRename(slot, label)` writes the label and a fresh `rename_id`, every other field kept. Not done: the user-edit recovery (kept written/replaced `rename_id`s re-applied after a lost fork); a rename that loses a fork is lost and the user renames again. |
+| The device group's relays | **done**: `relayProvider` is read when the group is founded (an app whose lists load late no longer founds it on its defaults); `stageRelays` moves the routing of an existing one, `nostr_group_id` kept. |
+| History deliveries (473) | **done, inline**: history keys derived from the tag signing seed (labelled HKDF, then HPKE `DeriveKeyPair`; no store layout change), written in the founding entry, the first Commit and own-entry updates. A same-account Add whose publication succeeded owes the chat's history; `historyDeliveries(now)` seals each bundle (ChaCha20-Poly1305, zero nonce) to the sibling's key, at most 8 inline bundles, newest kept. Receiving checks the exact encoding, `to`, `from` = the sending tag, opens `sealed`, checks the hash, imports events it does not hold (`persistDecryptedMessage`) and reports them (`drainImportedHistory`); a delivery for a chat not held yet is kept until its sibling Welcome joins. Blossom: received through an app's `historyBlobFetcher`; never sent. Not done: attachment keys and moderation grants (both optional, not sent), owed histories and kept deliveries across a restart (memory only), re-owing a withdrawn delivery. Tests: `DeviceGroupHistoryTest`. |
