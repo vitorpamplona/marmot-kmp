@@ -634,8 +634,15 @@ class MarmotInboundProcessor(
         return when (privMsg.contentType) {
             ContentType.APPLICATION -> {
                 val bytes = mlsMessage.toTlsBytes()
-                val decrypted = groupManager.decryptOrNull(groupId, bytes)
-                if (decrypted == null) {
+                val attributed =
+                    try {
+                        groupManager.decryptAndAttribute(groupId, bytes)
+                    } catch (e: Exception) {
+                        currentCoroutineContext().ensureActive()
+                        null
+                    }
+                val decrypted = attributed?.message
+                if (attributed == null || decrypted == null) {
                     // Canonical state and every retained canonical epoch
                     // failed. Before giving up, try the branches convergence is
                     // holding — a payload sent on a fork decrypts on no
@@ -654,7 +661,10 @@ class MarmotInboundProcessor(
                     // could mint messages attributed to anyone else in the
                     // group. Payloads with no author field at all (raw bytes
                     // via buildGroupEventFromBytes) have nothing to compare.
-                    val senderIdentity = groupManager.memberIdentityHex(groupId, decrypted.senderLeafIndex)
+                    // The identity is the one the leaf held in the epoch the
+                    // message was sent in: a late message's leaf may hold
+                    // someone else today.
+                    val senderIdentity = attributed.senderIdentityHex
                     if (author != null && (senderIdentity == null || author != senderIdentity)) {
                         return GroupEventResult.Error(
                             groupId,
