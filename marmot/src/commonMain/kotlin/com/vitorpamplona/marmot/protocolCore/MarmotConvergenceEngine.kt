@@ -636,7 +636,10 @@ class MarmotConvergenceEngine(
                 return null
             }
             try {
-                groupManager.installState(groupId, target)
+                // Over the tip this pass froze only: a linear Commit applied
+                // since (live ingest) is a later state this rewind must not
+                // overwrite. The pass stays and is resolved again over it.
+                if (!groupManager.installStateIfAt(groupId, inputs.retained.last(), target)) return null
             } catch (e: Exception) {
                 currentCoroutineContext().ensureActive()
                 Log.w("MarmotConvergence", "rewind of $groupId to the selected branch failed: ${e.message}", e)

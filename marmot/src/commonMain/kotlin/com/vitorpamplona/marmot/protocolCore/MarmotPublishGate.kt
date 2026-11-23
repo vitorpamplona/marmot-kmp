@@ -379,8 +379,11 @@ class MarmotPublishGate(
             mutex.withLock { lifecycles[obligation.groupId] = GroupLifecycleState.MERGING }
             // Applying happens outside the lock: installState persists, and a
             // partially applied merge must never be observable, so the state
-            // swap is the single atomic step that ends it.
-            groupManager.installState(obligation.groupId, obligation.pendingState)
+            // swap is the single atomic step that ends it. Only over the state
+            // the Commit was staged from: peer Commits applied while the publish
+            // was in flight stay, and ours becomes their competitor
+            // ([MarmotManager] hands it to convergence).
+            groupManager.installStateIfAt(obligation.groupId, obligation.priorState, obligation.pendingState)
         }
 
         if (outcome == PublishOutcome.UNKNOWN) {

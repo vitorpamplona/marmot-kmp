@@ -282,6 +282,28 @@ class MlsGroupManager(
     }
 
     /**
+     * [installState], but only while the live group is still at [expected]: a Commit staged from
+     * [expected] whose publish was in flight while peer Commits were applied must not rewind the
+     * group off them. False, and nothing changed, when the group moved on.
+     */
+    suspend fun installStateIfAt(
+        nostrGroupId: HexKey,
+        expected: MlsGroupState,
+        state: MlsGroupState,
+    ): Boolean =
+        mutex.withLock {
+            val current = groups[nostrGroupId] ?: return@withLock false
+            val live = current.saveState().groupContext.toTlsBytes()
+            if (live.contentEquals(state.groupContext.toTlsBytes())) return@withLock true
+            if (!live.contentEquals(expected.groupContext.toTlsBytes())) return@withLock false
+            val outgoing = current.retainedSecrets()
+            groups[nostrGroupId] = MlsGroup.restore(state, MarmotGroupPolicy)
+            pushRetainedEpoch(nostrGroupId, outgoing)
+            persistGroup(nostrGroupId)
+            true
+        }
+
+    /**
      * Register and persist a group built elsewhere, e.g. by
      * `CurrentProfileGroupFactory`.
      *

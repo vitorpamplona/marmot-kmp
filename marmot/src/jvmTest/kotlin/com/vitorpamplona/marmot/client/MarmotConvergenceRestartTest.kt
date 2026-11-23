@@ -50,7 +50,18 @@ class MarmotConvergenceRestartTest {
         val messages = SnapshotMessageStore()
         val bundles = SnapshotBundleStore()
         val published = mutableListOf<Event>()
-        private val relay = MarmotPublisher { event, _ -> published.add(event).let { true } }
+
+        /** Runs while a publish is in flight, the way live ingest does in an app. */
+        var duringPublish: (suspend () -> Unit)? = null
+        private val relay =
+            MarmotPublisher { event, _ ->
+                published.add(event)
+                duringPublish?.let {
+                    duringPublish = null
+                    it()
+                }
+                true
+            }
         var manager = build()
 
         fun build() = MarmotManager(signer, store, messages, bundles, publisher = relay)
@@ -196,5 +207,55 @@ class MarmotConvergenceRestartTest {
                 "the pass ends with the run",
             )
             assertContentEquals(alice.context(), carol.context(), "Carol must land on Alice's branch")
+        }
+
+    /**
+     * A competing branch two Commits deep: its second Commit sits at an epoch number the receiver
+     * holds too, but on its own branch, so it verifies against no canonical state. It must extend
+     * the candidate branch, or the shorter branch wins and a member that saw only part of the
+     * group's history (a device that moved away, say) settles on a branch nobody else keeps.
+     */
+    @Test
+    fun aCompetingBranchTwoCommitsDeepWins() =
+        runBlocking {
+            val (alice, bob, carol) = threeMembers()
+            val b1 = bob.manager.selfUpdate(nostrGroupId).signedEvent
+            val b2 = bob.manager.selfUpdate(nostrGroupId).signedEvent
+            val c1 = carol.manager.selfUpdate(nostrGroupId).signedEvent
+
+            carol.manager.ingest(b1)
+            carol.manager.ingest(b2)
+            bob.manager.ingest(c1)
+            alice.manager.ingest(c1)
+            alice.manager.ingest(b1)
+            alice.manager.ingest(b2)
+            for (m in listOf(alice, bob, carol)) m.manager.driveConvergenceToSettlement(pollMs = 20)
+
+            assertContentEquals(bob.context(), carol.context(), "Carol must land on Bob's longer branch")
+            assertContentEquals(bob.context(), alice.context(), "Alice must land on Bob's longer branch")
+        }
+
+    /**
+     * Peer Commits applied while our own Commit's publish is in flight: the confirmation must not
+     * install our pending state over them (that rewinds the group off the branch everyone else is
+     * on). Our Commit is a competitor of theirs now, and convergence decides.
+     */
+    @Test
+    fun peerCommitsAppliedDuringOurPublishAreNotRewound() =
+        runBlocking {
+            val (alice, bob, carol) = threeMembers()
+            val c1 = carol.manager.selfUpdate(nostrGroupId).signedEvent
+            val c2 = carol.manager.selfUpdate(nostrGroupId).signedEvent
+            bob.duringPublish = {
+                bob.manager.ingest(c1)
+                bob.manager.ingest(c2)
+            }
+            val b1 = bob.manager.selfUpdate(nostrGroupId).signedEvent
+            carol.manager.ingest(b1)
+            for (e in listOf(c1, c2, b1)) alice.manager.ingest(e)
+            for (m in listOf(alice, bob, carol)) m.manager.driveConvergenceToSettlement(pollMs = 20)
+
+            assertContentEquals(carol.context(), bob.context(), "Bob must stay on Carol's longer branch")
+            assertContentEquals(carol.context(), alice.context())
         }
 }
