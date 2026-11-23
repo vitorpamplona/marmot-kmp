@@ -295,6 +295,46 @@ class DeviceGroupWorkTest {
             }
         }
 
+    /**
+     * The harness's test 53, one process per step: two devices rename at once from the same epoch,
+     * and each hears of the other's Commit only after a restart. The fork must still be resolved,
+     * and the rename that lost it made again, so both renames stand on both devices.
+     */
+    @Test
+    fun twoRenamesAtOnceAcrossRestartsBothStand() =
+        runBlocking<Unit> {
+            val keys = KeyPair()
+            var a = Device(keys)
+            var b = Device(keys)
+            link(a, b)
+            val aSlot = a.slot()
+            val bSlot = b.slot()
+            val renameB = a.groups.applyStaged(assertNotNull(a.groups.stageRename(bSlot, "Fork-A"))).event!!
+            val renameA = b.groups.applyStaged(assertNotNull(b.groups.stageRename(aSlot, "Fork-B"))).event!!
+
+            a = a.restarted()
+            b = b.restarted()
+            a.manager.ingest(renameA.signedEvent)
+            b.manager.ingest(renameB.signedEvent)
+            for (d in listOf(a, b)) {
+                d.manager.driveConvergenceToSettlement(pollMs = 1)
+                d.groups.refresh()
+            }
+            assertEquals(a.groups.roster(), b.groups.roster(), "both devices settle on one branch")
+
+            // The device whose rename lost makes it again, once, in its next run.
+            for ((loser, other) in listOf(a to b, b to a)) {
+                val again = loser.groups.stageEditRecovery() ?: continue
+                other.manager.ingest(assertNotNull(loser.groups.applyStaged(again).event).signedEvent)
+            }
+            for (d in listOf(a, b)) {
+                d.groups.refresh()
+                val roster = assertNotNull(d.groups.roster())
+                assertEquals("Fork-A", roster.device(bSlot)?.label)
+                assertEquals("Fork-B", roster.device(aSlot)?.label)
+            }
+        }
+
     // ---- 5: owed histories and kept deliveries survive a restart ---------------------------------
 
     @Test

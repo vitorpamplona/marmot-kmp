@@ -216,13 +216,61 @@ class MarmotConvergenceEngine(
      * Called when a group is created, joined, or restored from disk. Without a
      * seed the first inbound commit has no retained parent and convergence
      * cannot see a fork at all.
+     *
+     * A restored group gets back the window it had ([RetainedConvergenceWindow]),
+     * cut at the state it was restored to. Seeding only the tip would make a
+     * competitor of our last commit that arrives after a restart authenticate
+     * against nothing retained, read as an echo, and leave the group split for
+     * good: what an `amy` run, one process per command, did every time.
      */
     suspend fun trackGroup(groupId: HexKey) =
         mutex.withLock {
             val state = groupManager.snapshot(groupId) ?: return@withLock
             val ctx = contexts.getOrPut(groupId) { GroupContext() }
+            if (ctx.retained.isNotEmpty()) return@withLock
+            restoreWindow(groupId, ctx, state)
             if (ctx.retained.isEmpty()) ctx.retained.addLast(state)
         }
+
+    private suspend fun restoreWindow(
+        groupId: HexKey,
+        ctx: GroupContext,
+        current: MlsGroupState,
+    ) {
+        val bytes =
+            try {
+                groupManager.loadConvergenceWindow(groupId)
+            } catch (e: Exception) {
+                currentCoroutineContext().ensureActive()
+                Log.w("MarmotConvergence", "could not load the convergence window of $groupId", e)
+                null
+            } ?: return
+        val window = RetainedConvergenceWindow.decodeOrNull(bytes, ::candidateOf) ?: return
+        // The window ends at the state it was written with; a newer state saved
+        // without it (a crash between the two writes) keeps only the tip.
+        val at = window.states.indexOfLast { sameState(it, current) }
+        if (at < 0) return
+        val epoch = stateEngine.epoch(current)
+        ctx.retained.addAll(window.states.take(at + 1))
+        ctx.canonicalCommits.addAll(window.commits.filter { it.sourceEpoch < epoch })
+        trim(ctx)
+    }
+
+    /** Write the retained window, so a restart resolves a fork as this process would have. */
+    private suspend fun persistWindow(
+        groupId: HexKey,
+        ctx: GroupContext,
+    ) {
+        try {
+            groupManager.saveConvergenceWindow(
+                groupId,
+                RetainedConvergenceWindow(ctx.retained.toList(), ctx.canonicalCommits.toList()).encode(),
+            )
+        } catch (e: Exception) {
+            currentCoroutineContext().ensureActive()
+            Log.w("MarmotConvergence", "could not save the convergence window of $groupId", e)
+        }
+    }
 
     /**
      * Record that [commitBytes] was applied to canonical state, moving the
@@ -248,6 +296,7 @@ class MarmotConvergenceEngine(
         }
         ctx.canonicalCommits.addLast(candidateOf(commitBytes, sourceEpoch))
         trim(ctx)
+        persistWindow(groupId, ctx)
         admitDisbandForSelection(groupId, ctx)
     }
 
@@ -373,6 +422,11 @@ class MarmotConvergenceEngine(
                 ctx.pass?.admit(candidate, InputRelevance.ORDINARY)
                 return@withLock ConvergenceAdmission.DUPLICATE
             }
+
+            // A commit already on the canonical path is an echo of it, whatever
+            // relay or restart brought it back: its parent is retained, so the
+            // check below would read it as its own competitor.
+            if (ctx.canonicalCommits.any { it.id == candidate.id }) return@withLock ConvergenceAdmission.NOT_A_CANDIDATE
 
             // Parentage is derived, not claimed: a commit is a candidate here
             // only because some retained state actually authenticates it.
@@ -589,6 +643,7 @@ class MarmotConvergenceEngine(
             val ctx = contexts[groupId] ?: return@withLock null
             if (rewound) {
                 adoptBranch(ctx, graph, selectedTipId, inputs.baseId)
+                persistWindow(groupId, ctx)
             }
             // Keep the states of branches that LOST but stay eligible: losing
             // one pass is not permanent ineligibility, and a payload that

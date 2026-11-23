@@ -34,6 +34,7 @@ import com.vitorpamplona.quartz.utils.concurrent.ConcurrentMap
 class InMemoryMlsGroupStateStore : MlsGroupStateStore {
     private val states = ConcurrentMap<String, ByteArray>()
     private val retainedEpochs = ConcurrentMap<String, List<ByteArray>>()
+    private val convergenceWindows = ConcurrentMap<String, ByteArray>()
 
     override suspend fun save(
         nostrGroupId: String,
@@ -47,6 +48,7 @@ class InMemoryMlsGroupStateStore : MlsGroupStateStore {
     override suspend fun delete(nostrGroupId: String) {
         states.remove(nostrGroupId)
         retainedEpochs.remove(nostrGroupId)
+        convergenceWindows.remove(nostrGroupId)
     }
 
     override suspend fun listGroups(): List<String> = states.snapshot().keys.toList()
@@ -59,4 +61,14 @@ class InMemoryMlsGroupStateStore : MlsGroupStateStore {
     }
 
     override suspend fun loadRetainedEpochs(nostrGroupId: String): List<ByteArray> = retainedEpochs[nostrGroupId] ?: emptyList()
+
+    override suspend fun saveConvergenceWindow(
+        nostrGroupId: String,
+        window: ByteArray,
+    ): Boolean {
+        convergenceWindows[nostrGroupId] = window
+        return true
+    }
+
+    override suspend fun loadConvergenceWindow(nostrGroupId: String): ByteArray? = convergenceWindows[nostrGroupId]
 }

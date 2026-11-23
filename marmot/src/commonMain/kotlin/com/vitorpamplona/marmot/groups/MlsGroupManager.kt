@@ -230,6 +230,23 @@ class MlsGroupManager(
     fun snapshot(nostrGroupId: HexKey): MlsGroupState? = groups[nostrGroupId]?.saveState()
 
     /**
+     * Persist convergence's retained window for [nostrGroupId]
+     * ([MlsGroupStateStore.saveConvergenceWindow]). Skipped for a group this manager no longer
+     * holds, so a window written while the group is being removed cannot outlive its state.
+     */
+    suspend fun saveConvergenceWindow(
+        nostrGroupId: HexKey,
+        window: ByteArray,
+    ): Boolean =
+        mutex.withLock {
+            if (nostrGroupId !in groups) return@withLock false
+            store.saveConvergenceWindow(nostrGroupId, window)
+        }
+
+    /** The convergence window [saveConvergenceWindow] last wrote for [nostrGroupId], or null. */
+    suspend fun loadConvergenceWindow(nostrGroupId: HexKey): ByteArray? = store.loadConvergenceWindow(nostrGroupId)
+
+    /**
      * Replace a group's state wholesale — the convergence rewind primitive.
      *
      * Used when branch selection picks a candidate branch over what was

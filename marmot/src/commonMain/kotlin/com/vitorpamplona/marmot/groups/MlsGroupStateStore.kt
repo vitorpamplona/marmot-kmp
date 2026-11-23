@@ -124,4 +124,30 @@ interface MlsGroupStateStore {
      *   epoch change, and for a store that does not implement the split.
      */
     suspend fun loadSenderRatchet(nostrGroupId: String): ByteArray? = null
+
+    /**
+     * Persist the convergence window: the retained states a competing Commit may be authored
+     * against and the Commits that joined them (`protocol-core/retained-history.md`, "Retained
+     * anchor"). Written whenever the window moves, so a restart can still see, and resolve, a fork
+     * whose other half arrives in a later process (`protocol-core/durability.md`, "Restart
+     * equivalence").
+     *
+     * The bytes hold the private state of up to `max_rewind_commits + 1` epochs: encrypt them at
+     * rest exactly like [save]. [delete] removes this record too.
+     *
+     * @param nostrGroupId hex-encoded Nostr group ID
+     * @param window opaque bytes, versioned by the library
+     * @return false when this store does not keep the record: convergence then works within one
+     *   process only, as it did before the record existed.
+     */
+    suspend fun saveConvergenceWindow(
+        nostrGroupId: String,
+        window: ByteArray,
+    ): Boolean = false
+
+    /**
+     * Load what [saveConvergenceWindow] wrote, or null when there is none (a group that never
+     * committed since, or a store that does not keep the record).
+     */
+    suspend fun loadConvergenceWindow(nostrGroupId: String): ByteArray? = null
 }
