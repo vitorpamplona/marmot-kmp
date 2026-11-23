@@ -8,6 +8,8 @@
 # $QUARTZ_DIR, else ../quartz beside this repo, else (in CI, when $QUARTZ_CLONE_TO is set) a
 # fresh clone of vitorpamplona/quartz at $QUARTZ_REF (default main). Once the release is
 # published this prints nothing and the build uses the artifact, with no edit needed here.
+# A tag is a quick sign for builds; the release gate (create-release.yml) does not trust it and
+# runs `./gradlew verifyDependenciesPublished`, which resolves the pinned version through Magpie.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/../.." && pwd)"
