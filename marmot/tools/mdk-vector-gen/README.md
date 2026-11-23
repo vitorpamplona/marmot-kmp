@@ -4,7 +4,8 @@ Rust helpers that emit MLS and Marmot interop test vectors from the same
 OpenMLS backend MDK builds against.
 
 **The dependency pin is the point of this tool.** `Cargo.toml` tracks
-`erskingardner/openmls` at the exact rev MDK's root `Cargo.toml` names, built
+the OpenMLS repository and rev MDK's root `Cargo.toml` names (`openmls/openmls`
+at `6100df3` for MDK 0.19.0), built
 with the `extensions-draft` feature. Stock crates.io `openmls` does not carry
 `app_data_dictionary` / `app_components` / `app_data_update`, and the current
 Marmot profile is defined entirely in those terms — so vectors generated from
