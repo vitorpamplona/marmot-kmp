@@ -215,14 +215,14 @@ class MarmotManagerLeaveRejoinTest {
 
     private data class Fixture(
         val manager: MarmotManager,
-        val mlsStore: InMemoryMlsGroupStateStore,
+        val mlsStore: LeaveRejoinStateStore,
         val kpStore: InMemoryKeyPackageBundleStore,
         val messageStore: InMemoryMarmotMessageStore,
     )
 
     private fun buildManager(): Fixture {
         val signer = NostrSignerInternal(KeyPair())
-        val mls = InMemoryMlsGroupStateStore()
+        val mls = LeaveRejoinStateStore()
         val kp = InMemoryKeyPackageBundleStore()
         val msg = InMemoryMarmotMessageStore()
         // Publish-before-apply needs an acknowledged accept, so a manager with
@@ -233,7 +233,9 @@ class MarmotManagerLeaveRejoinTest {
     }
 }
 
-private class InMemoryMlsGroupStateStore : MlsGroupStateStore {
+// Named apart from the commonMain InMemoryMlsGroupStateStore: a private class with the same name in
+// this package shadows that one for every test compiled with this file.
+private class LeaveRejoinStateStore : MlsGroupStateStore {
     private val states = mutableMapOf<String, ByteArray>()
     private val retained = mutableMapOf<String, List<ByteArray>>()
 

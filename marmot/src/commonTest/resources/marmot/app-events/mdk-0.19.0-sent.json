@@ -1,0 +1,1309 @@
+{
+ "description": "White Noise sent these; marmot-kmp must read them as MDK does.",
+ "generator": "marmot/tools/app-event-vector-gen (gen.sh, build_vectors.py)",
+ "reference": "MDK 0.19.0, wn/wnd release binaries",
+ "amy": "e3ba41cbac",
+ "marmot_kmp": "3.1.0 (6b7a383)",
+ "members": {
+  "amethyst": "783b936f988b858dcb10d62d347445b0e7659ea8dd0fd03e91655d300614a6cd",
+  "white_noise": "b31b9032fa763258a1b9238c4fc50e92c8fb1be29766e25ff2bb492a5c0d397d"
+ },
+ "admins": [
+  "783b936f988b858dcb10d62d347445b0e7659ea8dd0fd03e91655d300614a6cd",
+  "b31b9032fa763258a1b9238c4fc50e92c8fb1be29766e25ff2bb492a5c0d397d"
+ ],
+ "conversation": [
+  {
+   "id": "6fb84d59776934650a0090799d91634250e9cbcdd9b1f8cb392886702bd4aa12",
+   "pubkey": "b31b9032fa763258a1b9238c4fc50e92c8fb1be29766e25ff2bb492a5c0d397d",
+   "created_at": 1795448439,
+   "kind": 9,
+   "tags": [],
+   "content": "plain text from White Noise"
+  },
+  {
+   "id": "65e4e7a22a554a317709b30df27ed51fcf408384df56aaf8c08ce1aece933992",
+   "pubkey": "b31b9032fa763258a1b9238c4fc50e92c8fb1be29766e25ff2bb492a5c0d397d",
+   "created_at": 1795448439,
+   "kind": 9,
+   "tags": [
+    [
+     "p",
+     "783b936f988b858dcb10d62d347445b0e7659ea8dd0fd03e91655d300614a6cd"
+    ]
+   ],
+   "content": "hello nostr:npub10qaexmuc3wzcmjcs6ckngaz9krnkt84gm58aq053v4wnqps55mxsjmuqke, welcome"
+  },
+  {
+   "id": "b607920ecd768c69e56541bb62aafad6bd3aea625ff93db181193406df282904",
+   "pubkey": "b31b9032fa763258a1b9238c4fc50e92c8fb1be29766e25ff2bb492a5c0d397d",
+   "created_at": 1795448439,
+   "kind": 9,
+   "tags": [
+    [
+     "p",
+     "783b936f988b858dcb10d62d347445b0e7659ea8dd0fd03e91655d300614a6cd"
+    ]
+   ],
+   "content": "ping @npub10qaexmuc3wzcmjcs6ckngaz9krnkt84gm58aq053v4wnqps55mxsjmuqke"
+  },
+  {
+   "id": "820da4baad8d145d5e513a9ed83156d55954741f1cc7643923ceeeb19ba228d5",
+   "pubkey": "b31b9032fa763258a1b9238c4fc50e92c8fb1be29766e25ff2bb492a5c0d397d",
+   "created_at": 1795448439,
+   "kind": 9,
+   "tags": [
+    [
+     "e",
+     "6fb84d59776934650a0090799d91634250e9cbcdd9b1f8cb392886702bd4aa12"
+    ],
+    [
+     "q",
+     "6fb84d59776934650a0090799d91634250e9cbcdd9b1f8cb392886702bd4aa12"
+    ]
+   ],
+   "content": "a reply from White Noise"
+  },
+  {
+   "id": "22a3508f4449688e5dc113e0606a11b1315a87cfe122e005088ebf4b6ecd0550",
+   "pubkey": "b31b9032fa763258a1b9238c4fc50e92c8fb1be29766e25ff2bb492a5c0d397d",
+   "created_at": 1795448439,
+   "kind": 7,
+   "tags": [
+    [
+     "e",
+     "6fb84d59776934650a0090799d91634250e9cbcdd9b1f8cb392886702bd4aa12"
+    ]
+   ],
+   "content": "+"
+  },
+  {
+   "id": "9532087594e11a7719a7e53c6947936a26aeb183a2b48c32d0a69cd34eb9705c",
+   "pubkey": "b31b9032fa763258a1b9238c4fc50e92c8fb1be29766e25ff2bb492a5c0d397d",
+   "created_at": 1795448439,
+   "kind": 7,
+   "tags": [
+    [
+     "e",
+     "65e4e7a22a554a317709b30df27ed51fcf408384df56aaf8c08ce1aece933992"
+    ]
+   ],
+   "content": "-"
+  },
+  {
+   "id": "a4c8b77228a5a1653d79c3fba3cc985a55c78166690fd3e71f5777abaf502b74",
+   "pubkey": "b31b9032fa763258a1b9238c4fc50e92c8fb1be29766e25ff2bb492a5c0d397d",
+   "created_at": 1795448439,
+   "kind": 7,
+   "tags": [
+    [
+     "e",
+     "820da4baad8d145d5e513a9ed83156d55954741f1cc7643923ceeeb19ba228d5"
+    ]
+   ],
+   "content": "🎉"
+  },
+  {
+   "id": "1571143b62d46626e717084e91a4392d83f3af95727207162114cd84a5f3160f",
+   "pubkey": "b31b9032fa763258a1b9238c4fc50e92c8fb1be29766e25ff2bb492a5c0d397d",
+   "created_at": 1795448439,
+   "kind": 1009,
+   "tags": [
+    [
+     "e",
+     "6fb84d59776934650a0090799d91634250e9cbcdd9b1f8cb392886702bd4aa12"
+    ]
+   ],
+   "content": "plain text from White Noise, edited"
+  },
+  {
+   "id": "9fadc6d20c38281fa6bf0f09e501e72b13b5561b5ee5150470214008f710d719",
+   "pubkey": "b31b9032fa763258a1b9238c4fc50e92c8fb1be29766e25ff2bb492a5c0d397d",
+   "created_at": 1795448440,
+   "kind": 5,
+   "tags": [
+    [
+     "e",
+     "a4c8b77228a5a1653d79c3fba3cc985a55c78166690fd3e71f5777abaf502b74"
+    ]
+   ],
+   "content": ""
+  },
+  {
+   "id": "210c382854e858f35defe41638648c204452a73d3c1319633edd44f35311c770",
+   "pubkey": "b31b9032fa763258a1b9238c4fc50e92c8fb1be29766e25ff2bb492a5c0d397d",
+   "created_at": 1795448440,
+   "kind": 9,
+   "tags": [],
+   "content": "Amethyst (an admin) will remove this"
+  },
+  {
+   "id": "ab2c284e9598dba2c1d5ff8507e603d82b8d585d6d21245a68ac40b4137293bc",
+   "pubkey": "b31b9032fa763258a1b9238c4fc50e92c8fb1be29766e25ff2bb492a5c0d397d",
+   "created_at": 1795448440,
+   "kind": 9,
+   "tags": [],
+   "content": "White Noise will delete this (as an admin)"
+  },
+  {
+   "id": "68a2461117743b6ba77f4e3d9a41180c01636c733edec2be3d1d9498628e0e7e",
+   "pubkey": "b31b9032fa763258a1b9238c4fc50e92c8fb1be29766e25ff2bb492a5c0d397d",
+   "created_at": 1795448440,
+   "kind": 4891,
+   "tags": [
+    [
+     "e",
+     "ab2c284e9598dba2c1d5ff8507e603d82b8d585d6d21245a68ac40b4137293bc"
+    ]
+   ],
+   "content": "{\"v\":1,\"action\":\"remove\"}"
+  },
+  {
+   "id": "a3e8d1e330b80206f01792a58642ee99ee4a934f0e09a2abcfa70b915ded212e",
+   "pubkey": "b31b9032fa763258a1b9238c4fc50e92c8fb1be29766e25ff2bb492a5c0d397d",
+   "created_at": 1795448440,
+   "kind": 9,
+   "tags": [
+    [
+     "imeta",
+     "v encrypted-media-v2",
+     "locator blossom-v1 http://127.0.0.1:18791/31105f988a76c010bc8fc9f49b03889245bb744d319acb73b1680b63d7c1eea0",
+     "ciphertext_sha256 31105f988a76c010bc8fc9f49b03889245bb744d319acb73b1680b63d7c1eea0",
+     "plaintext_sha256 15c7450e5a39c55782102aa0f81b69dfaef31304865c384968ab45e66d4d4bf7",
+     "nonce a83debded569f14be584fd73",
+     "m image/png",
+     "filename pic-wn.png"
+    ]
+   ],
+   "content": "a picture from White Noise"
+  },
+  {
+   "id": "4950534f09221db7428ccefa43d8493f1c4345aeaf3f1e3ed0d2f416cd0af285",
+   "pubkey": "783b936f988b858dcb10d62d347445b0e7659ea8dd0fd03e91655d300614a6cd",
+   "created_at": 1795448443,
+   "kind": 9,
+   "tags": [],
+   "content": "plain text from Amethyst"
+  },
+  {
+   "id": "bcfbb384ec8002c5da3ed36978581080b735244bf0103fe02a43454cfa30531a",
+   "pubkey": "783b936f988b858dcb10d62d347445b0e7659ea8dd0fd03e91655d300614a6cd",
+   "created_at": 1795448445,
+   "kind": 9,
+   "tags": [
+    [
+     "p",
+     "b31b9032fa763258a1b9238c4fc50e92c8fb1be29766e25ff2bb492a5c0d397d"
+    ]
+   ],
+   "content": "hi nostr:npub1kvdeqvh6wce93gdeywxyl3gwjty0kxlzjanwyhljhdyj5hqd897stldsw8"
+  },
+  {
+   "id": "965be6837d81181769bb3542ccf2ae678019edca9318c1a0e1bde2b0e9823d98",
+   "pubkey": "783b936f988b858dcb10d62d347445b0e7659ea8dd0fd03e91655d300614a6cd",
+   "created_at": 1795448447,
+   "kind": 9,
+   "tags": [],
+   "content": "hi nostr:npub1kvdeqvh6wce93gdeywxyl3gwjty0kxlzjanwyhljhdyj5hqd897stldsw8, no p tag"
+  },
+  {
+   "id": "9880766455678956c9f3f2442c1c257008c8187ad4632d32cabec250e08f8491",
+   "pubkey": "783b936f988b858dcb10d62d347445b0e7659ea8dd0fd03e91655d300614a6cd",
+   "created_at": 1795448449,
+   "kind": 9,
+   "tags": [
+    [
+     "q",
+     "6fb84d59776934650a0090799d91634250e9cbcdd9b1f8cb392886702bd4aa12",
+     "",
+     "b31b9032fa763258a1b9238c4fc50e92c8fb1be29766e25ff2bb492a5c0d397d"
+    ]
+   ],
+   "content": "a reply from Amethyst"
+  },
+  {
+   "id": "6c901c593c3d518fcd98175dd5faf3ced1354a78a3813746a68dc913c2a2b37a",
+   "pubkey": "783b936f988b858dcb10d62d347445b0e7659ea8dd0fd03e91655d300614a6cd",
+   "created_at": 1795448451,
+   "kind": 9,
+   "tags": [
+    [
+     "e",
+     "6fb84d59776934650a0090799d91634250e9cbcdd9b1f8cb392886702bd4aa12"
+    ]
+   ],
+   "content": "reply naming its parent with e only"
+  },
+  {
+   "id": "c6f7ce87b4df5fe35d6f7192e363ff90a28d92d6a740d6e3de8bf1d1b92f0d56",
+   "pubkey": "783b936f988b858dcb10d62d347445b0e7659ea8dd0fd03e91655d300614a6cd",
+   "created_at": 1795448453,
+   "kind": 9,
+   "tags": [
+    [
+     "q",
+     "6fb84d59776934650a0090799d91634250e9cbcdd9b1f8cb392886702bd4aa12"
+    ]
+   ],
+   "content": "reply naming its parent with q only"
+  },
+  {
+   "id": "6334d92f98c4c6ee5c3f69022c1a7e45d5e97fbfaa6c57781648b5c0147f3702",
+   "pubkey": "783b936f988b858dcb10d62d347445b0e7659ea8dd0fd03e91655d300614a6cd",
+   "created_at": 1795448454,
+   "kind": 9,
+   "tags": [
+    [
+     "e",
+     "65e4e7a22a554a317709b30df27ed51fcf408384df56aaf8c08ce1aece933992"
+    ],
+    [
+     "q",
+     "6fb84d59776934650a0090799d91634250e9cbcdd9b1f8cb392886702bd4aa12"
+    ]
+   ],
+   "content": "e names one message, q another"
+  },
+  {
+   "id": "bf3455d4555c147fa42d6a636b5115cdc864447ae64a2d2e2318724783723361",
+   "pubkey": "783b936f988b858dcb10d62d347445b0e7659ea8dd0fd03e91655d300614a6cd",
+   "created_at": 1795448456,
+   "kind": 9,
+   "tags": [
+    [
+     "q",
+     "30023:b31b9032fa763258a1b9238c4fc50e92c8fb1be29766e25ff2bb492a5c0d397d:an-article"
+    ]
+   ],
+   "content": "quotes an addressable event"
+  },
+  {
+   "id": "eb351af3a3e7355ad1cf4e4d9b5dc424ef40e4f2a6c0e3f628bb361d2edd6c46",
+   "pubkey": "783b936f988b858dcb10d62d347445b0e7659ea8dd0fd03e91655d300614a6cd",
+   "created_at": 1795448458,
+   "kind": 7,
+   "tags": [
+    [
+     "e",
+     "6fb84d59776934650a0090799d91634250e9cbcdd9b1f8cb392886702bd4aa12",
+     "",
+     "b31b9032fa763258a1b9238c4fc50e92c8fb1be29766e25ff2bb492a5c0d397d"
+    ],
+    [
+     "p",
+     "b31b9032fa763258a1b9238c4fc50e92c8fb1be29766e25ff2bb492a5c0d397d"
+    ],
+    [
+     "k",
+     "9"
+    ]
+   ],
+   "content": "+"
+  },
+  {
+   "id": "409d4f5d2b7fd78b1049f336d64bf1a17f2f6e8faa41d4e30b29d72cea39769f",
+   "pubkey": "783b936f988b858dcb10d62d347445b0e7659ea8dd0fd03e91655d300614a6cd",
+   "created_at": 1795448460,
+   "kind": 7,
+   "tags": [
+    [
+     "e",
+     "65e4e7a22a554a317709b30df27ed51fcf408384df56aaf8c08ce1aece933992",
+     "",
+     "b31b9032fa763258a1b9238c4fc50e92c8fb1be29766e25ff2bb492a5c0d397d"
+    ],
+    [
+     "p",
+     "b31b9032fa763258a1b9238c4fc50e92c8fb1be29766e25ff2bb492a5c0d397d"
+    ],
+    [
+     "k",
+     "9"
+    ]
+   ],
+   "content": "-"
+  },
+  {
+   "id": "cc500635b6cbeaa16f8bf6c0ee16fd80ae8f662c4f355b553e9d0b46c769ac89",
+   "pubkey": "783b936f988b858dcb10d62d347445b0e7659ea8dd0fd03e91655d300614a6cd",
+   "created_at": 1795448461,
+   "kind": 7,
+   "tags": [
+    [
+     "e",
+     "820da4baad8d145d5e513a9ed83156d55954741f1cc7643923ceeeb19ba228d5",
+     "",
+     "b31b9032fa763258a1b9238c4fc50e92c8fb1be29766e25ff2bb492a5c0d397d"
+    ],
+    [
+     "p",
+     "b31b9032fa763258a1b9238c4fc50e92c8fb1be29766e25ff2bb492a5c0d397d"
+    ],
+    [
+     "k",
+     "9"
+    ]
+   ],
+   "content": "🔥"
+  },
+  {
+   "id": "0e41e875420e7b2d7d1c32c3e048e34cf7f5a6a1ffc0d54b05974c060d7ff1bc",
+   "pubkey": "783b936f988b858dcb10d62d347445b0e7659ea8dd0fd03e91655d300614a6cd",
+   "created_at": 1795448463,
+   "kind": 7,
+   "tags": [
+    [
+     "e",
+     "820da4baad8d145d5e513a9ed83156d55954741f1cc7643923ceeeb19ba228d5",
+     "",
+     "b31b9032fa763258a1b9238c4fc50e92c8fb1be29766e25ff2bb492a5c0d397d"
+    ],
+    [
+     "p",
+     "b31b9032fa763258a1b9238c4fc50e92c8fb1be29766e25ff2bb492a5c0d397d"
+    ],
+    [
+     "k",
+     "9"
+    ],
+    [
+     "emoji",
+     "party",
+     "http://127.0.0.1:18791/party.png"
+    ]
+   ],
+   "content": ":party:"
+  },
+  {
+   "id": "e75e89516b8e450ed0f5637422b0ed2399ca01270a4614b3b84fa5fc71a06823",
+   "pubkey": "783b936f988b858dcb10d62d347445b0e7659ea8dd0fd03e91655d300614a6cd",
+   "created_at": 1795448466,
+   "kind": 1009,
+   "tags": [
+    [
+     "e",
+     "4950534f09221db7428ccefa43d8493f1c4345aeaf3f1e3ed0d2f416cd0af285"
+    ]
+   ],
+   "content": "plain text from Amethyst, edited"
+  },
+  {
+   "id": "608d236081898682bc4694b66aa60d888abb82b36762364d51be9e91bb459805",
+   "pubkey": "783b936f988b858dcb10d62d347445b0e7659ea8dd0fd03e91655d300614a6cd",
+   "created_at": 1795448468,
+   "kind": 1009,
+   "tags": [
+    [
+     "e",
+     "820da4baad8d145d5e513a9ed83156d55954741f1cc7643923ceeeb19ba228d5"
+    ]
+   ],
+   "content": "Amethyst rewrites White Noise"
+  },
+  {
+   "id": "565e93c10d0cb44093bbff6e3640eeb6986b007188bdc1a780a842bafd27d47e",
+   "pubkey": "783b936f988b858dcb10d62d347445b0e7659ea8dd0fd03e91655d300614a6cd",
+   "created_at": 1795448470,
+   "kind": 5,
+   "tags": [
+    [
+     "e",
+     "bcfbb384ec8002c5da3ed36978581080b735244bf0103fe02a43454cfa30531a"
+    ],
+    [
+     "p",
+     "783b936f988b858dcb10d62d347445b0e7659ea8dd0fd03e91655d300614a6cd"
+    ],
+    [
+     "k",
+     "9"
+    ]
+   ],
+   "content": ""
+  },
+  {
+   "id": "4794049735996745b8c11331d929cd940d0bf47a33aa1b4d5d73b3b145098973",
+   "pubkey": "783b936f988b858dcb10d62d347445b0e7659ea8dd0fd03e91655d300614a6cd",
+   "created_at": 1795448471,
+   "kind": 5,
+   "tags": [
+    [
+     "e",
+     "cc500635b6cbeaa16f8bf6c0ee16fd80ae8f662c4f355b553e9d0b46c769ac89"
+    ],
+    [
+     "p",
+     "783b936f988b858dcb10d62d347445b0e7659ea8dd0fd03e91655d300614a6cd"
+    ],
+    [
+     "k",
+     "7"
+    ]
+   ],
+   "content": ""
+  },
+  {
+   "id": "8ad308f2f9a99c8e782a5256899b4cc00e8ed87d561781cfbf6d7cfff5af7e7d",
+   "pubkey": "783b936f988b858dcb10d62d347445b0e7659ea8dd0fd03e91655d300614a6cd",
+   "created_at": 1795448473,
+   "kind": 5,
+   "tags": [
+    [
+     "e",
+     "b607920ecd768c69e56541bb62aafad6bd3aea625ff93db181193406df282904"
+    ]
+   ],
+   "content": ""
+  },
+  {
+   "id": "6c79d50687f6396752b78219d14d60ebbab9c972a6422994d8fa4aaac6ed78c5",
+   "pubkey": "783b936f988b858dcb10d62d347445b0e7659ea8dd0fd03e91655d300614a6cd",
+   "created_at": 1795448474,
+   "kind": 4891,
+   "tags": [
+    [
+     "e",
+     "210c382854e858f35defe41638648c204452a73d3c1319633edd44f35311c770"
+    ]
+   ],
+   "content": "{\"v\":1,\"action\":\"remove\"}"
+  },
+  {
+   "id": "40a523202f4316731966c59c72c29f63336f40f79253f79da63047d430f65cb6",
+   "pubkey": "783b936f988b858dcb10d62d347445b0e7659ea8dd0fd03e91655d300614a6cd",
+   "created_at": 1795448476,
+   "kind": 1068,
+   "tags": [
+    [
+     "option",
+     "0",
+     "Pizza"
+    ],
+    [
+     "option",
+     "1",
+     "Sushi"
+    ],
+    [
+     "option",
+     "2",
+     "Tacos"
+    ],
+    [
+     "polltype",
+     "singlechoice"
+    ],
+    [
+     "endsAt",
+     "1795534875"
+    ]
+   ],
+   "content": "Lunch?"
+  },
+  {
+   "id": "99464c049924caf9910bc9c9767b3d1341286b67a03049537d6931b904ff9c48",
+   "pubkey": "783b936f988b858dcb10d62d347445b0e7659ea8dd0fd03e91655d300614a6cd",
+   "created_at": 1795448478,
+   "kind": 1068,
+   "tags": [
+    [
+     "option",
+     "0",
+     "Mon"
+    ],
+    [
+     "option",
+     "1",
+     "Tue"
+    ],
+    [
+     "option",
+     "2",
+     "Wed"
+    ],
+    [
+     "option",
+     "3",
+     "Thu"
+    ],
+    [
+     "polltype",
+     "multiplechoice"
+    ]
+   ],
+   "content": "Which days work?"
+  },
+  {
+   "id": "4c787f49f2a947596132f56ea4015149a392a96485edaded786791a09dda24f5",
+   "pubkey": "783b936f988b858dcb10d62d347445b0e7659ea8dd0fd03e91655d300614a6cd",
+   "created_at": 1795448480,
+   "kind": 1018,
+   "tags": [
+    [
+     "e",
+     "40a523202f4316731966c59c72c29f63336f40f79253f79da63047d430f65cb6"
+    ],
+    [
+     "response",
+     "1"
+    ]
+   ],
+   "content": ""
+  },
+  {
+   "id": "e16abb28b9a3be40a95d509e4a8eb5f7c880cc84a8c83e82744f3da2cc3c879e",
+   "pubkey": "783b936f988b858dcb10d62d347445b0e7659ea8dd0fd03e91655d300614a6cd",
+   "created_at": 1795448481,
+   "kind": 1018,
+   "tags": [
+    [
+     "e",
+     "99464c049924caf9910bc9c9767b3d1341286b67a03049537d6931b904ff9c48"
+    ],
+    [
+     "response",
+     "0"
+    ],
+    [
+     "response",
+     "2"
+    ]
+   ],
+   "content": ""
+  },
+  {
+   "id": "3edc431e1ab293c14dd356b3680180bcf1c330d813cbd5ca230c6d1a301fda0e",
+   "pubkey": "783b936f988b858dcb10d62d347445b0e7659ea8dd0fd03e91655d300614a6cd",
+   "created_at": 1795448483,
+   "kind": 1018,
+   "tags": [
+    [
+     "e",
+     "40a523202f4316731966c59c72c29f63336f40f79253f79da63047d430f65cb6"
+    ],
+    [
+     "response",
+     "7"
+    ]
+   ],
+   "content": ""
+  },
+  {
+   "id": "afc07d43c2b39c98671f53cfacfdb2b360ea06cd0e033eaab6ae4491a2352ee1",
+   "pubkey": "783b936f988b858dcb10d62d347445b0e7659ea8dd0fd03e91655d300614a6cd",
+   "created_at": 1795448485,
+   "kind": 1018,
+   "tags": [
+    [
+     "e",
+     "40a523202f4316731966c59c72c29f63336f40f79253f79da63047d430f65cb6"
+    ],
+    [
+     "response",
+     "0"
+    ],
+    [
+     "response",
+     "2"
+    ]
+   ],
+   "content": ""
+  },
+  {
+   "id": "7b850038a36956889abe7d4b9b240825ef25f1c1648bf6c42e2eb69c6b181831",
+   "pubkey": "783b936f988b858dcb10d62d347445b0e7659ea8dd0fd03e91655d300614a6cd",
+   "created_at": 1795448487,
+   "kind": 9,
+   "tags": [
+    [
+     "imeta",
+     "v encrypted-media-v2",
+     "locator blossom-v1 http://127.0.0.1:18791/65658bf8800970138bc262c407bb91188cfa3b68d4140ceec3353ad3eaa691dd",
+     "ciphertext_sha256 65658bf8800970138bc262c407bb91188cfa3b68d4140ceec3353ad3eaa691dd",
+     "plaintext_sha256 e5e7f435e061b87a33476c8cc86442701d9ddc6eea5f90d9dacb2ab593bbdae3",
+     "nonce d7c40ff93160f06f014c64a5",
+     "m image/png",
+     "filename pic-amy.png",
+     "dim 12x6",
+     "thumbhash kAkKLJRwd3dwiHeHiHdwcAf3iA"
+    ]
+   ],
+   "content": "a picture from Amethyst"
+  },
+  {
+   "id": "937835e16c8f4f9c74e8031cf24654064d2efd8626150fc254082a75fb6225c0",
+   "pubkey": "783b936f988b858dcb10d62d347445b0e7659ea8dd0fd03e91655d300614a6cd",
+   "created_at": 1795448490,
+   "kind": 9,
+   "tags": [
+    [
+     "imeta",
+     "v encrypted-media-v2",
+     "locator blossom-v1 http://127.0.0.1:18791/65658bf8800970138bc262c407bb91188cfa3b68d4140ceec3353ad3eaa691dd",
+     "ciphertext_sha256 65658bf8800970138bc262c407bb91188cfa3b68d4140ceec3353ad3eaa691dd",
+     "plaintext_sha256 e5e7f435e061b87a33476c8cc86442701d9ddc6eea5f90d9dacb2ab593bbdae3",
+     "nonce d7c40ff93160f06f014c64a5",
+     "m image/png",
+     "filename pic-amy.png",
+     "dim 12x6",
+     "thumbhash kAkKLJRwd3dwiHeHiHdwcAf3iA",
+     "blurhash LEHV6nWB2yk8pyo0adR*.7kCMdnj"
+    ]
+   ],
+   "content": "the same picture, its imeta adds a blurhash"
+  },
+  {
+   "id": "ae8966697e6596e22a7af02bc9a2a46ed7f74ab0d5fbe3fa4492435cbf959de1",
+   "pubkey": "b31b9032fa763258a1b9238c4fc50e92c8fb1be29766e25ff2bb492a5c0d397d",
+   "created_at": 1795448494,
+   "kind": 9,
+   "tags": [],
+   "content": "White Noise will delete this (not an admin)"
+  },
+  {
+   "id": "d6f063c990248e0e80aa1191cbd46e357908ec6e8ac97cf4c45529c5744f6326",
+   "pubkey": "b31b9032fa763258a1b9238c4fc50e92c8fb1be29766e25ff2bb492a5c0d397d",
+   "created_at": 1795448495,
+   "kind": 5,
+   "tags": [
+    [
+     "e",
+     "ae8966697e6596e22a7af02bc9a2a46ed7f74ab0d5fbe3fa4492435cbf959de1"
+    ]
+   ],
+   "content": ""
+  }
+ ],
+ "cases": [
+  {
+   "name": "text",
+   "source": "MDK 0.19.0 via `wn messages send`",
+   "rumor": {
+    "id": "6fb84d59776934650a0090799d91634250e9cbcdd9b1f8cb392886702bd4aa12",
+    "pubkey": "b31b9032fa763258a1b9238c4fc50e92c8fb1be29766e25ff2bb492a5c0d397d",
+    "created_at": 1795448439,
+    "kind": 9,
+    "tags": [],
+    "content": "plain text from White Noise"
+   },
+   "context": [],
+   "mdk": {
+    "basis": "observed",
+    "row": true,
+    "reply_to_message_id": null,
+    "plaintext": "plain text from White Noise, edited",
+    "edit": "1571143b62d46626e717084e91a4392d83f3af95727207162114cd84a5f3160f",
+    "deleted": false,
+    "deletion_source": "unknown",
+    "deleted_by_message_id": null,
+    "reactions": {
+     "+": [
+      "783b936f988b858dcb10d62d347445b0e7659ea8dd0fd03e91655d300614a6cd",
+      "b31b9032fa763258a1b9238c4fc50e92c8fb1be29766e25ff2bb492a5c0d397d"
+     ]
+    },
+    "media": [],
+    "mentions_basis": "source: marmot-app notifications.rs message_text_mentions_account"
+   },
+   "expect": {
+    "row": true,
+    "reply_to": null,
+    "mentions": [],
+    "media": []
+   }
+  },
+  {
+   "name": "mention-nostr-uri",
+   "source": "MDK 0.19.0 via `wn messages send`",
+   "rumor": {
+    "id": "65e4e7a22a554a317709b30df27ed51fcf408384df56aaf8c08ce1aece933992",
+    "pubkey": "b31b9032fa763258a1b9238c4fc50e92c8fb1be29766e25ff2bb492a5c0d397d",
+    "created_at": 1795448439,
+    "kind": 9,
+    "tags": [
+     [
+      "p",
+      "783b936f988b858dcb10d62d347445b0e7659ea8dd0fd03e91655d300614a6cd"
+     ]
+    ],
+    "content": "hello nostr:npub10qaexmuc3wzcmjcs6ckngaz9krnkt84gm58aq053v4wnqps55mxsjmuqke, welcome"
+   },
+   "context": [],
+   "mdk": {
+    "basis": "observed",
+    "row": true,
+    "reply_to_message_id": null,
+    "plaintext": "hello nostr:npub10qaexmuc3wzcmjcs6ckngaz9krnkt84gm58aq053v4wnqps55mxsjmuqke, welcome",
+    "edit": null,
+    "deleted": false,
+    "deletion_source": "unknown",
+    "deleted_by_message_id": null,
+    "reactions": {
+     "-": [
+      "783b936f988b858dcb10d62d347445b0e7659ea8dd0fd03e91655d300614a6cd",
+      "b31b9032fa763258a1b9238c4fc50e92c8fb1be29766e25ff2bb492a5c0d397d"
+     ]
+    },
+    "media": [],
+    "mentions_basis": "source: marmot-app notifications.rs message_text_mentions_account"
+   },
+   "expect": {
+    "row": true,
+    "reply_to": null,
+    "mentions": [
+     "783b936f988b858dcb10d62d347445b0e7659ea8dd0fd03e91655d300614a6cd"
+    ],
+    "media": []
+   }
+  },
+  {
+   "name": "mention-bare-npub",
+   "source": "MDK 0.19.0 via `wn messages send`",
+   "rumor": {
+    "id": "b607920ecd768c69e56541bb62aafad6bd3aea625ff93db181193406df282904",
+    "pubkey": "b31b9032fa763258a1b9238c4fc50e92c8fb1be29766e25ff2bb492a5c0d397d",
+    "created_at": 1795448439,
+    "kind": 9,
+    "tags": [
+     [
+      "p",
+      "783b936f988b858dcb10d62d347445b0e7659ea8dd0fd03e91655d300614a6cd"
+     ]
+    ],
+    "content": "ping @npub10qaexmuc3wzcmjcs6ckngaz9krnkt84gm58aq053v4wnqps55mxsjmuqke"
+   },
+   "context": [],
+   "mdk": {
+    "basis": "observed",
+    "row": true,
+    "reply_to_message_id": null,
+    "plaintext": "ping @npub10qaexmuc3wzcmjcs6ckngaz9krnkt84gm58aq053v4wnqps55mxsjmuqke",
+    "edit": null,
+    "deleted": false,
+    "deletion_source": "unknown",
+    "deleted_by_message_id": null,
+    "reactions": {},
+    "media": [],
+    "mentions_basis": "source: marmot-app notifications.rs message_text_mentions_account"
+   },
+   "expect": {
+    "row": true,
+    "reply_to": null,
+    "mentions": [
+     "783b936f988b858dcb10d62d347445b0e7659ea8dd0fd03e91655d300614a6cd"
+    ],
+    "media": []
+   }
+  },
+  {
+   "name": "reply",
+   "source": "MDK 0.19.0 via `wn messages send`",
+   "rumor": {
+    "id": "820da4baad8d145d5e513a9ed83156d55954741f1cc7643923ceeeb19ba228d5",
+    "pubkey": "b31b9032fa763258a1b9238c4fc50e92c8fb1be29766e25ff2bb492a5c0d397d",
+    "created_at": 1795448439,
+    "kind": 9,
+    "tags": [
+     [
+      "e",
+      "6fb84d59776934650a0090799d91634250e9cbcdd9b1f8cb392886702bd4aa12"
+     ],
+     [
+      "q",
+      "6fb84d59776934650a0090799d91634250e9cbcdd9b1f8cb392886702bd4aa12"
+     ]
+    ],
+    "content": "a reply from White Noise"
+   },
+   "context": [
+    "6fb84d59776934650a0090799d91634250e9cbcdd9b1f8cb392886702bd4aa12",
+    "6fb84d59776934650a0090799d91634250e9cbcdd9b1f8cb392886702bd4aa12"
+   ],
+   "mdk": {
+    "basis": "observed",
+    "row": true,
+    "reply_to_message_id": "6fb84d59776934650a0090799d91634250e9cbcdd9b1f8cb392886702bd4aa12",
+    "plaintext": "a reply from White Noise",
+    "edit": null,
+    "deleted": false,
+    "deletion_source": "unknown",
+    "deleted_by_message_id": null,
+    "reactions": {
+     ":party:": [
+      "783b936f988b858dcb10d62d347445b0e7659ea8dd0fd03e91655d300614a6cd"
+     ]
+    },
+    "media": [],
+    "mentions_basis": "source: marmot-app notifications.rs message_text_mentions_account"
+   },
+   "expect": {
+    "row": true,
+    "reply_to": "6fb84d59776934650a0090799d91634250e9cbcdd9b1f8cb392886702bd4aa12",
+    "mentions": [],
+    "media": []
+   }
+  },
+  {
+   "name": "react-plus",
+   "source": "MDK 0.19.0 via `wn messages react`",
+   "rumor": {
+    "id": "22a3508f4449688e5dc113e0606a11b1315a87cfe122e005088ebf4b6ecd0550",
+    "pubkey": "b31b9032fa763258a1b9238c4fc50e92c8fb1be29766e25ff2bb492a5c0d397d",
+    "created_at": 1795448439,
+    "kind": 7,
+    "tags": [
+     [
+      "e",
+      "6fb84d59776934650a0090799d91634250e9cbcdd9b1f8cb392886702bd4aa12"
+     ]
+    ],
+    "content": "+"
+   },
+   "context": [
+    "6fb84d59776934650a0090799d91634250e9cbcdd9b1f8cb392886702bd4aa12"
+   ],
+   "mdk": {
+    "basis": "observed",
+    "row": false,
+    "target_row": {
+     "reply_to_message_id": null,
+     "plaintext": "plain text from White Noise, edited",
+     "edit": "1571143b62d46626e717084e91a4392d83f3af95727207162114cd84a5f3160f",
+     "deleted": false,
+     "deletion_source": "unknown",
+     "deleted_by_message_id": null,
+     "reactions": {
+      "+": [
+       "783b936f988b858dcb10d62d347445b0e7659ea8dd0fd03e91655d300614a6cd",
+       "b31b9032fa763258a1b9238c4fc50e92c8fb1be29766e25ff2bb492a5c0d397d"
+      ]
+     }
+    }
+   },
+   "expect": {
+    "row": false,
+    "reaction": {
+     "target": "6fb84d59776934650a0090799d91634250e9cbcdd9b1f8cb392886702bd4aa12",
+     "emoji": "+",
+     "custom_emoji_url": null
+    },
+    "counted": true
+   }
+  },
+  {
+   "name": "react-minus",
+   "source": "MDK 0.19.0 via `wn messages react`",
+   "rumor": {
+    "id": "9532087594e11a7719a7e53c6947936a26aeb183a2b48c32d0a69cd34eb9705c",
+    "pubkey": "b31b9032fa763258a1b9238c4fc50e92c8fb1be29766e25ff2bb492a5c0d397d",
+    "created_at": 1795448439,
+    "kind": 7,
+    "tags": [
+     [
+      "e",
+      "65e4e7a22a554a317709b30df27ed51fcf408384df56aaf8c08ce1aece933992"
+     ]
+    ],
+    "content": "-"
+   },
+   "context": [
+    "65e4e7a22a554a317709b30df27ed51fcf408384df56aaf8c08ce1aece933992"
+   ],
+   "mdk": {
+    "basis": "observed",
+    "row": false,
+    "target_row": {
+     "reply_to_message_id": null,
+     "plaintext": "hello nostr:npub10qaexmuc3wzcmjcs6ckngaz9krnkt84gm58aq053v4wnqps55mxsjmuqke, welcome",
+     "edit": null,
+     "deleted": false,
+     "deletion_source": "unknown",
+     "deleted_by_message_id": null,
+     "reactions": {
+      "-": [
+       "783b936f988b858dcb10d62d347445b0e7659ea8dd0fd03e91655d300614a6cd",
+       "b31b9032fa763258a1b9238c4fc50e92c8fb1be29766e25ff2bb492a5c0d397d"
+      ]
+     }
+    }
+   },
+   "expect": {
+    "row": false,
+    "reaction": {
+     "target": "65e4e7a22a554a317709b30df27ed51fcf408384df56aaf8c08ce1aece933992",
+     "emoji": "-",
+     "custom_emoji_url": null
+    },
+    "counted": true
+   }
+  },
+  {
+   "name": "react-emoji",
+   "source": "MDK 0.19.0 via `wn messages react`",
+   "rumor": {
+    "id": "a4c8b77228a5a1653d79c3fba3cc985a55c78166690fd3e71f5777abaf502b74",
+    "pubkey": "b31b9032fa763258a1b9238c4fc50e92c8fb1be29766e25ff2bb492a5c0d397d",
+    "created_at": 1795448439,
+    "kind": 7,
+    "tags": [
+     [
+      "e",
+      "820da4baad8d145d5e513a9ed83156d55954741f1cc7643923ceeeb19ba228d5"
+     ]
+    ],
+    "content": "🎉"
+   },
+   "context": [
+    "820da4baad8d145d5e513a9ed83156d55954741f1cc7643923ceeeb19ba228d5"
+   ],
+   "mdk": {
+    "basis": "observed",
+    "row": false,
+    "target_row": {
+     "reply_to_message_id": "6fb84d59776934650a0090799d91634250e9cbcdd9b1f8cb392886702bd4aa12",
+     "plaintext": "a reply from White Noise",
+     "edit": null,
+     "deleted": false,
+     "deletion_source": "unknown",
+     "deleted_by_message_id": null,
+     "reactions": {
+      ":party:": [
+       "783b936f988b858dcb10d62d347445b0e7659ea8dd0fd03e91655d300614a6cd"
+      ]
+     }
+    }
+   },
+   "expect": {
+    "row": false,
+    "reaction": {
+     "target": "820da4baad8d145d5e513a9ed83156d55954741f1cc7643923ceeeb19ba228d5",
+     "emoji": "🎉",
+     "custom_emoji_url": null
+    },
+    "counted": false
+   }
+  },
+  {
+   "name": "edit",
+   "source": "MDK 0.19.0 via `wn messages edit`",
+   "rumor": {
+    "id": "1571143b62d46626e717084e91a4392d83f3af95727207162114cd84a5f3160f",
+    "pubkey": "b31b9032fa763258a1b9238c4fc50e92c8fb1be29766e25ff2bb492a5c0d397d",
+    "created_at": 1795448439,
+    "kind": 1009,
+    "tags": [
+     [
+      "e",
+      "6fb84d59776934650a0090799d91634250e9cbcdd9b1f8cb392886702bd4aa12"
+     ]
+    ],
+    "content": "plain text from White Noise, edited"
+   },
+   "context": [
+    "6fb84d59776934650a0090799d91634250e9cbcdd9b1f8cb392886702bd4aa12"
+   ],
+   "mdk": {
+    "basis": "observed",
+    "row": false,
+    "target_row": {
+     "reply_to_message_id": null,
+     "plaintext": "plain text from White Noise, edited",
+     "edit": "1571143b62d46626e717084e91a4392d83f3af95727207162114cd84a5f3160f",
+     "deleted": false,
+     "deletion_source": "unknown",
+     "deleted_by_message_id": null,
+     "reactions": {
+      "+": [
+       "783b936f988b858dcb10d62d347445b0e7659ea8dd0fd03e91655d300614a6cd",
+       "b31b9032fa763258a1b9238c4fc50e92c8fb1be29766e25ff2bb492a5c0d397d"
+      ]
+     }
+    }
+   },
+   "expect": {
+    "row": false,
+    "edit": {
+     "target": "6fb84d59776934650a0090799d91634250e9cbcdd9b1f8cb392886702bd4aa12",
+     "content": "plain text from White Noise, edited"
+    },
+    "applied": true
+   }
+  },
+  {
+   "name": "unreact",
+   "source": "MDK 0.19.0 via `wn messages unreact`",
+   "rumor": {
+    "id": "9fadc6d20c38281fa6bf0f09e501e72b13b5561b5ee5150470214008f710d719",
+    "pubkey": "b31b9032fa763258a1b9238c4fc50e92c8fb1be29766e25ff2bb492a5c0d397d",
+    "created_at": 1795448440,
+    "kind": 5,
+    "tags": [
+     [
+      "e",
+      "a4c8b77228a5a1653d79c3fba3cc985a55c78166690fd3e71f5777abaf502b74"
+     ]
+    ],
+    "content": ""
+   },
+   "context": [
+    "a4c8b77228a5a1653d79c3fba3cc985a55c78166690fd3e71f5777abaf502b74"
+   ],
+   "mdk": {
+    "basis": "observed",
+    "row": false,
+    "target_row": null
+   },
+   "expect": {
+    "row": false,
+    "deletes": [
+     "a4c8b77228a5a1653d79c3fba3cc985a55c78166690fd3e71f5777abaf502b74"
+    ],
+    "applied": [
+     "a4c8b77228a5a1653d79c3fba3cc985a55c78166690fd3e71f5777abaf502b74"
+    ]
+   }
+  },
+  {
+   "name": "remove-target",
+   "source": "MDK 0.19.0 via `wn messages send`",
+   "rumor": {
+    "id": "210c382854e858f35defe41638648c204452a73d3c1319633edd44f35311c770",
+    "pubkey": "b31b9032fa763258a1b9238c4fc50e92c8fb1be29766e25ff2bb492a5c0d397d",
+    "created_at": 1795448440,
+    "kind": 9,
+    "tags": [],
+    "content": "Amethyst (an admin) will remove this"
+   },
+   "context": [],
+   "mdk": {
+    "basis": "observed",
+    "row": true,
+    "reply_to_message_id": null,
+    "plaintext": "",
+    "edit": null,
+    "deleted": true,
+    "deletion_source": "admin",
+    "deleted_by_message_id": "6c79d50687f6396752b78219d14d60ebbab9c972a6422994d8fa4aaac6ed78c5",
+    "reactions": {},
+    "media": [],
+    "mentions_basis": "source: marmot-app notifications.rs message_text_mentions_account"
+   },
+   "expect": {
+    "row": true,
+    "reply_to": null,
+    "mentions": [],
+    "media": []
+   }
+  },
+  {
+   "name": "delete-target",
+   "source": "MDK 0.19.0 via `wn messages send`",
+   "rumor": {
+    "id": "ab2c284e9598dba2c1d5ff8507e603d82b8d585d6d21245a68ac40b4137293bc",
+    "pubkey": "b31b9032fa763258a1b9238c4fc50e92c8fb1be29766e25ff2bb492a5c0d397d",
+    "created_at": 1795448440,
+    "kind": 9,
+    "tags": [],
+    "content": "White Noise will delete this (as an admin)"
+   },
+   "context": [],
+   "mdk": {
+    "basis": "observed",
+    "row": true,
+    "reply_to_message_id": null,
+    "plaintext": "",
+    "edit": null,
+    "deleted": true,
+    "deletion_source": "admin",
+    "deleted_by_message_id": "68a2461117743b6ba77f4e3d9a41180c01636c733edec2be3d1d9498628e0e7e",
+    "reactions": {},
+    "media": [],
+    "mentions_basis": "source: marmot-app notifications.rs message_text_mentions_account"
+   },
+   "expect": {
+    "row": true,
+    "reply_to": null,
+    "mentions": [],
+    "media": []
+   }
+  },
+  {
+   "name": "delete-own-as-admin",
+   "source": "MDK 0.19.0 via `wn messages delete`",
+   "rumor": {
+    "id": "68a2461117743b6ba77f4e3d9a41180c01636c733edec2be3d1d9498628e0e7e",
+    "pubkey": "b31b9032fa763258a1b9238c4fc50e92c8fb1be29766e25ff2bb492a5c0d397d",
+    "created_at": 1795448440,
+    "kind": 4891,
+    "tags": [
+     [
+      "e",
+      "ab2c284e9598dba2c1d5ff8507e603d82b8d585d6d21245a68ac40b4137293bc"
+     ]
+    ],
+    "content": "{\"v\":1,\"action\":\"remove\"}"
+   },
+   "context": [
+    "ab2c284e9598dba2c1d5ff8507e603d82b8d585d6d21245a68ac40b4137293bc"
+   ],
+   "mdk": {
+    "basis": "observed",
+    "row": false,
+    "target_row": {
+     "reply_to_message_id": null,
+     "plaintext": "",
+     "edit": null,
+     "deleted": true,
+     "deletion_source": "admin",
+     "deleted_by_message_id": "68a2461117743b6ba77f4e3d9a41180c01636c733edec2be3d1d9498628e0e7e",
+     "reactions": {}
+    }
+   },
+   "expect": {
+    "row": false,
+    "removes": "ab2c284e9598dba2c1d5ff8507e603d82b8d585d6d21245a68ac40b4137293bc",
+    "applied": true
+   }
+  },
+  {
+   "name": "media",
+   "source": "MDK 0.19.0 via `wn media upload`",
+   "rumor": {
+    "id": "a3e8d1e330b80206f01792a58642ee99ee4a934f0e09a2abcfa70b915ded212e",
+    "pubkey": "b31b9032fa763258a1b9238c4fc50e92c8fb1be29766e25ff2bb492a5c0d397d",
+    "created_at": 1795448440,
+    "kind": 9,
+    "tags": [
+     [
+      "imeta",
+      "v encrypted-media-v2",
+      "locator blossom-v1 http://127.0.0.1:18791/31105f988a76c010bc8fc9f49b03889245bb744d319acb73b1680b63d7c1eea0",
+      "ciphertext_sha256 31105f988a76c010bc8fc9f49b03889245bb744d319acb73b1680b63d7c1eea0",
+      "plaintext_sha256 15c7450e5a39c55782102aa0f81b69dfaef31304865c384968ab45e66d4d4bf7",
+      "nonce a83debded569f14be584fd73",
+      "m image/png",
+      "filename pic-wn.png"
+     ]
+    ],
+    "content": "a picture from White Noise"
+   },
+   "context": [],
+   "mdk": {
+    "basis": "observed",
+    "row": true,
+    "reply_to_message_id": null,
+    "plaintext": "a picture from White Noise",
+    "edit": null,
+    "deleted": false,
+    "deletion_source": "unknown",
+    "deleted_by_message_id": null,
+    "reactions": {},
+    "media": [
+     {
+      "url": "http://127.0.0.1:18791/31105f988a76c010bc8fc9f49b03889245bb744d319acb73b1680b63d7c1eea0",
+      "mime": "image/png",
+      "filename": "pic-wn.png",
+      "dim": null,
+      "thumbhash": null,
+      "plaintext_sha256": "15c7450e5a39c55782102aa0f81b69dfaef31304865c384968ab45e66d4d4bf7",
+      "ciphertext_sha256": "31105f988a76c010bc8fc9f49b03889245bb744d319acb73b1680b63d7c1eea0",
+      "nonce": "a83debded569f14be584fd73"
+     }
+    ],
+    "mentions_basis": "source: marmot-app notifications.rs message_text_mentions_account",
+    "decrypted_by_reader": true
+   },
+   "expect": {
+    "row": true,
+    "reply_to": null,
+    "mentions": [],
+    "media": [
+     {
+      "url": "http://127.0.0.1:18791/31105f988a76c010bc8fc9f49b03889245bb744d319acb73b1680b63d7c1eea0",
+      "mime": "image/png",
+      "filename": "pic-wn.png",
+      "dim": null,
+      "thumbhash": null,
+      "plaintext_sha256": "15c7450e5a39c55782102aa0f81b69dfaef31304865c384968ab45e66d4d4bf7",
+      "ciphertext_sha256": "31105f988a76c010bc8fc9f49b03889245bb744d319acb73b1680b63d7c1eea0",
+      "nonce": "a83debded569f14be584fd73"
+     }
+    ]
+   }
+  },
+  {
+   "name": "delete-target-2",
+   "source": "MDK 0.19.0 via `wn messages send`",
+   "rumor": {
+    "id": "ae8966697e6596e22a7af02bc9a2a46ed7f74ab0d5fbe3fa4492435cbf959de1",
+    "pubkey": "b31b9032fa763258a1b9238c4fc50e92c8fb1be29766e25ff2bb492a5c0d397d",
+    "created_at": 1795448494,
+    "kind": 9,
+    "tags": [],
+    "content": "White Noise will delete this (not an admin)"
+   },
+   "context": [],
+   "mdk": {
+    "basis": "observed",
+    "row": true,
+    "reply_to_message_id": null,
+    "plaintext": "",
+    "edit": null,
+    "deleted": true,
+    "deletion_source": "author",
+    "deleted_by_message_id": "d6f063c990248e0e80aa1191cbd46e357908ec6e8ac97cf4c45529c5744f6326",
+    "reactions": {},
+    "media": [],
+    "mentions_basis": "source: marmot-app notifications.rs message_text_mentions_account"
+   },
+   "expect": {
+    "row": true,
+    "reply_to": null,
+    "mentions": [],
+    "media": []
+   }
+  },
+  {
+   "name": "delete-own",
+   "source": "MDK 0.19.0 via `wn messages delete`",
+   "rumor": {
+    "id": "d6f063c990248e0e80aa1191cbd46e357908ec6e8ac97cf4c45529c5744f6326",
+    "pubkey": "b31b9032fa763258a1b9238c4fc50e92c8fb1be29766e25ff2bb492a5c0d397d",
+    "created_at": 1795448495,
+    "kind": 5,
+    "tags": [
+     [
+      "e",
+      "ae8966697e6596e22a7af02bc9a2a46ed7f74ab0d5fbe3fa4492435cbf959de1"
+     ]
+    ],
+    "content": ""
+   },
+   "context": [
+    "ae8966697e6596e22a7af02bc9a2a46ed7f74ab0d5fbe3fa4492435cbf959de1"
+   ],
+   "mdk": {
+    "basis": "observed",
+    "row": false,
+    "target_row": {
+     "reply_to_message_id": null,
+     "plaintext": "",
+     "edit": null,
+     "deleted": true,
+     "deletion_source": "author",
+     "deleted_by_message_id": "d6f063c990248e0e80aa1191cbd46e357908ec6e8ac97cf4c45529c5744f6326",
+     "reactions": {}
+    }
+   },
+   "expect": {
+    "row": false,
+    "deletes": [
+     "ae8966697e6596e22a7af02bc9a2a46ed7f74ab0d5fbe3fa4492435cbf959de1"
+    ],
+    "applied": [
+     "ae8966697e6596e22a7af02bc9a2a46ed7f74ab0d5fbe3fa4492435cbf959de1"
+    ]
+   }
+  }
+ ]
+}
