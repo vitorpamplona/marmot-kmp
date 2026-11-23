@@ -68,7 +68,13 @@ sealed class GroupEventResult {
         val innerEventJson: String,
         val senderLeafIndex: Int,
         val epoch: Long,
-    ) : GroupEventResult()
+    ) : GroupEventResult() {
+        /**
+         * [innerEventJson] as an [Event], parsed once however many steps of the
+         * pipeline read it; null when it is not event-shaped.
+         */
+        val innerEvent: Event? by lazy { Event.fromJsonOrNull(innerEventJson) }
+    }
 
     /**
      * A Commit was processed, advancing the group epoch.
@@ -243,6 +249,9 @@ class MarmotInboundProcessor(
      */
     private val processedMessageIds = LinkedHashSet<String>()
 
+    /** One lock per group, so one group's events are processed one at a time: see [processGroupEvent]. */
+    private val ingestLocks = HashMap<HexKey, Mutex>()
+
     companion object {
         private const val MAX_PROCESSED_IDS = 10_000
 
@@ -286,6 +295,18 @@ class MarmotInboundProcessor(
             return GroupEventResult.Error(groupId, "Not a member of group $groupId")
         }
 
+        // One event of a group at a time. Two copies of one message arriving
+        // together (two relays, a live subscription beside a catch-up) would
+        // otherwise both pass the dedup check before either is remembered, and
+        // two commits of one group would race each other into the MLS state.
+        val ingestLock = processedIdsMutex.withLock { ingestLocks.getOrPut(groupId) { Mutex() } }
+        return ingestLock.withLock { processGroupEventLocked(groupId, groupEvent) }
+    }
+
+    private suspend fun processGroupEventLocked(
+        groupId: HexKey,
+        groupEvent: GroupEvent,
+    ): GroupEventResult {
         // Lifecycle BEFORE anything is retained. A disbanded group is
         // terminal and an unrecoverable one cannot safely apply traffic, so
         // input for either is refused here rather than decrypted, retained,
@@ -314,7 +335,7 @@ class MarmotInboundProcessor(
                     // an error — callers should log at DEBUG.
                     GroupEventResult.UndecryptableOuterLayer(
                         groupId,
-                        retainedEpochCount = groupManager.retainedExporterSecrets(groupId).size,
+                        retainedEpochCount = groupManager.retainedExporterCount(groupId),
                     )
                 } else {
                     // The Marmot message id is defined over the recovered MLS
@@ -328,8 +349,8 @@ class MarmotInboundProcessor(
                         val mlsMessage = MlsMessage.decodeTls(TlsReader(mlsBytes))
 
                         when (mlsMessage.wireFormat) {
-                            WireFormat.PRIVATE_MESSAGE -> processPrivateMessage(groupId, mlsMessage, groupEvent)
-                            WireFormat.PUBLIC_MESSAGE -> processPublicMessage(groupId, mlsMessage, groupEvent)
+                            WireFormat.PRIVATE_MESSAGE -> processPrivateMessage(groupId, mlsBytes, mlsMessage)
+                            WireFormat.PUBLIC_MESSAGE -> processPublicMessage(groupId, mlsBytes, mlsMessage)
                             else -> GroupEventResult.Error(groupId, "Unexpected wire format: ${mlsMessage.wireFormat}")
                         }
                     }
@@ -636,15 +657,16 @@ class MarmotInboundProcessor(
 
     private suspend fun processPrivateMessage(
         groupId: HexKey,
+        mlsBytes: ByteArray,
         mlsMessage: MlsMessage,
-        groupEvent: GroupEvent,
     ): GroupEventResult {
         // Peek at content type from the PrivateMessage header
         val privMsg = PrivateMessage.decodeTls(TlsReader(mlsMessage.payload))
 
         return when (privMsg.contentType) {
             ContentType.APPLICATION -> {
-                val bytes = mlsMessage.toTlsBytes()
+                // The bytes the outer layer gave, not a re-encoding of them.
+                val bytes = mlsBytes
                 val attributed =
                     try {
                         groupManager.decryptAndAttribute(groupId, bytes)
@@ -702,7 +724,7 @@ class MarmotInboundProcessor(
             }
 
             ContentType.COMMIT -> {
-                handleCommitEvent(groupId, groupEvent)
+                handleCommitEvent(groupId, mlsBytes, mlsMessage)
             }
 
             ContentType.PROPOSAL -> {
@@ -713,14 +735,14 @@ class MarmotInboundProcessor(
 
     private suspend fun processPublicMessage(
         groupId: HexKey,
+        mlsBytes: ByteArray,
         mlsMessage: MlsMessage,
-        groupEvent: GroupEvent,
     ): GroupEventResult {
         val pubMsg = PublicMessage.decodeTls(TlsReader(mlsMessage.payload))
 
         return when (pubMsg.contentType) {
             ContentType.COMMIT -> {
-                handleCommitEvent(groupId, groupEvent)
+                handleCommitEvent(groupId, mlsBytes, mlsMessage)
             }
 
             ContentType.PROPOSAL -> {
@@ -844,27 +866,22 @@ class MarmotInboundProcessor(
      */
     private suspend fun handleCommitEvent(
         groupId: HexKey,
-        groupEvent: GroupEvent,
+        mlsBytes: ByteArray,
+        mlsMessage: MlsMessage,
     ): GroupEventResult {
         if (groupManager.getGroup(groupId) == null) {
             return GroupEventResult.Error(groupId, "Group not found")
         }
-        return applyCommit(groupId, groupEvent)
+        return applyCommit(groupId, mlsBytes, mlsMessage)
     }
 
+    /** Applies the commit [mlsBytes] the outer layer of an inbound kind:445 gave, already decoded as [mlsMessage]. */
     private suspend fun applyCommit(
         groupId: HexKey,
-        commitEvent: GroupEvent,
+        mlsBytes: ByteArray,
+        mlsMessage: MlsMessage,
     ): GroupEventResult =
         try {
-            val mlsBytes =
-                tryDecryptOuterLayer(groupId, commitEvent.encryptedContent())
-                    ?: return GroupEventResult.UndecryptableOuterLayer(
-                        groupId,
-                        retainedEpochCount = groupManager.retainedExporterSecrets(groupId).size,
-                    )
-            val mlsMessage = MlsMessage.decodeTls(TlsReader(mlsBytes))
-
             when (mlsMessage.wireFormat) {
                 WireFormat.PRIVATE_MESSAGE -> {
                     // Sniff the PrivateMessage epoch without consuming any
@@ -873,7 +890,7 @@ class MarmotInboundProcessor(
                     // the real handshake / application message gets rejected
                     // when it finally arrives.
                     val privPeek = PrivateMessage.decodeTls(TlsReader(mlsMessage.payload))
-                    val currentEpoch = groupManager.getGroup(groupId)?.epoch
+                    val currentEpoch = groupManager.currentEpoch(groupId)
                     when {
                         currentEpoch != null && privPeek.epoch < currentEpoch -> {
                             GroupEventResult.Duplicate(groupId)
@@ -887,10 +904,9 @@ class MarmotInboundProcessor(
                         }
 
                         else -> {
-                            val decrypted = groupManager.decrypt(groupId, mlsMessage.toTlsBytes())
+                            val decrypted = groupManager.decrypt(groupId, mlsBytes)
                             if (decrypted.contentType == ContentType.COMMIT) {
-                                val group = groupManager.getGroup(groupId)
-                                GroupEventResult.CommitProcessed(groupId, group?.epoch ?: 0)
+                                GroupEventResult.CommitProcessed(groupId, groupManager.currentEpoch(groupId) ?: 0)
                             } else {
                                 GroupEventResult.Error(
                                     groupId,
@@ -904,7 +920,7 @@ class MarmotInboundProcessor(
                 WireFormat.PUBLIC_MESSAGE -> {
                     val pubMsg = PublicMessage.decodeTls(TlsReader(mlsMessage.payload))
                     val tag = pubMsg.confirmationTag
-                    val currentEpoch = groupManager.getGroup(groupId)?.epoch
+                    val currentEpoch = groupManager.currentEpoch(groupId)
                     when {
                         tag == null -> {
                             GroupEventResult.Error(groupId, "PublicMessage commit missing confirmation_tag")
@@ -971,8 +987,7 @@ class MarmotInboundProcessor(
                                     signature = pubMsg.signature,
                                 )
                                 convergence.recordApplied(groupId, mlsBytes, pubMsg.epoch, preState)
-                                val post = groupManager.getGroup(groupId)
-                                GroupEventResult.CommitProcessed(groupId, post?.epoch ?: 0)
+                                GroupEventResult.CommitProcessed(groupId, groupManager.currentEpoch(groupId) ?: 0)
                             }
                         }
                     }
@@ -983,6 +998,7 @@ class MarmotInboundProcessor(
                 }
             }
         } catch (e: Exception) {
+            currentCoroutineContext().ensureActive()
             GroupEventResult.Error(groupId, "Failed to apply commit: ${e.message}", e)
         }
 
@@ -1003,21 +1019,14 @@ class MarmotInboundProcessor(
         groupId: HexKey,
         encryptedContent: String,
     ): ByteArray? {
-        // Try current epoch key first
-        try {
-            val exporterKey = groupManager.exporterSecret(groupId)
-            return GroupEventEncryption.decrypt(encryptedContent, exporterKey)
-        } catch (_: Exception) {
-            // Current epoch key failed — try retained epoch keys
-        }
-
-        // Try retained epoch exporter keys (most recent first)
-        val retainedKeys = groupManager.retainedExporterSecrets(groupId)
-        for (retainedKey in retainedKeys) {
+        // The current epoch's key first, then the retained epochs', most recent
+        // first: derived once per epoch by the manager, not per event, since
+        // anyone who reads the public h tag can make us try them all.
+        for (key in groupManager.groupEventKeys(groupId)) {
             try {
-                return GroupEventEncryption.decrypt(encryptedContent, retainedKey)
+                return GroupEventEncryption.decrypt(encryptedContent, key)
             } catch (_: Exception) {
-                // This retained key didn't work — try the next one
+                // Not this epoch — try the next one.
             }
         }
 

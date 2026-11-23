@@ -247,19 +247,19 @@ private suspend fun MarmotManager.ingestGroupEventUnrefreshed(ge: GroupEvent): M
                 // never stored or surfaced as a message (`device-group.md` "Keeping it out of sight").
                 deviceGroups.onAppEvent(result.groupId, result.innerEventJson, result.senderLeafIndex, result.epoch)
                 MarmotIngestResult.Ignored("device-group traffic")
-            } else if (isRetiredStreamStart(result.innerEventJson)) {
+            } else if (isRetiredStreamStart(result.innerEvent)) {
                 MarmotIngestResult.Ignored("retired agent text stream start")
-            } else if (isDeviceGroupTraffic(result.innerEventJson)) {
+            } else if (isDeviceGroupTraffic(result.innerEvent)) {
                 // `features/device-group.md`: these kinds are read only in the device group the device
                 // trusts and ignored in every other group, so no chat projects one.
                 MarmotIngestResult.Ignored("device-group kind outside a trusted device group")
             } else {
                 // MLS ratchets once we decrypt; future reads of the same ciphertext
                 // would fail — persist the plaintext now so restarts/replays see it.
-                persistDecryptedMessage(result.groupId, result.innerEventJson, result.epoch)
+                persistDecryptedMessage(result.groupId, result.innerEventJson, result.innerEvent, result.epoch)
                 // Traffic is the natural clock for expiry: a group that is being
                 // read is a group whose expired messages should already be gone.
-                pruneExpiredMessages(result.groupId)
+                pruneExpiredMessagesIfDue(result.groupId)
                 MarmotIngestResult.Message(result)
             }
         }
@@ -307,7 +307,7 @@ private suspend fun MarmotManager.ingestGroupEventUnrefreshed(ge: GroupEvent): M
         }
     }
 
-private fun isRetiredStreamStart(innerEventJson: String): Boolean = Event.fromJsonOrNull(innerEventJson)?.kind?.let(AgentTextStreamRetirement::isStreamStart) == true
+private fun isRetiredStreamStart(inner: Event?): Boolean = inner?.kind?.let(AgentTextStreamRetirement::isStreamStart) == true
 
 /** Whether a decrypted inner event is a device-group app event (`MarmotDeviceGroupKinds`). */
-private fun isDeviceGroupTraffic(innerEventJson: String): Boolean = Event.fromJsonOrNull(innerEventJson)?.let { MarmotDeviceGroupKinds.isDeviceGroupKind(it.kind) } ?: false
+private fun isDeviceGroupTraffic(inner: Event?): Boolean = inner?.let { MarmotDeviceGroupKinds.isDeviceGroupKind(it.kind) } ?: false

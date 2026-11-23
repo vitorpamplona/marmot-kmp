@@ -32,13 +32,17 @@ import com.vitorpamplona.mls.schedule.KeySchedule
 import com.vitorpamplona.mls.schedule.SecretTree
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
 import com.vitorpamplona.quartz.nip01Core.core.toHexKey
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
+import kotlin.test.assertTrue
 
 /**
  * The library audit's confirming cases for [MlsGroupManager]: a former epoch's application
@@ -217,5 +221,31 @@ class MlsGroupManagerAuditTest {
             assertEquals(listOf(stripped), store.loadRetainedEpochs(groupId).map { it.toHexKey() })
             val exporter = KeySchedule.mlsExporter("33".repeat(32).hexToByteArray(), "marmot", "group-event".encodeToByteArray(), 32)
             assertContentEquals(exporter, restored.retainedExporterSecrets(groupId).single())
+        }
+
+    @Test
+    fun theLockFreeReadersStayConsistentWhileCommitsApply() =
+        runBlocking<Unit> {
+            val alice = MlsGroupManager(InMemoryGroupStateStore())
+            aliceGroup(alice)
+            val done = AtomicBoolean(false)
+            val reader =
+                async(Dispatchers.Default) {
+                    var reads = 0
+                    while (!done.get()) {
+                        alice.retainedExporterSecrets(groupId)
+                        alice.exporterSecret(groupId)
+                        alice.memberIdentityHex(groupId, 0)
+                        alice.mediaExporterSecretAt(groupId, 1)
+                        alice.activeGroupIds()
+                        reads++
+                    }
+                    reads
+                }
+            repeat(60) { alice.commit(groupId) }
+            done.set(true)
+            assertTrue(reader.await() > 0)
+            assertEquals(MlsGroupManager.EPOCH_RETENTION_WINDOW, alice.retainedExporterSecrets(groupId).size)
+            assertContentEquals(alice.getGroup(groupId)!!.exporterSecret("marmot", "group-event".encodeToByteArray(), 32), alice.exporterSecret(groupId))
         }
 }

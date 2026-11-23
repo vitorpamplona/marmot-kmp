@@ -59,6 +59,7 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlin.concurrent.Volatile
 
 /**
  * High-level coordinator for MLS group lifecycle and state management.
@@ -114,11 +115,14 @@ import kotlinx.coroutines.sync.withLock
  * receiver data ([MlsGroup.decryptFormerEpoch], [MlsGroup.RETAIN_EPOCHS] epochs),
  * which verifies it against the tree of the epoch it was sent in.
  *
- * Thread safety: All suspending mutation methods are guarded by a [Mutex]
- * to prevent concurrent state corruption. Non-suspending read methods
- * ([getGroup], [isMember], [activeGroupIds], [encrypt], [decrypt],
- * [decryptOrNull], [exporterSecret]) must be called from the same
- * coroutine context that owns this manager (e.g., the Account's scope).
+ * Thread safety: every change runs under a [Mutex]. The group maps are
+ * replaced rather than mutated, so the non-suspending readers ([isMember],
+ * [activeGroupIds], [exporterSecret], [retainedExporterSecrets],
+ * [mediaExporterSecretAt], [memberIdentityHex], [currentEpoch]) never throw
+ * or see a torn table, and the keys and identities they return are derived
+ * once per epoch under the lock, so they never come from a group a commit is
+ * half-way through. [getGroup] hands out the live [MlsGroup]: to read several
+ * things of it consistently, use [readGroup].
  *
  * @see MlsGroup The low-level MLS state machine
  * @see MlsGroupStateStore Storage abstraction for group state persistence
@@ -137,8 +141,53 @@ class MlsGroupManager(
     constructor(store: MlsGroupStateStore) : this(store, CurrentProfileGroupFactory.SUPPORTED_COMPONENTS)
 
     private val mutex = Mutex()
-    private val groups = mutableMapOf<HexKey, MlsGroup>()
-    private val retainedEpochs = mutableMapOf<HexKey, MutableList<RetainedEpochSecrets>>()
+
+    /**
+     * Groups by nostr group id. Replaced, never mutated, and only under [mutex]:
+     * the non-suspending readers ([getGroup], [isMember], [activeGroupIds], …)
+     * run beside [receive][decrypt] calls on other threads, and a map mutated
+     * under them can throw or show a half-written table.
+     */
+    @Volatile
+    private var groups: Map<HexKey, MlsGroup> = emptyMap()
+
+    /** Retained exporter secrets by group, oldest first. Copy-on-write like [groups]. */
+    @Volatile
+    private var retainedEpochs: Map<HexKey, List<RetainedEpochSecrets>> = emptyMap()
+
+    /**
+     * The keys every inbound event reads, by group: derived once per epoch under
+     * [mutex] (see [refreshEpochKeys]) instead of per call, and read without the
+     * lock, so a reader never runs HKDF over a group a commit is changing.
+     */
+    @Volatile
+    private var epochKeys: Map<HexKey, EpochKeys> = emptyMap()
+
+    private class EpochKeys(
+        val group: MlsGroup,
+        val epoch: Long,
+        val retained: List<RetainedEpochSecrets>?,
+        val groupEventKey: ByteArray,
+        val mediaKey: ByteArray,
+        /** Most recent first. */
+        val retainedGroupEventKeys: List<ByteArray>,
+        val retainedMediaKeys: Map<Long, ByteArray>,
+        val identities: Array<HexKey?>,
+    )
+
+    private fun putGroup(
+        nostrGroupId: HexKey,
+        group: MlsGroup,
+    ) {
+        groups = groups + (nostrGroupId to group)
+    }
+
+    private fun putRetained(
+        nostrGroupId: HexKey,
+        retained: List<RetainedEpochSecrets>,
+    ) {
+        retainedEpochs = retainedEpochs + (nostrGroupId to retained)
+    }
 
     /**
      * Bumped whenever a group's retained-epoch window changes, and compared
@@ -176,7 +225,7 @@ class MlsGroupManager(
                     // main needs the local binding for the sender-ratchet
                     // restore below; this branch supplies Marmot's policy.
                     val group = MlsGroup.restore(state, MarmotGroupPolicy)
-                    groups[nostrGroupId] = group
+                    putGroup(nostrGroupId, group)
                     Log.d(TAG) { "restoreAll(): restored group $nostrGroupId (${stateBytes.size} bytes)" }
 
                     // Sends since the last full write left their position here
@@ -204,7 +253,7 @@ class MlsGroupManager(
                     val retained = store.loadRetainedEpochs(nostrGroupId)
                     if (retained.isNotEmpty()) {
                         val decoded = retained.map { RetainedEpochSecrets.decodeTls(TlsReader(it)) }
-                        retainedEpochs[nostrGroupId] = decoded.map { it.exporterOnly() }.toMutableList()
+                        putRetained(nostrGroupId, decoded.map { it.exporterOnly() })
                         if (decoded.any { it.senderDataSecret.isNotEmpty() || it.encryptionSecret.isNotEmpty() }) {
                             store.saveRetainedEpochs(nostrGroupId, encodeRetained(retainedEpochs[nostrGroupId].orEmpty()))
                         }
@@ -227,6 +276,7 @@ class MlsGroupManager(
                     )
                 }
             }
+            for (nostrGroupId in groups.keys) groups[nostrGroupId]?.let { refreshEpochKeys(nostrGroupId, it) }
             Log.d(TAG) { "restoreAll(): finished with ${groups.size} active groups in memory" }
         }
 
@@ -272,7 +322,7 @@ class MlsGroupManager(
         if (!changed) return@withLock
 
         val outgoing = current?.retainedSecrets()
-        groups[nostrGroupId] = MlsGroup.restore(state, MarmotGroupPolicy)
+        putGroup(nostrGroupId, MlsGroup.restore(state, MarmotGroupPolicy))
         // Retain by outgoing epoch even when the epoch NUMBER is unchanged: a
         // same-epoch rewind swaps one epoch-N state for a different one, and
         // the abandoned N still has traffic addressed to it.
@@ -295,7 +345,7 @@ class MlsGroupManager(
         group: MlsGroup,
     ) = mutex.withLock {
         require(!groups.containsKey(nostrGroupId)) { "Group $nostrGroupId already exists" }
-        groups[nostrGroupId] = group
+        putGroup(nostrGroupId, group)
         persistGroup(nostrGroupId)
     }
 
@@ -337,7 +387,7 @@ class MlsGroupManager(
         mutex.withLock {
             Log.d(TAG) { "createGroup($nostrGroupId): creating new MLS group" }
             val group = MlsGroup.create(identity, signingKey, initialExtensions, policy = MarmotGroupPolicy)
-            groups[nostrGroupId] = group
+            putGroup(nostrGroupId, group)
             persistGroup(nostrGroupId)
             Log.d(TAG) { "createGroup($nostrGroupId): done, in-memory group count=${groups.size}" }
             group
@@ -390,7 +440,7 @@ class MlsGroupManager(
             // still joins.
             if (groups[derivedId]?.isLocalMember() == true) throw MarmotAlreadyMemberException(derivedId)
 
-            groups[derivedId] = group
+            putGroup(derivedId, group)
 
             // init_key is consumed — the bundle's initPrivateKey should not be
             // reused. Caller must discard the bundle and rotate KeyPackages.
@@ -416,7 +466,7 @@ class MlsGroupManager(
     ): ExternalJoinResult =
         mutex.withLock {
             val result = MlsGroup.externalJoin(groupInfoBytes, identity, signingKey, policy = MarmotGroupPolicy)
-            groups[nostrGroupId] = result.group
+            putGroup(nostrGroupId, result.group)
             persistGroup(nostrGroupId)
             result
         }
@@ -1203,8 +1253,9 @@ class MlsGroupManager(
         }
 
     private suspend fun removeGroupStateUnlocked(nostrGroupId: HexKey) {
-        groups.remove(nostrGroupId)
-        retainedEpochs.remove(nostrGroupId)
+        groups = groups - nostrGroupId
+        retainedEpochs = retainedEpochs - nostrGroupId
+        epochKeys = epochKeys - nostrGroupId
         receivedSinceSave.remove(nostrGroupId)
         formerTrees.remove(nostrGroupId)
         retainedEpochRevision.remove(nostrGroupId)
@@ -1234,8 +1285,9 @@ class MlsGroupManager(
                     Log.w(TAG) { "clearAllState(): failed to wipe $id: ${e.message}" }
                 }
             }
-            groups.clear()
-            retainedEpochs.clear()
+            groups = emptyMap()
+            retainedEpochs = emptyMap()
+            epochKeys = emptyMap()
             retainedEpochRevision.clear()
             retainedEpochPersisted.clear()
             receivedSinceSave.clear()
@@ -1257,29 +1309,22 @@ class MlsGroupManager(
     fun memberIdentityHex(
         nostrGroupId: HexKey,
         leafIndex: Int,
-    ): String? = groups[nostrGroupId]?.memberIdentityHex(leafIndex)
+    ): String? {
+        val keys = keysOf(nostrGroupId) ?: return null
+        return if (leafIndex in keys.identities.indices) keys.identities[leafIndex] else null
+    }
 
     /**
      * Export the Marmot outer encryption key for GroupEvent wrapping.
      * MLS-Exporter("marmot", "group-event", 32)
      */
-    fun exporterSecret(nostrGroupId: HexKey): ByteArray =
-        requireGroup(nostrGroupId).exporterSecret(
-            "marmot",
-            "group-event".encodeToByteArray(),
-            32,
-        )
+    fun exporterSecret(nostrGroupId: HexKey): ByteArray = requireKeys(nostrGroupId).groupEventKey.copyOf()
 
     /**
      * Export the MIP-04 encrypted media key for a group.
      * MLS-Exporter("marmot", "encrypted-media", 32)
      */
-    fun mediaExporterSecret(nostrGroupId: HexKey): ByteArray =
-        requireGroup(nostrGroupId).exporterSecret(
-            "marmot",
-            "encrypted-media".encodeToByteArray(),
-            32,
-        )
+    fun mediaExporterSecret(nostrGroupId: HexKey): ByteArray = requireKeys(nostrGroupId).mediaKey.copyOf()
 
     /**
      * The encrypted-media key of [epoch], or null when this device no longer
@@ -1296,18 +1341,9 @@ class MlsGroupManager(
         nostrGroupId: HexKey,
         epoch: Long,
     ): ByteArray? {
-        val group = groups[nostrGroupId] ?: return null
-        if (group.epoch == epoch) return mediaExporterSecret(nostrGroupId)
-        val retained =
-            retainedEpochs[nostrGroupId]
-                ?.firstOrNull { it.epoch == epoch && it.exporterSecret.isNotEmpty() }
-                ?: return null
-        return KeySchedule.mlsExporter(
-            retained.exporterSecret,
-            "marmot",
-            "encrypted-media".encodeToByteArray(),
-            32,
-        )
+        val keys = keysOf(nostrGroupId) ?: return null
+        if (keys.epoch == epoch) return keys.mediaKey.copyOf()
+        return keys.retainedMediaKeys[epoch]?.copyOf()
     }
 
     /**
@@ -1322,19 +1358,84 @@ class MlsGroupManager(
      * @return list of retained exporter secrets (most recent first), each
      *         derived via MLS-Exporter("marmot", "group-event", 32)
      */
-    fun retainedExporterSecrets(nostrGroupId: HexKey): List<ByteArray> {
-        val retained = retainedEpochs[nostrGroupId] ?: return emptyList()
-        return retained
-            .filter { it.exporterSecret.isNotEmpty() }
-            .sortedByDescending { it.epoch }
-            .map { epochSecrets ->
-                KeySchedule.mlsExporter(
-                    epochSecrets.exporterSecret,
-                    "marmot",
-                    "group-event".encodeToByteArray(),
-                    32,
-                )
+    fun retainedExporterSecrets(nostrGroupId: HexKey): List<ByteArray> = keysOf(nostrGroupId)?.retainedGroupEventKeys?.map { it.copyOf() } ?: emptyList()
+
+    /** How many retained epochs [retainedExporterSecrets] would return, without copying them. */
+    fun retainedExporterCount(nostrGroupId: HexKey): Int = keysOf(nostrGroupId)?.retainedGroupEventKeys?.size ?: 0
+
+    /**
+     * The current group-event key and the retained ones, most recent first, as
+     * the outer layer of an inbound kind:445 tries them. The arrays are this
+     * manager's own: read them, never change them.
+     */
+    internal fun groupEventKeys(nostrGroupId: HexKey): List<ByteArray> {
+        val keys = keysOf(nostrGroupId) ?: return emptyList()
+        return listOf(keys.groupEventKey) + keys.retainedGroupEventKeys
+    }
+
+    /** The group's epoch as the last applied change left it, read without the lock. */
+    fun currentEpoch(nostrGroupId: HexKey): Long? = keysOf(nostrGroupId)?.epoch
+
+    private fun requireKeys(nostrGroupId: HexKey): EpochKeys = keysOf(nostrGroupId) ?: throw IllegalStateException("Not a member of group $nostrGroupId")
+
+    /**
+     * The keys of [nostrGroupId]'s current state. [refreshEpochKeys] keeps them
+     * in step under the lock after every change; a group changed some other way
+     * (a caller driving [getGroup]'s object directly) is derived again here.
+     */
+    private fun keysOf(nostrGroupId: HexKey): EpochKeys? {
+        val group = groups[nostrGroupId] ?: return null
+        val cached = epochKeys[nostrGroupId]
+        if (cached != null && cached.group === group && cached.epoch == group.epoch && cached.retained === retainedEpochs[nostrGroupId]) return cached
+        return deriveEpochKeys(nostrGroupId, group)
+    }
+
+    private fun refreshEpochKeys(
+        nostrGroupId: HexKey,
+        group: MlsGroup,
+    ) {
+        val cached = epochKeys[nostrGroupId]
+        if (cached != null && cached.group === group && cached.epoch == group.epoch && cached.retained === retainedEpochs[nostrGroupId]) return
+        epochKeys =
+            try {
+                epochKeys + (nostrGroupId to deriveEpochKeys(nostrGroupId, group))
+            } catch (e: Exception) {
+                // A state that cannot export (one we were removed from, say):
+                // readers derive it themselves and see the same failure.
+                Log.d(TAG) { "refreshEpochKeys($nostrGroupId): ${e.message}" }
+                epochKeys - nostrGroupId
             }
+    }
+
+    private fun deriveEpochKeys(
+        nostrGroupId: HexKey,
+        group: MlsGroup,
+    ): EpochKeys {
+        val retained = retainedEpochs[nostrGroupId]
+        val withExporter = retained.orEmpty().filter { it.exporterSecret.isNotEmpty() }
+        val retainedMedia = LinkedHashMap<Long, ByteArray>()
+        // Oldest first, first one kept: after a same-epoch rewind the list holds
+        // two records of one epoch number, and the older is the one this
+        // device's own messages of that epoch used.
+        for (epochSecrets in withExporter) {
+            if (epochSecrets.epoch !in retainedMedia) {
+                retainedMedia[epochSecrets.epoch] = KeySchedule.mlsExporter(epochSecrets.exporterSecret, "marmot", MEDIA_LABEL, 32)
+            }
+        }
+        val leafCount = group.view().leafCount
+        return EpochKeys(
+            group = group,
+            epoch = group.epoch,
+            retained = retained,
+            groupEventKey = group.exporterSecret("marmot", GROUP_EVENT_LABEL, 32),
+            mediaKey = group.exporterSecret("marmot", MEDIA_LABEL, 32),
+            retainedGroupEventKeys =
+                withExporter
+                    .sortedByDescending { it.epoch }
+                    .map { KeySchedule.mlsExporter(it.exporterSecret, "marmot", GROUP_EVENT_LABEL, 32) },
+            retainedMediaKeys = retainedMedia,
+            identities = Array(leafCount) { group.memberIdentityHex(it) },
+        )
     }
 
     // --- Private Helpers ---
@@ -1375,6 +1476,7 @@ class MlsGroupManager(
             Log.d(TAG) { "persistGroup($nostrGroupId): serialized ${encoded.size} bytes, calling store.save" }
             store.save(nostrGroupId, encoded)
             receivedSinceSave.remove(nostrGroupId)
+            refreshEpochKeys(nostrGroupId, group)
 
             // The standalone record now describes a position this state already
             // contains, and after an epoch change it describes a ratchet that no
@@ -1409,13 +1511,9 @@ class MlsGroupManager(
         nostrGroupId: HexKey,
         retainedBefore: RetainedEpochSecrets,
     ) {
-        val retained = retainedEpochs.getOrPut(nostrGroupId) { mutableListOf() }
-        retained.add(retainedBefore.exporterOnly())
-
-        // Trim to retention window (keep only the most recent N-1 epochs)
-        while (retained.size > EPOCH_RETENTION_WINDOW) {
-            retained.removeAt(0)
-        }
+        // A new list each time: readers iterate the old one without the lock.
+        val retained = (retainedEpochs[nostrGroupId].orEmpty() + retainedBefore.exporterOnly()).takeLast(EPOCH_RETENTION_WINDOW)
+        putRetained(nostrGroupId, retained)
         retainedEpochRevision[nostrGroupId] = (retainedEpochRevision[nostrGroupId] ?: 0L) + 1
     }
 
@@ -1499,6 +1597,9 @@ class MlsGroupManager(
          * advances the group. Capped for forward-secrecy reasons.
          */
         const val EPOCH_RETENTION_WINDOW = 5
+
+        private val GROUP_EVENT_LABEL = "group-event".encodeToByteArray()
+        private val MEDIA_LABEL = "encrypted-media".encodeToByteArray()
 
         /** Application messages opened in a group before its state is written again: see [noteReceived]. */
         const val RECEIVED_PERSIST_BATCH = 32

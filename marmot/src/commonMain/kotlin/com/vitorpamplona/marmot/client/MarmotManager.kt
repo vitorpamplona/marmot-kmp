@@ -526,7 +526,7 @@ class MarmotManager(
         val result = inboundProcessor.processGroupEvent(groupEvent)
 
         if (result is GroupEventResult.ApplicationMessage) {
-            Event.fromJsonOrNull(result.innerEventJson)?.let { inner ->
+            result.innerEvent?.let { inner ->
                 if (requiresSourceAuthority(inner.kind)) decideAdminAction(result.groupId, inner, result.epoch)
             }
         }
@@ -1891,10 +1891,17 @@ class MarmotManager(
          * current one.
          */
         epoch: Long? = null,
+    ) = persistDecryptedMessage(nostrGroupId, innerEventJson, Event.fromJsonOrNull(innerEventJson), epoch)
+
+    /** [persistDecryptedMessage] for a caller that already parsed [innerEventJson] into [parsed]. */
+    internal suspend fun persistDecryptedMessage(
+        nostrGroupId: HexKey,
+        innerEventJson: String,
+        parsed: Event?,
+        epoch: Long?,
     ) {
         try {
             messageStore?.appendMessage(nostrGroupId, innerEventJson)
-            val parsed = Event.fromJsonOrNull(innerEventJson)
             if (epoch != null && parsed != null) {
                 messageStore?.recordEpoch(nostrGroupId, parsed.id, epoch)
                 rememberMessageEpoch(nostrGroupId, parsed.id, epoch)
@@ -2452,7 +2459,9 @@ class MarmotManager(
         val seconds = retentionForEpoch(nostrGroupId, sourceEpoch)
         if (seconds <= 0L) return
         try {
-            messageStore?.recordExpiry(nostrGroupId, innerEvent.id, innerEvent.createdAt + seconds)
+            val expiresAt = innerEvent.createdAt + seconds
+            messageStore?.recordExpiry(nostrGroupId, innerEvent.id, expiresAt)
+            nextExpiryLock.withLock { nextExpiry[nostrGroupId]?.let { nextExpiry[nostrGroupId] = minOf(it, expiresAt) } }
         } catch (e: Exception) {
             Log.w("MarmotManager", "Failed to pin expiry for ${innerEvent.id} in $nostrGroupId", e)
         }
@@ -2529,7 +2538,10 @@ class MarmotManager(
     ): Set<HexKey> {
         val store = messageStore ?: return emptySet()
         return try {
-            val expired = store.loadExpiries(nostrGroupId).filterValues { it <= nowSecs }.keys
+            val expiries = store.loadExpiries(nostrGroupId)
+            val expired = expiries.filterValues { it <= nowSecs }.keys
+            val next = expiries.values.filter { it > nowSecs }.minOrNull() ?: Long.MAX_VALUE
+            nextExpiryLock.withLock { nextExpiry[nostrGroupId] = next }
             if (expired.isEmpty()) return emptySet()
             store.removeMessages(nostrGroupId, expired)
             Log.d("MarmotManager") { "expired ${expired.size} message(s) in ${nostrGroupId.take(8)}…" }
@@ -2539,6 +2551,27 @@ class MarmotManager(
             Log.w("MarmotManager", "Failed to expire messages for $nostrGroupId", e)
             emptySet()
         }
+    }
+
+    /**
+     * Per group, the earliest expiry still pending as the last prune and the pins since left it.
+     * Absent means not known yet; [Long.MAX_VALUE] means none.
+     */
+    private val nextExpiry = HashMap<HexKey, Long>()
+    private val nextExpiryLock = PlatformLock()
+
+    /**
+     * [pruneExpiredMessages], skipped while the group's earliest pending expiry is still ahead. The
+     * ingest path calls it for every message, and a full prune reads the group's whole expiry
+     * table, which made a catch-up batch quadratic.
+     */
+    internal suspend fun pruneExpiredMessagesIfDue(
+        nostrGroupId: HexKey,
+        nowSecs: Long = TimeUtils.now(),
+    ) {
+        val next = nextExpiryLock.withLock { nextExpiry[nostrGroupId] }
+        if (next != null && next > nowSecs) return
+        pruneExpiredMessages(nostrGroupId, nowSecs)
     }
 
     /**
