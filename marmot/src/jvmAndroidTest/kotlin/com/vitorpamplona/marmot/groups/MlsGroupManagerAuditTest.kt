@@ -42,7 +42,8 @@ import kotlin.test.assertNotNull
 
 /**
  * The library audit's confirming cases for [MlsGroupManager]: a former epoch's application
- * message is opened by mls-kmp's verified path and attributed in that epoch's tree.
+ * message is opened by mls-kmp's verified path and attributed in that epoch's tree, and a
+ * Welcome for a group this device is a live member of never replaces that group.
  */
 class MlsGroupManagerAuditTest {
     private val groupId = "b".repeat(64)
@@ -157,6 +158,44 @@ class MlsGroupManagerAuditTest {
             bob.flushReceivedState()
             val restarted = MlsGroupManager(bobStore).also { it.restoreAll() }
             assertFailsWith<Exception> { restarted.decrypt(groupId, late) }
+        }
+
+    @Test
+    fun aReplayedWelcomeDoesNotRewindALiveGroup() =
+        runBlocking<Unit> {
+            val alice = MlsGroupManager(InMemoryGroupStateStore())
+            val bobStore = InMemoryGroupStateStore()
+            val bob = MlsGroupManager(bobStore)
+            aliceGroup(alice)
+            val bobKp = kp("bob")
+            val addBob = alice.addMember(groupId, bobKp.keyPackage.toTlsBytes())
+            bob.processWelcome(addBob.welcomeBytes!!, bobKp, null)
+            val joinEpoch = bob.getGroup(groupId)!!.epoch
+            bob.processFramedCommit(groupId, alice.commit(groupId).framedCommitBytes)
+            bob.processFramedCommit(groupId, alice.commit(groupId).framedCommitBytes)
+
+            // The same Welcome again: a relay redelivery after a restart, with no h tag.
+            val refused = assertFailsWith<MarmotAlreadyMemberException> { bob.processWelcome(addBob.welcomeBytes!!, bobKp, null) }
+            assertEquals(groupId, refused.nostrGroupId)
+            assertEquals(joinEpoch + 2, bob.getGroup(groupId)!!.epoch)
+            assertEquals(joinEpoch + 2, MlsGroupManager(bobStore).also { it.restoreAll() }.getGroup(groupId)!!.epoch)
+        }
+
+    @Test
+    fun aWelcomeStillRejoinsAGroupThisDeviceWasRemovedFrom() =
+        runBlocking<Unit> {
+            val alice = MlsGroupManager(InMemoryGroupStateStore())
+            val bob = MlsGroupManager(InMemoryGroupStateStore())
+            aliceGroup(alice)
+            val bobKp = kp("bob")
+            val addBob = alice.addMember(groupId, bobKp.keyPackage.toTlsBytes())
+            bob.processWelcome(addBob.welcomeBytes!!, bobKp, null)
+            bob.processFramedCommit(groupId, alice.removeMember(groupId, bob.getGroup(groupId)!!.leafIndex).framedCommitBytes)
+            assertFalse(bob.isMember(groupId))
+
+            val again = kp("bob")
+            bob.processWelcome(alice.addMember(groupId, again.keyPackage.toTlsBytes()).welcomeBytes!!, again, groupId)
+            assertNotNull(bob.getGroup(groupId)?.takeIf { bob.isMember(groupId) })
         }
 
     /**

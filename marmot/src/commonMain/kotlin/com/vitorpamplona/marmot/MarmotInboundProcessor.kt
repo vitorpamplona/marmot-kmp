@@ -22,6 +22,7 @@ package com.vitorpamplona.marmot
 
 import com.vitorpamplona.crypto.sha2.sha256
 import com.vitorpamplona.marmot.foundation.appEvents.MarmotAppEvent
+import com.vitorpamplona.marmot.groups.MarmotAlreadyMemberException
 import com.vitorpamplona.marmot.groups.MlsGroupManager
 import com.vitorpamplona.marmot.mip00KeyPackages.KeyPackageRotationManager
 import com.vitorpamplona.marmot.mip03GroupMessages.GroupEventEncryption
@@ -463,8 +464,16 @@ class MarmotInboundProcessor(
                 .d("MarmotDbg") { "MarmotInboundProcessor.processWelcome: bundle found — invoking groupManager.processWelcome" }
 
             // Join the group; nostrGroupId is derived from the MLS GroupContext's
-            // NostrGroupData extension. The h-tag hint (if any) is validated inside.
-            val (_, nostrGroupId) = groupManager.processWelcome(welcomeBytes, bundle, hintNostrGroupId)
+            // NostrGroupData extension. The h-tag hint (if any) is validated inside,
+            // and a Welcome for a group we are still a live member of is refused
+            // there, after decoding, whatever its tags said.
+            val nostrGroupId =
+                try {
+                    groupManager.processWelcome(welcomeBytes, bundle, hintNostrGroupId).second
+                } catch (e: MarmotAlreadyMemberException) {
+                    Log.d("MarmotDbg") { "MarmotInboundProcessor.processWelcome: already a member of group=${e.nostrGroupId.take(8)}… — Welcome not applied" }
+                    return WelcomeResult.AlreadyJoined(e.nostrGroupId)
+                }
             Log
                 .d("MarmotDbg") { "MarmotInboundProcessor.processWelcome: joined group=${nostrGroupId.take(8)}…" }
 
@@ -499,6 +508,8 @@ class MarmotInboundProcessor(
             val (_, nostrGroupId) = groupManager.processWelcome(welcomeBytes, bundle, null)
             convergence.trackGroup(nostrGroupId)
             WelcomeResult.Joined(nostrGroupId = nostrGroupId, needsKeyPackageRotation = false)
+        } catch (e: MarmotAlreadyMemberException) {
+            WelcomeResult.AlreadyJoined(e.nostrGroupId)
         } catch (e: Exception) {
             Log.w("MarmotDbg", "MarmotInboundProcessor.joinWithBundle failed", e)
             WelcomeResult.Error("Failed to process sibling Welcome: ${e.message}", e)

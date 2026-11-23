@@ -382,6 +382,14 @@ class MlsGroupManager(
                 )
             }
 
+            // Checked on the decoded group, not on a hint: a Welcome without an
+            // h tag (or re-wrapped by anyone who saw it) whose KeyPackage is
+            // still held — a last-resort one is — would otherwise replace the
+            // live group with its join epoch, and persist that. A group this
+            // device was removed from is no live member state, so a re-invite
+            // still joins.
+            if (groups[derivedId]?.isLocalMember() == true) throw MarmotAlreadyMemberException(derivedId)
+
             groups[derivedId] = group
 
             // init_key is consumed — the bundle's initPrivateKey should not be
@@ -1505,6 +1513,15 @@ class AttributedMessage(
     val message: DecryptedMessage,
     val senderIdentityHex: HexKey?,
 )
+
+/**
+ * A Welcome named a group this device is still a live member of, so it was not applied: joining
+ * again would put the group back at the Welcome's epoch. A relay redelivering the Welcome after a
+ * restart is the usual cause.
+ */
+class MarmotAlreadyMemberException(
+    val nostrGroupId: HexKey,
+) : IllegalStateException("Already a member of group $nostrGroupId; the Welcome was not applied")
 
 /**
  * The exporter secret alone: a former epoch's messages open through mls-kmp's own receiver data, so
