@@ -379,11 +379,16 @@ class MarmotInboundProcessor(
         // payload adds nothing to a branch's standing and is admitted as
         // ordinary rather than selection-relevant.
         //
-        // DoS is bounded for both by the handler's per-group pending buffer.
+        // A commit naming a proposal that has not arrived yet is the third: it
+        // applies once the proposal is staged (MarmotReceiver gives it another
+        // go then), so it must not read as a duplicate on that retry.
+        //
+        // DoS is bounded for all three by the handler's per-group pending buffer.
         val idToRemember = messageId
         if (idToRemember != null &&
             result !is GroupEventResult.UndecryptableOuterLayer &&
-            result !is GroupEventResult.AppMessageOnCandidateBranch
+            result !is GroupEventResult.AppMessageOnCandidateBranch &&
+            !(result is GroupEventResult.Error && result.cause is MarmotMissingProposalException)
         ) {
             processedIdsMutex.withLock {
                 processedMessageIds.add(idToRemember)
@@ -999,7 +1004,11 @@ class MarmotInboundProcessor(
             }
         } catch (e: Exception) {
             currentCoroutineContext().ensureActive()
-            GroupEventResult.Error(groupId, "Failed to apply commit: ${e.message}", e)
+            if (MarmotMissingProposalException.isMissingProposal(e)) {
+                GroupEventResult.Error(groupId, "Commit references a proposal not received yet", MarmotMissingProposalException(groupId, e))
+            } else {
+                GroupEventResult.Error(groupId, "Failed to apply commit: ${e.message}", e)
+            }
         }
 
     /**
@@ -1044,5 +1053,21 @@ class MarmotInboundProcessor(
         }
 
         return null
+    }
+}
+
+/**
+ * A commit names a proposal (by reference) this device has not staged yet: the standalone proposal
+ * is still on its way. It applies once that proposal arrives, so the commit is not remembered as
+ * processed; [com.vitorpamplona.marmot.client.MarmotReceiver] holds it and tries again after the
+ * group stages a proposal.
+ */
+class MarmotMissingProposalException(
+    val groupId: HexKey,
+    cause: Throwable,
+) : IllegalStateException("Commit in $groupId references a proposal not received yet", cause) {
+    companion object {
+        /** Whether mls-kmp refused a commit because a proposal it names by reference is not staged. */
+        fun isMissingProposal(e: Throwable): Boolean = e.message?.contains("references unknown proposal") == true
     }
 }

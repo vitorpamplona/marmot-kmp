@@ -55,6 +55,36 @@ class MarmotAuditFixesTest {
     private suspend fun Member.createGroup() = manager.createCurrentProfileGroup(nostrGroupId = nostrGroupId, relays = listOf("wss://relay.invalid"), profile = GroupProfileV1("audit", ""))
 
     @Test
+    fun `a commit that arrives before the proposal it names applies once the proposal lands`() =
+        runBlocking<Unit> {
+            val alice = Member()
+            val bob = Member()
+            val carol = Member()
+            alice.createGroup()
+            val (_, bobWelcome) = alice.manager.addMember(nostrGroupId, bob.keyPackage(), emptyList())
+            bob.manager.ingest(bobWelcome!!.giftWrapEvent)
+            val (addCarol, carolWelcome) = alice.manager.addMember(nostrGroupId, carol.keyPackage(), emptyList())
+            bob.manager.ingest(addCarol!!.signedEvent)
+            carol.manager.ingest(carolWelcome!!.giftWrapEvent)
+
+            val carolLeaves = carol.manager.leaveGroup(nostrGroupId).signedEvent
+            val aliceReceiver = alice.receiver()
+            assertIs<MarmotIngestResult.ProposalStaged>(aliceReceiver.receive(carolLeaves))
+            val commit = aliceReceiver.commitStagedProposals().getValue(nostrGroupId).signedEvent
+
+            // Bob's relay hands him the commit first.
+            val receiver = bob.receiver()
+            val early = receiver.receive(commit)
+            assertIs<MarmotIngestResult.Failure>(early)
+            assertEquals(1, receiver.pendingCount(nostrGroupId), "the commit is held, not dropped")
+
+            assertIs<MarmotIngestResult.ProposalStaged>(receiver.receive(carolLeaves))
+            assertEquals(0, receiver.pendingCount(nostrGroupId))
+            assertIs<MarmotIngestResult.Commit>(bob.seen.last().second, "the held commit applies once its proposal is staged")
+            assertEquals(2, bob.manager.memberCount(nostrGroupId))
+        }
+
+    @Test
     fun `two copies of one message processed at once are delivered once`() =
         runBlocking<Unit> {
             repeat(20) { round ->

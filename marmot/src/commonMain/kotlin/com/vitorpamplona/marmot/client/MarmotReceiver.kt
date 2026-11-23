@@ -20,6 +20,7 @@
  */
 package com.vitorpamplona.marmot.client
 
+import com.vitorpamplona.marmot.MarmotMissingProposalException
 import com.vitorpamplona.marmot.OutboundGroupEvent
 import com.vitorpamplona.quartz.marmot.mip03GroupMessages.GroupEvent
 import com.vitorpamplona.quartz.nip01Core.core.Event
@@ -35,6 +36,9 @@ import kotlinx.coroutines.sync.withLock
  *
  *  - an event whose outer layer does not open ([MarmotIngestResult.UndecryptableOuter]) is held,
  *    per group, and given another go each time a commit advances that group;
+ *  - a commit naming a proposal not received yet (a [MarmotIngestResult.Failure] caused by
+ *    [MarmotMissingProposalException]) is held the same way, and given another go each time the
+ *    group stages a proposal or advances;
  *  - a member's `SelfRemove` ([MarmotIngestResult.ProposalStaged]) only takes effect once an admin
  *    commits it, so the groups that staged one are remembered until [commitStagedProposals].
  *
@@ -77,6 +81,13 @@ class MarmotReceiver(
 
             is MarmotIngestResult.ProposalStaged -> {
                 lock.withLock { staged.add(result.groupId) }
+                // A commit held for this proposal can apply now.
+                replay(result.groupId)
+            }
+
+            is MarmotIngestResult.Failure -> {
+                val missing = result.cause as? MarmotMissingProposalException
+                if (missing != null && event is GroupEvent) hold(missing.groupId, event)
             }
 
             is MarmotIngestResult.Commit -> {

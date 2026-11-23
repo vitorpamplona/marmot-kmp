@@ -175,11 +175,14 @@ class MarmotSyncPolicy(
         // (UndecryptableOuter) if it is tried before that commit. The
         // cursor then moves past it and it is never fetched again, which is how an offline
         // member came back missing a rename and every message after a membership change.
-        // Welcomes first (they create the groups), then group events oldest first.
+        // Welcomes first (they create the groups), then group events oldest first, and the
+        // event id last, so a same-second tie comes out in one order on every device and every
+        // run rather than in whichever order the relays answered. A tie that still puts a
+        // commit ahead of a proposal it names is held by the receiver until the proposal lands.
         val events =
             drain(filterMap, timeoutMs)
                 .distinctBy { it.second.id }
-                .sortedWith(compareBy({ if (it.second.kind == GiftWrapEvent.KIND) 0 else 1 }, { it.second.createdAt }))
+                .sortedWith(compareBy({ if (it.second.kind == GiftWrapEvent.KIND) 0 else 1 }, { it.second.createdAt }, { it.second.id }))
 
         var maxGwSeen = gwSince ?: 0L
         val maxGroupSeen = perGroupFilters.keys.associateWith { cursors.groupSince(it) ?: 0L }.toMutableMap()
