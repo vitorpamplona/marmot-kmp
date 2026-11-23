@@ -23,6 +23,10 @@ package com.vitorpamplona.marmot.foundation.appEvents
 import androidx.compose.runtime.Immutable
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.core.HexKey
+import com.vitorpamplona.quartz.nip01Core.signers.EventTemplate
+import com.vitorpamplona.quartz.nip01Core.tags.people.PTag
+import com.vitorpamplona.quartz.nip59Giftwrap.rumors.RumorAssembler
+import com.vitorpamplona.quartz.utils.TimeUtils
 
 /**
  * Encrypted NIP-88 polls inside a Marmot group, in the bounded profile MDK
@@ -163,6 +167,50 @@ object MarmotPolls {
         tags.add(arrayOf(TAG_EVENT, pollEventId))
         optionIds.forEach { tags.add(arrayOf(TAG_RESPONSE, it)) }
         return tags.toTypedArray()
+    }
+
+    /**
+     * A poll by [author], as the unsigned rumor a member sends inside the group, or null when the
+     * input breaks the profile ([pollTags]), with the reason in [onError]. [mentions] are the
+     * accounts the question and options mention, `p`-tagged as a message tags them: MDK ignores
+     * tags a poll does not define within [MAX_TAGS] in all, so a mention past that still reads as
+     * a link in the text and just notifies no one. A repeated key is tagged once.
+     */
+    fun pollRumor(
+        author: HexKey,
+        question: String,
+        options: List<String>,
+        type: PollType,
+        endsAt: Long?,
+        mentions: List<PTag> = emptyList(),
+        createdAt: Long = TimeUtils.now(),
+        onError: (BuildError) -> Unit = {},
+    ): Event? {
+        val tags = pollTags(createdAt, question, options, type, endsAt, onError) ?: return null
+        val room = (MAX_TAGS - tags.size).coerceAtLeast(0)
+        val pTags = mentions.distinctBy { it.pubKey }.take(room).map { it.toTagArray() }
+        return RumorAssembler.assembleRumor(author, EventTemplate<Event>(createdAt, KIND_POLL, tags + pTags, question))
+    }
+
+    /**
+     * A vote by [author] on [poll] choosing [optionIds], as an unsigned rumor, or null when the poll
+     * is closed or invalid, or the selection does not fit it. A vote is the voter's complete
+     * selection, replacing any earlier one. The options go out in the poll's own order, so the same
+     * choice is always the same tags; an id the poll does not define makes the selection invalid.
+     */
+    fun voteRumor(
+        author: HexKey,
+        poll: Event,
+        optionIds: Collection<String>,
+        createdAt: Long = TimeUtils.now(),
+    ): Event? {
+        val definition = parsePoll(poll) ?: return null
+        val known = definition.options.map { it.id }
+        if (optionIds.any { it !in known }) return null
+        val ordered = known.filter { it in optionIds }
+        if (!isValidResponse(definition, createdAt, ordered)) return null
+        val tags = responseTags(poll.id, ordered) ?: return null
+        return RumorAssembler.assembleRumor(author, EventTemplate<Event>(createdAt, KIND_POLL_RESPONSE, tags, ""))
     }
 
     // ---- parsing -----------------------------------------------------------
