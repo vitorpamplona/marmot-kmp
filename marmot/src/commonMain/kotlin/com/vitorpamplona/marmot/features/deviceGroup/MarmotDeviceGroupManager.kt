@@ -1632,6 +1632,8 @@ class MarmotDeviceGroupManager internal constructor(
     class ImportedHistory(
         val nostrGroupId: HexKey,
         val events: List<Event>,
+        /** Each event's id to the MLS epoch its bundle gave it. */
+        val epochs: Map<HexKey, Long> = emptyMap(),
     )
 
     private val imported = ArrayList<ImportedHistory>()
@@ -1787,7 +1789,7 @@ class MarmotDeviceGroupManager internal constructor(
         val fresh = bundle.events.filter { held.add(it.event.id) }
         if (fresh.isEmpty()) return
         fresh.forEach { m.persistDecryptedMessage(nostrGroupId, it.event.toJson(), it.epoch) }
-        imported.add(ImportedHistory(nostrGroupId, fresh.map { it.event }))
+        imported.add(ImportedHistory(nostrGroupId, fresh.map { it.event }, fresh.associate { it.event.id to it.epoch }))
         Log.d(TAG) { "imported ${fresh.size} event(s) of history into ${nostrGroupId.take(8)}" }
     }
 

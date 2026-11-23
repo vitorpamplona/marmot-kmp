@@ -44,6 +44,7 @@ import com.vitorpamplona.quartz.nip01Core.crypto.KeyPair
 import com.vitorpamplona.quartz.nip01Core.signers.NostrSignerInternal
 import com.vitorpamplona.quartz.nip01Core.signers.eventTemplate
 import com.vitorpamplona.quartz.nip59Giftwrap.rumors.RumorAssembler
+import com.vitorpamplona.quartz.nipC7Chats.ChatEvent
 import com.vitorpamplona.quartz.utils.TimeUtils
 import kotlinx.coroutines.runBlocking
 import kotlin.io.encoding.Base64
@@ -254,6 +255,8 @@ class DeviceGroupHistoryTest {
             val imported = b.groups.drainImportedHistory().single()
             assertEquals(chat, imported.nostrGroupId)
             assertEquals(2, imported.events.size)
+            assertTrue(imported.events.all { it is ChatEvent || it.kind != 9 }, "imported events are typed")
+            assertEquals(imported.events.map { it.id }.toSet(), imported.epochs.keys)
 
             // Live traffic still reads after the import, and a second import adds nothing.
             val later = c.manager.buildTextMessage(chat, "after the link")

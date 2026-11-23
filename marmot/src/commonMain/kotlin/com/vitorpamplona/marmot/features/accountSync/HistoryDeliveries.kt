@@ -35,6 +35,7 @@ import com.vitorpamplona.quartz.nip01Core.core.HexKey
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
 import com.vitorpamplona.quartz.nip01Core.core.toHexKey
 import com.vitorpamplona.quartz.nip01Core.crypto.verifyId
+import com.vitorpamplona.quartz.utils.EventFactory
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -293,7 +294,8 @@ object HistoryBundles {
             (obj["tags"] as? JsonArray)?.map { tag ->
                 (tag as? JsonArray)?.map { (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content ?: return null }?.toTypedArray() ?: return null
             } ?: return null
-        return Event(id, pubKey, createdAt, kind, tags.toTypedArray(), content, "")
+        // Typed, as a live delivery's inner event is: an app that indexes it sees a chat message, not a bare Event.
+        return EventFactory.create<Event>(id, pubKey, createdAt, kind, tags.toTypedArray(), content, "")
     }
 
     /** Whether any object in [text] repeats a member name (the parser would keep only one). */
