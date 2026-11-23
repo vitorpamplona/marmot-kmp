@@ -20,6 +20,8 @@
  */
 package com.vitorpamplona.marmot.groups
 
+import com.vitorpamplona.quartz.nip01Core.core.Event
+
 /**
  * Encrypted local storage for decrypted Marmot inner event JSONs.
  *
@@ -61,6 +63,19 @@ interface MarmotMessageStore {
      * @return list of inner event JSON strings, empty if none
      */
     suspend fun loadMessages(nostrGroupId: String): List<String>
+
+    /**
+     * The largest inner `created_at` among the group's stored messages, or
+     * null when it holds none.
+     *
+     * Read once per group on every start, to resume the group's kind:445
+     * subscription where it left off. The default reads and parses the whole
+     * log, every message of every group on each launch; a store should keep
+     * the maximum as it appends and answer from that. It may keep answering a
+     * message's time after [removeMessages] took it out: the answer only
+     * places a subscription cursor.
+     */
+    suspend fun newestMessageCreatedAt(nostrGroupId: String): Long? = loadMessages(nostrGroupId).maxOfOrNull { json -> Event.fromJsonOrNull(json)?.createdAt ?: 0L }
 
     /**
      * Delete all persisted messages for a group (after leaving).

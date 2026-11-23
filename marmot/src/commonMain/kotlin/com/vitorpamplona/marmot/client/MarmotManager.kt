@@ -472,11 +472,14 @@ class MarmotManager(
      * Computes a per-group kind:445 subscription `since` from the newest
      * persisted decrypted message of each group.
      *
-     * Subscription state does not survive a restart, and neither does the
-     * application ratchet position (group state is persisted only at
-     * commits). Without a `since`, every restart re-downloads the group's
-     * full kind:445 backlog, and the rewound ratchet re-decrypts old
-     * application messages as if they had just arrived.
+     * Subscription state does not survive a restart, and the receive ratchets
+     * are written only every few messages
+     * ([MlsGroupManager.flushReceivedState]). Without a `since`, every restart
+     * re-downloads the group's full kind:445 backlog, and a rewound ratchet
+     * re-decrypts recent application messages as if they had just arrived.
+     *
+     * The newest time comes from [MarmotMessageStore.newestMessageCreatedAt],
+     * which a store answers without reading its whole log.
      *
      * [GROUP_EVENT_REFETCH_OVERLAP_SEC] of overlap is kept so late or
      * out-of-order events published shortly before the newest stored message
@@ -488,13 +491,12 @@ class MarmotManager(
         val result = mutableMapOf<HexKey, Long>()
         for (groupId in groupIds) {
             val newestStored =
-                loadStoredMessages(groupId).maxOfOrNull { json ->
-                    try {
-                        Event.fromJson(json).createdAt
-                    } catch (e: Exception) {
-                        Log.w("MarmotManager", "Unparseable persisted message for $groupId: ${e.message}", e)
-                        0L
-                    }
+                try {
+                    messageStore.newestMessageCreatedAt(groupId)
+                } catch (e: Exception) {
+                    currentCoroutineContext().ensureActive()
+                    Log.w("MarmotManager", "Failed to read the newest persisted message of $groupId", e)
+                    null
                 } ?: continue
             // Clamp at wall-clock now: inner createdAt is sender-controlled,
             // and a single future-dated message must not push `since` past

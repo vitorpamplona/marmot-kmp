@@ -34,6 +34,7 @@ import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
+import kotlin.test.assertTrue
 
 /** The library audit's confirming cases for the inbound pipeline around [MarmotManager]. */
 class MarmotAuditFixesTest {
@@ -108,17 +109,59 @@ class MarmotAuditFixesTest {
             }
         }
 
-    /** Counts reads of the expiry table. */
+    /** Counts whole-log reads, to show a restart no longer makes one per group. */
     private class CountingMessageStore(
         private val inner: SnapshotMessageStore = SnapshotMessageStore(),
     ) : MarmotMessageStore by inner {
+        var logReads = 0
         var expiryReads = 0
+        private val newest = mutableMapOf<String, Long>()
 
         override suspend fun loadExpiries(nostrGroupId: String): Map<String, Long> {
             expiryReads++
             return inner.loadExpiries(nostrGroupId)
         }
+
+        override suspend fun appendMessage(
+            nostrGroupId: String,
+            innerEventJson: String,
+        ) {
+            inner.appendMessage(nostrGroupId, innerEventJson)
+            Event.fromJsonOrNull(innerEventJson)?.let { newest[nostrGroupId] = maxOf(newest[nostrGroupId] ?: 0L, it.createdAt) }
+        }
+
+        override suspend fun loadMessages(nostrGroupId: String): List<String> {
+            logReads++
+            return inner.loadMessages(nostrGroupId)
+        }
+
+        override suspend fun newestMessageCreatedAt(nostrGroupId: String): Long? = newest[nostrGroupId]
     }
+
+    @Test
+    fun `a restart takes each group's newest message time from the store without reading its log`() =
+        runBlocking<Unit> {
+            val alice = Member()
+            val bobMessages = CountingMessageStore()
+            val bob = Member(bobMessages)
+            alice.createGroup()
+            val (_, bobWelcome) = alice.manager.addMember(nostrGroupId, bob.keyPackage(), emptyList())
+            bob.manager.ingest(bobWelcome!!.giftWrapEvent)
+            assertIs<MarmotIngestResult.Message>(
+                bob.manager.ingest(
+                    alice.manager
+                        .buildTextMessage(nostrGroupId, "hello")
+                        .outbound.signedEvent,
+                ),
+            )
+            bob.manager.groupManager.flushReceivedState()
+
+            val restarted = MarmotManager(bob.signer, bob.stateStore, bobMessages, SnapshotBundleStore(), publisher = ACCEPTING_RELAY)
+            bobMessages.logReads = 0
+            restarted.restoreAll()
+            assertEquals(0, bobMessages.logReads)
+            assertTrue(restarted.subscriptionManager.activeGroupFilters().any { it.since != null }, "the group's subscription resumes from its newest message")
+        }
 
     @Test
     fun `a batch of messages reads the group's expiry table once, not once per message`() =
