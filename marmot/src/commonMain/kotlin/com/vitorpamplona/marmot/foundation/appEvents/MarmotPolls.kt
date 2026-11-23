@@ -108,6 +108,71 @@ object MarmotPolls {
         return selections.toSet()
     }
 
+    /** MDK looks at no more than a voter's newest this many responses to one poll. */
+    const val MAX_RESPONSES_PER_VOTER = 64
+
+    /** One voter's counted vote: the response that cast it and the options it chose. */
+    @Immutable
+    data class Vote(
+        val voter: HexKey,
+        val optionIds: Set<String>,
+        val votedAt: Long,
+        val responseId: HexKey,
+    )
+
+    /** The counted vote of every voter of one poll. */
+    @Immutable
+    data class Tally(
+        val votes: Map<HexKey, Vote>,
+    ) {
+        /** Distinct voters whose vote counts: the denominator of every share. */
+        val voters: Int get() = votes.size
+
+        /** Option id to how many voters chose it; options nobody chose are absent. */
+        fun counts(): Map<String, Int> {
+            val counts = HashMap<String, Int>()
+            votes.values.forEach { vote -> vote.optionIds.forEach { counts[it] = (counts[it] ?: 0) + 1 } }
+            return counts
+        }
+
+        /** The options [voter]'s counted vote chose, empty when they have none. */
+        fun selectionOf(voter: HexKey): Set<String> = votes[voter]?.optionIds ?: emptySet()
+    }
+
+    /**
+     * The effective votes on the poll [pollId] defines as [poll], from every response the group
+     * holds, as MDK's timeline counts them (`effective_poll_votes`): each voter's newest response
+     * that [castVote] accepts counts, newest by `created_at` and then by the larger id, and a later
+     * response that is no vote leaves it standing. Only a voter's newest [MAX_RESPONSES_PER_VOTER]
+     * responses naming this poll are looked at, as MDK does. [responses] may hold anything; signed
+     * events and responses to other polls are passed over. The caller leaves out responses that
+     * were deleted (by their voter, or by an admin's removal), as MDK does.
+     */
+    fun tally(
+        pollId: HexKey,
+        poll: Definition,
+        responses: Iterable<Event>,
+    ): Tally {
+        val byVoter = HashMap<HexKey, ArrayList<Event>>()
+        for (response in responses) {
+            if (response.kind != KIND_POLL_RESPONSE || response.sig.isNotEmpty()) continue
+            if (response.tags.none { it.size > 1 && it[0] == TAG_EVENT && it[1] == pollId }) continue
+            byVoter.getOrPut(response.pubKey) { ArrayList() }.add(response)
+        }
+        val votes = HashMap<HexKey, Vote>()
+        for ((voter, list) in byVoter) {
+            val newest = list.distinctBy { it.id }.sortedWith(NEWEST_FIRST).take(MAX_RESPONSES_PER_VOTER)
+            for (response in newest) {
+                val options = castVote(pollId, poll, response) ?: continue
+                votes[voter] = Vote(voter, options, response.createdAt, response.id)
+                break
+            }
+        }
+        return Tally(votes)
+    }
+
+    private val NEWEST_FIRST: Comparator<Event> = compareByDescending<Event> { it.createdAt }.thenByDescending { it.id }
+
     // ---- building ----------------------------------------------------------
 
     sealed class BuildError {
