@@ -93,6 +93,7 @@ import com.vitorpamplona.quartz.nip01Core.relay.normalizer.NormalizedRelayUrl
 import com.vitorpamplona.quartz.nip01Core.relay.normalizer.RelayUrlNormalizer
 import com.vitorpamplona.quartz.nip01Core.signers.NostrSigner
 import com.vitorpamplona.quartz.nip01Core.signers.eventTemplate
+import com.vitorpamplona.quartz.nip01Core.tags.events.taggedEventIds
 import com.vitorpamplona.quartz.nip01Core.tags.people.PTag
 import com.vitorpamplona.quartz.nip01Core.tags.people.pTags
 import com.vitorpamplona.quartz.nip09Deletions.DeletionRequestEvent
@@ -1971,9 +1972,10 @@ class MarmotManager(
         val authorOf = HashMap<HexKey, HexKey>(messages.size)
         val claims = ArrayList<Pair<HexKey, HexKey>>()
         for (event in messages) {
-            // Stored messages are parsed through EventFactory, so every kind:5 is typed here.
-            if (event is DeletionRequestEvent) {
-                for (targetId in event.deleteEventIds()) claims.add(targetId to event.pubKey)
+            // By kind, not by class: a caller may hold a rumor as a plain Event (decoded from a
+            // MarmotAppEvent, say) rather than one EventFactory typed, and its deletions count alike.
+            if (event.kind == DeletionRequestEvent.KIND) {
+                for (targetId in event.taggedEventIds()) claims.add(targetId to event.pubKey)
             } else if (event.kind == MarmotAdminDeletion.KIND) {
                 // Admin deletions are authorized per source epoch: see the
                 // group-scoped deletedIds(nostrGroupId, messages).
