@@ -295,6 +295,46 @@ class DeviceGroupWorkTest {
             }
         }
 
+    /**
+     * The harness's test 53, one process per step: two devices rename at once from the same epoch,
+     * and each hears of the other's Commit only after a restart. The fork must still be resolved,
+     * and the rename that lost it made again, so both renames stand on both devices.
+     */
+    @Test
+    fun twoRenamesAtOnceAcrossRestartsBothStand() =
+        runBlocking<Unit> {
+            val keys = KeyPair()
+            var a = Device(keys)
+            var b = Device(keys)
+            link(a, b)
+            val aSlot = a.slot()
+            val bSlot = b.slot()
+            val renameB = a.groups.applyStaged(assertNotNull(a.groups.stageRename(bSlot, "Fork-A"))).event!!
+            val renameA = b.groups.applyStaged(assertNotNull(b.groups.stageRename(aSlot, "Fork-B"))).event!!
+
+            a = a.restarted()
+            b = b.restarted()
+            a.manager.ingest(renameA.signedEvent)
+            b.manager.ingest(renameB.signedEvent)
+            for (d in listOf(a, b)) {
+                d.manager.driveConvergenceToSettlement(pollMs = 1)
+                d.groups.refresh()
+            }
+            assertEquals(a.groups.roster(), b.groups.roster(), "both devices settle on one branch")
+
+            // The device whose rename lost makes it again, once, in its next run.
+            for ((loser, other) in listOf(a to b, b to a)) {
+                val again = loser.groups.stageEditRecovery() ?: continue
+                other.manager.ingest(assertNotNull(loser.groups.applyStaged(again).event).signedEvent)
+            }
+            for (d in listOf(a, b)) {
+                d.groups.refresh()
+                val roster = assertNotNull(d.groups.roster())
+                assertEquals("Fork-A", roster.device(bSlot)?.label)
+                assertEquals("Fork-B", roster.device(aSlot)?.label)
+            }
+        }
+
     // ---- 5: owed histories and kept deliveries survive a restart ---------------------------------
 
     @Test
@@ -549,6 +589,79 @@ class DeviceGroupWorkTest {
                     ?.devices
                     ?.map { it.slot }
                     ?.toSet(),
+            )
+        }
+
+    /**
+     * The desktop's move in the live test: the old sibling (amy, one process per command) committed
+     * twice while the moving device was busy joining, so the `moved` Commit lands on a parent the
+     * old group already left. The longer branch wins on both sides, and the mover makes `moved`
+     * again on it instead of discarding a copy whose `moved` nobody else holds.
+     */
+    @Test
+    fun aMovedCommitThatLosesAForkIsMadeAgain() =
+        runBlocking<Unit> {
+            val keys = KeyPair()
+            var a = Device(keys)
+            val b = Device(keys)
+            val c = Device(keys)
+            val d = Device(keys)
+            val first = link(a, b)
+            val second = link(c, d)
+
+            val linked = pair(c, b)
+            val applied = c.groups.applyStaged(c.groups.approve(linked.link, Base64.decode(linked.keyPackage.content), b.slot(), "B moved", now))
+            d.manager.ingest(assertNotNull(applied.event).signedEvent)
+            b.manager.ingest(assertNotNull(applied.welcome).giftWrapEvent)
+            val firstCommit = assertNotNull(b.groups.applyStaged(b.groups.stageFirstCommit()).event)
+            c.manager.ingest(firstCommit.signedEvent)
+            b.groups.refresh()
+            assertEquals(second, b.groups.deviceGroupNostrId())
+
+            // Meanwhile A, in the old group, commits twice; B has not seen either.
+            val a1 = assertNotNull(a.groups.applyStaged(assertNotNull(a.groups.stageRename(a.slot(), "A1"))).event)
+            val a2 = assertNotNull(a.groups.applyStaged(assertNotNull(a.groups.stageRename(a.slot(), "A2"))).event)
+            val moved = assertNotNull(b.groups.applyStaged(assertNotNull(b.groups.stageMoveFollowUp())).event)
+
+            // A hears of `moved` in a later run; B of A's two Commits after its own.
+            a = a.restarted()
+            a.manager.ingest(moved.signedEvent)
+            b.manager.ingest(a1.signedEvent)
+            b.manager.ingest(a2.signedEvent)
+            for (dev in listOf(a, b)) dev.manager.driveConvergenceToSettlement(pollMs = 1)
+            a.groups.refresh()
+            b.groups.refresh()
+            assertEquals(
+                DeviceStatusV1.ACTIVE,
+                a.groups
+                    .roster()
+                    ?.device(b.slot())
+                    ?.status,
+                "the longer branch, without `moved`, wins",
+            )
+
+            // B is still in the old group, on A's branch, and says `moved` again there.
+            val again = assertNotNull(b.groups.stageMoveFollowUp(), "a `moved` that lost its fork is made again")
+            assertEquals(first, again.nostrGroupId)
+            a.manager.ingest(assertNotNull(b.groups.applyStaged(again).event).signedEvent)
+            assertEquals(
+                DeviceStatusV1.MOVED,
+                a.groups
+                    .roster()
+                    ?.device(b.slot())
+                    ?.status,
+            )
+            val cleanup = assertNotNull(a.groups.applyStaged(assertNotNull(a.groups.stageMovedCleanup())).event)
+            b.manager.ingest(cleanup.signedEvent)
+            assertNull(b.groups.stageMoveFollowUp())
+            assertNull(b.manager.groupManager.getGroup(first), "the old copy goes once the old group lets it go")
+            assertNull(a.groups.roster()?.device(b.slot()))
+            assertEquals(
+                "A2",
+                a.groups
+                    .roster()
+                    ?.device(a.slot())
+                    ?.label,
             )
         }
 

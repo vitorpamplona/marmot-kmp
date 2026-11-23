@@ -957,11 +957,14 @@ class MarmotInboundProcessor(
                             }
                         }
 
+                        // Ahead of us, it may still extend a competing branch
+                        // convergence holds: try that before refusing it.
                         currentEpoch != null && pubMsg.epoch > currentEpoch -> {
-                            GroupEventResult.Error(
-                                groupId,
-                                "Commit epoch ${pubMsg.epoch} is ahead of local epoch $currentEpoch; ignoring",
-                            )
+                            offerToCandidateBranch(groupId, mlsBytes, pubMsg.epoch)
+                                ?: GroupEventResult.Error(
+                                    groupId,
+                                    "Commit epoch ${pubMsg.epoch} is ahead of local epoch $currentEpoch; ignoring",
+                                )
                         }
 
                         else -> {
@@ -973,10 +976,13 @@ class MarmotInboundProcessor(
                             // bytes and advance the group past them.
                             val group = groupManager.getGroup(groupId)
                             if (group != null && !group.verifyPublicMessageCommitMembershipTag(pubMsg)) {
-                                GroupEventResult.Error(
-                                    groupId,
-                                    "Invalid membership_tag on PublicMessage commit",
-                                )
+                                // Our epoch number, another branch: the next
+                                // Commit of a fork convergence is resolving.
+                                offerToCandidateBranch(groupId, mlsBytes, pubMsg.epoch)
+                                    ?: GroupEventResult.Error(
+                                        groupId,
+                                        "Invalid membership_tag on PublicMessage commit",
+                                    )
                             } else {
                                 // Captured BEFORE the epoch advance: this is
                                 // the parent a competing commit authenticates
@@ -1009,6 +1015,22 @@ class MarmotInboundProcessor(
             } else {
                 GroupEventResult.Error(groupId, "Failed to apply commit: ${e.message}", e)
             }
+        }
+
+    /**
+     * A Commit that does not extend the canonical tip but may extend a competing
+     * branch convergence holds (its parent is a state another divergent Commit
+     * produced). Null when convergence has no such parent for it.
+     */
+    private suspend fun offerToCandidateBranch(
+        groupId: HexKey,
+        mlsBytes: ByteArray,
+        sourceEpoch: Long,
+    ): GroupEventResult? =
+        when (convergence.offerDivergent(groupId, mlsBytes, sourceEpoch)) {
+            ConvergenceAdmission.ADMITTED -> GroupEventResult.CommitPending(groupId, sourceEpoch, forkDetected = true)
+            ConvergenceAdmission.DUPLICATE -> GroupEventResult.Duplicate(groupId)
+            ConvergenceAdmission.NOT_A_CANDIDATE -> null
         }
 
     /**

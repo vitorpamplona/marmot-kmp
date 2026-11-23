@@ -296,6 +296,23 @@ class MlsGroupManager(
     fun snapshot(nostrGroupId: HexKey): MlsGroupState? = groups[nostrGroupId]?.saveState()
 
     /**
+     * Persist convergence's retained window for [nostrGroupId]
+     * ([MlsGroupStateStore.saveConvergenceWindow]). Skipped for a group this manager no longer
+     * holds, so a window written while the group is being removed cannot outlive its state.
+     */
+    suspend fun saveConvergenceWindow(
+        nostrGroupId: HexKey,
+        window: ByteArray,
+    ): Boolean =
+        mutex.withLock {
+            if (nostrGroupId !in groups) return@withLock false
+            store.saveConvergenceWindow(nostrGroupId, window)
+        }
+
+    /** The convergence window [saveConvergenceWindow] last wrote for [nostrGroupId], or null. */
+    suspend fun loadConvergenceWindow(nostrGroupId: HexKey): ByteArray? = store.loadConvergenceWindow(nostrGroupId)
+
+    /**
      * Replace a group's state wholesale — the convergence rewind primitive.
      *
      * Used when branch selection picks a candidate branch over what was
@@ -329,6 +346,28 @@ class MlsGroupManager(
         if (outgoing != null) pushRetainedEpoch(nostrGroupId, outgoing)
         persistGroup(nostrGroupId)
     }
+
+    /**
+     * [installState], but only while the live group is still at [expected]: a Commit staged from
+     * [expected] whose publish was in flight while peer Commits were applied must not rewind the
+     * group off them. False, and nothing changed, when the group moved on.
+     */
+    suspend fun installStateIfAt(
+        nostrGroupId: HexKey,
+        expected: MlsGroupState,
+        state: MlsGroupState,
+    ): Boolean =
+        mutex.withLock {
+            val current = groups[nostrGroupId] ?: return@withLock false
+            val live = current.saveState().groupContext.toTlsBytes()
+            if (live.contentEquals(state.groupContext.toTlsBytes())) return@withLock true
+            if (!live.contentEquals(expected.groupContext.toTlsBytes())) return@withLock false
+            val outgoing = current.retainedSecrets()
+            groups[nostrGroupId] = MlsGroup.restore(state, MarmotGroupPolicy)
+            pushRetainedEpoch(nostrGroupId, outgoing)
+            persistGroup(nostrGroupId)
+            true
+        }
 
     /**
      * Register and persist a group built elsewhere, e.g. by

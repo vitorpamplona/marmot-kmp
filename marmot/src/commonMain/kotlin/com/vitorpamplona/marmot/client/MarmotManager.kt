@@ -78,6 +78,7 @@ import com.vitorpamplona.marmot.protocolCore.MarmotPublishObligationStore
 import com.vitorpamplona.marmot.protocolCore.PublishOutcome
 import com.vitorpamplona.mls.components.ComponentsList
 import com.vitorpamplona.mls.group.MlsGroup
+import com.vitorpamplona.mls.group.MlsGroupState
 import com.vitorpamplona.mls.messages.CommitResult
 import com.vitorpamplona.mls.messages.KeyPackageBundle
 import com.vitorpamplona.mls.messages.MlsKeyPackage
@@ -396,6 +397,11 @@ class MarmotManager(
         event: Event,
     ): GroupLifecycleState {
         val state = publishGate.resolve(obligation.obligationId, PublishOutcome.CONFIRMED)
+        // The group moved on before the confirmation (see [commitAndPublish]): ours competes.
+        if (!isCurrentState(obligation.groupId, obligation.pendingState)) {
+            if (event is GroupEvent && inboundProcessor.processGroupEvent(event) is GroupEventResult.CommitPending) startConvergenceSettler()
+            return state
+        }
         val framedCommit = framedCommitOf(obligation, event)
         if (framedCommit != null) {
             inboundProcessor.markMessageProcessed(sha256(framedCommit).toHexKey())
@@ -1555,6 +1561,17 @@ class MarmotManager(
             if (confirmed) PublishOutcome.CONFIRMED else PublishOutcome.UNKNOWN,
         )
 
+        // Confirmed, but the group moved on while it was in flight (a peer's
+        // Commits applied from live ingest): ours did not become canonical and
+        // is a competitor of theirs. Offered to convergence as any peer's
+        // would be, it is selected or not on the same rule, instead of
+        // rewinding the group off the branch the others are on.
+        if (confirmed && !isCurrentState(nostrGroupId, staged.pendingState)) {
+            Log.d("MarmotManager") { "commitAndPublish($nostrGroupId): the group moved on during the publish; our commit goes to convergence" }
+            if (inboundProcessor.processGroupEvent(event.signedEvent) is GroupEventResult.CommitPending) startConvergenceSettler()
+            return CommitPublication(event, staged.result, obligation.obligationId, confirmed)
+        }
+
         if (confirmed) {
             // The published kind:445 echoes back from the relay — without this
             // dedup our own inbound pipeline would try to re-apply a commit
@@ -1585,6 +1602,16 @@ class MarmotManager(
 
         return CommitPublication(event, staged.result, obligation.obligationId, confirmed)
     }
+
+    private fun isCurrentState(
+        nostrGroupId: HexKey,
+        state: MlsGroupState,
+    ): Boolean =
+        groupManager
+            .snapshot(nostrGroupId)
+            ?.groupContext
+            ?.toTlsBytes()
+            ?.contentEquals(state.groupContext.toTlsBytes()) == true
 
     /**
      * Carry open convergence passes to their cutoff and resolve them.

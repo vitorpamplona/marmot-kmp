@@ -133,6 +133,13 @@ class MarmotReceiver(
     }
 
     /**
+     * Give everything held for [nostrGroupId] another go, for a change that [receive] cannot see:
+     * convergence rewinding the group onto another branch, whose epochs open what the abandoned
+     * one could not.
+     */
+    suspend fun retryHeld(nostrGroupId: HexKey) = replay(nostrGroupId)
+
+    /**
      * Give everything held for [groupId] another go. A replayed commit replays in turn; that
      * terminates, because each pass takes the queue it replays and an epoch only moves forward.
      */

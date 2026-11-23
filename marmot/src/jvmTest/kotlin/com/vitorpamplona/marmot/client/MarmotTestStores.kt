@@ -39,6 +39,7 @@ class SnapshotStateStore : MlsGroupStateStore {
     private val states = mutableMapOf<String, ByteArray>()
     private val retained = mutableMapOf<String, List<ByteArray>>()
     private val ratchets = mutableMapOf<String, ByteArray>()
+    private val windows = mutableMapOf<String, ByteArray>()
 
     override suspend fun save(
         nostrGroupId: String,
@@ -53,6 +54,7 @@ class SnapshotStateStore : MlsGroupStateStore {
         states.remove(nostrGroupId)
         retained.remove(nostrGroupId)
         ratchets.remove(nostrGroupId)
+        windows.remove(nostrGroupId)
     }
 
     override suspend fun listGroups(): List<String> = states.keys.toList()
@@ -78,6 +80,16 @@ class SnapshotStateStore : MlsGroupStateStore {
     }
 
     override suspend fun loadSenderRatchet(nostrGroupId: String): ByteArray? = ratchets[nostrGroupId]
+
+    override suspend fun saveConvergenceWindow(
+        nostrGroupId: String,
+        window: ByteArray,
+    ): Boolean {
+        windows[nostrGroupId] = window
+        return true
+    }
+
+    override suspend fun loadConvergenceWindow(nostrGroupId: String): ByteArray? = windows[nostrGroupId]
 }
 
 class SnapshotMessageStore : MarmotMessageStore {

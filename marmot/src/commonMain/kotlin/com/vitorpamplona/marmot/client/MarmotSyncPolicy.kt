@@ -213,7 +213,20 @@ class MarmotSyncPolicy(
             }
         }
 
-        // The receive ratchets this batch moved, written once for the batch.
+        // A fork this batch found opened a convergence pass, and a pass lives in this process
+        // only: resolve it before the run ends, or a one-shot caller (amy) exits with the group
+        // split and its next run cannot tell the other branch from an echo. Nothing else waits on
+        // a quiet group's pass when the manager has no scope to carry it.
+        val forked = marmot.inboundProcessor.openConvergencePasses().keys
+        if (forked.isNotEmpty()) {
+            marmot.driveConvergenceToSettlement()
+            for (gid in forked) {
+                log("convergence settled for ${gid.take(8)}")
+                receiver.retryHeld(gid)
+            }
+        }
+
+        // The receive ratchets this batch moved (settlement's replays included), written once for the batch.
         marmot.groupManager.flushReceivedState()
 
         // A member's SelfRemove only takes effect once an admin commits it; one commit per
@@ -226,6 +239,8 @@ class MarmotSyncPolicy(
             cursors.giftWrapSince = maxGwSeen
         }
         for (gid in sawGroupEvent) {
+            // A rewound group may have read this batch on the branch it left: fetch it again.
+            if (gid in forked) continue
             val seen = maxGroupSeen[gid] ?: continue
             if (seen > 0) cursors.setGroupSince(gid, seen)
         }
