@@ -39,7 +39,12 @@ kotlin {
             jvmTarget.set(JvmTarget.JVM_21)
         }
 
-        withHostTest {}
+        // Host tests run the Android code against a stub android.jar: let calls like
+        // android.util.Log (Quartz's Log on Android) return defaults instead of throwing,
+        // as Amethyst's commons does.
+        withHostTest {
+            isReturnDefaultValues = true
+        }
     }
 
     // The same native targets as Quartz.
