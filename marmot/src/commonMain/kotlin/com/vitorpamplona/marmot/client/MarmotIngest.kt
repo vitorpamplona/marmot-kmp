@@ -29,7 +29,6 @@ import com.vitorpamplona.quartz.marmot.mip02Welcome.WelcomeEvent
 import com.vitorpamplona.quartz.marmot.mip03GroupMessages.GroupEvent
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.core.HexKey
-import com.vitorpamplona.quartz.nip01Core.crypto.verify
 import com.vitorpamplona.quartz.nip59Giftwrap.seals.SealEvent
 import com.vitorpamplona.quartz.nip59Giftwrap.wraps.GiftWrapEvent
 import kotlinx.coroutines.currentCoroutineContext
@@ -174,11 +173,13 @@ private suspend fun MarmotManager.ingestGiftWrapUncached(wrap: GiftWrapEvent): M
         // inviter. A wrap whose inner event is not a seal carries a Welcome
         // nobody signed for, so it is refused here rather than read as one
         // (Quartz's unwrapAndUnsealOrNull handed such an inner event back
-        // as-is). The seal's signature is checked, and the rumor must claim
-        // the seal's author (NIP-59's impersonation rule).
+        // as-is). The rumor must claim the seal's author (NIP-59's
+        // impersonation rule). The seal's signature is not checked here: its
+        // author is proven by its NIP-44 encryption (only that key and ours
+        // derive the conversation key), and the app verifies the seal itself
+        // when it stores it (Amethyst's LocalCache skips one it already holds).
         val seal = wrap.unwrapOrNull(signer) ?: return MarmotIngestResult.Ignored("gift wrap is not for us")
         if (seal !is SealEvent) return MarmotIngestResult.Ignored("gift wrap does not carry a seal")
-        if (!seal.verify()) return MarmotIngestResult.Ignored("gift wrap's seal is not signed by its author")
         val unsealed =
             try {
                 seal.unsealRumorThrowing(signer)
