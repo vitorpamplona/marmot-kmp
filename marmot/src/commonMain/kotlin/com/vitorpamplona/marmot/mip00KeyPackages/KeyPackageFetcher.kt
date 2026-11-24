@@ -160,18 +160,29 @@ object KeyPackageFetcher {
         compatible: (MlsKeyPackage) -> Boolean = { true },
     ): List<PublishedKeyPackage> {
         if (relays.isEmpty()) return emptyList()
-        val found =
-            drain<Event>(
-                client,
-                // Kind 30443 only: the selection never falls back to a legacy 443.
-                listOf(MarmotFilters.keyPackagesByAuthor(targetPubKey), MarmotFilters.keyPackageSlotDeletions(targetPubKey)),
-                targetPubKey,
-                relays,
-                idleTimeoutMs,
-                settleAfterFirstMs,
-            ) { it is KeyPackageEvent }
+        val found = drainForInvite(client, targetPubKey, relays, idleTimeoutMs, settleAfterFirstMs)
         return KeyPackageUtils.selectAllForInvite(found, targetPubKey, nowSeconds, compatible)
     }
+
+    /** The KeyPackages and slot deletions [fetchKeyPackagesForInvite] selects from, each copy reported to [onServed] with its relay. */
+    private suspend fun drainForInvite(
+        client: INostrClient,
+        targetPubKey: HexKey,
+        relays: Set<NormalizedRelayUrl>,
+        idleTimeoutMs: Long,
+        settleAfterFirstMs: Long,
+        onServed: (NormalizedRelayUrl, Event) -> Unit = { _, _ -> },
+    ): List<Event> =
+        drain<Event>(
+            client,
+            // Kind 30443 only: the selection never falls back to a legacy 443.
+            listOf(MarmotFilters.keyPackagesByAuthor(targetPubKey), MarmotFilters.keyPackageSlotDeletions(targetPubKey)),
+            targetPubKey,
+            relays,
+            idleTimeoutMs,
+            settleAfterFirstMs,
+            onServed,
+        ) { it is KeyPackageEvent }
 
     /**
      * What [fetchForInvite] found, and the relays it asked.
@@ -184,7 +195,18 @@ object KeyPackageFetcher {
     class InviteLookup(
         val keyPackages: List<PublishedKeyPackage>,
         val relays: Set<NormalizedRelayUrl>,
+        /** For each event the lookup received (by id), the relays of [relays] that served it. */
+        val servedBy: Map<HexKey, Set<NormalizedRelayUrl>>,
     ) {
+        /** The 3.2 constructor, from before a lookup recorded which relay served what. */
+        constructor(keyPackages: List<PublishedKeyPackage>, relays: Set<NormalizedRelayUrl>) : this(keyPackages, relays, emptyMap())
+
+        /**
+         * The relays that served [keyPackage]: where it was found, as opposed to [relays], every
+         * relay asked. Empty for a lookup built without that record.
+         */
+        fun foundOn(keyPackage: PublishedKeyPackage): Set<NormalizedRelayUrl> = servedBy[keyPackage.id].orEmpty()
+
         /** The 2.x constructor, from when a lookup found one KeyPackage. */
         @Deprecated("Use the constructor with keyPackages. Removed in 3.0.0.", ReplaceWith("InviteLookup(listOfNotNull(keyPackage), relays)"))
         constructor(keyPackage: PublishedKeyPackage?, relays: Set<NormalizedRelayUrl>) : this(listOfNotNull(keyPackage), relays)
@@ -215,8 +237,11 @@ object KeyPackageFetcher {
         compatible: (MlsKeyPackage) -> Boolean = { true },
     ): InviteLookup {
         val relays = fetchRelaysFor(targetOutbox, myOutbox, targetKeyPackageRelays)
-        val keyPackages = fetchKeyPackagesForInvite(client, targetPubKey, relays, idleTimeoutMs, settleAfterFirstMs, nowSeconds, compatible)
-        return InviteLookup(keyPackages, relays)
+        if (relays.isEmpty()) return InviteLookup(emptyList(), relays, emptyMap())
+        val servedBy = HashMap<HexKey, MutableSet<NormalizedRelayUrl>>()
+        val found = drainForInvite(client, targetPubKey, relays, idleTimeoutMs, settleAfterFirstMs) { relay, event -> servedBy.getOrPut(event.id) { LinkedHashSet() }.add(relay) }
+        val keyPackages = KeyPackageUtils.selectAllForInvite(found, targetPubKey, nowSeconds, compatible)
+        return InviteLookup(keyPackages, relays, servedBy)
     }
 
     /** The 2.x signature, kept so code compiled against it still links. */
@@ -250,6 +275,7 @@ object KeyPackageFetcher {
         relays: Set<NormalizedRelayUrl>,
         idleTimeoutMs: Long,
         settleAfterFirstMs: Long,
+        noinline onServed: (NormalizedRelayUrl, T) -> Unit = { _, _ -> },
         crossinline startsSettle: (T) -> Boolean,
     ): List<T> {
         // Collected from inside onEvent (single-threaded) rather than read from the
@@ -259,9 +285,10 @@ object KeyPackageFetcher {
         coroutineScope {
             val fetch =
                 launch {
-                    client.fetchAllWithHooks(filters = relays.associateWith { filters }, idleTimeoutMs = idleTimeoutMs) { _, event ->
+                    client.fetchAllWithHooks(filters = relays.associateWith { filters }, idleTimeoutMs = idleTimeoutMs) { relay, event ->
                         if (event is T && event.pubKey == author && event.verify()) {
                             found.add(event)
+                            onServed(relay, event)
                             if (startsSettle(event)) firstArrived.complete(Unit)
                         }
                         true

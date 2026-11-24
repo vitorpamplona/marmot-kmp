@@ -29,6 +29,7 @@ import com.vitorpamplona.quartz.marmot.mip02Welcome.WelcomeEvent
 import com.vitorpamplona.quartz.marmot.mip03GroupMessages.GroupEvent
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.core.HexKey
+import com.vitorpamplona.quartz.nip59Giftwrap.seals.SealEvent
 import com.vitorpamplona.quartz.nip59Giftwrap.wraps.GiftWrapEvent
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -167,12 +168,29 @@ private fun MarmotIngestResult.isTerminalForWelcome(): Boolean =
 
 private suspend fun MarmotManager.ingestGiftWrapUncached(wrap: GiftWrapEvent): MarmotIngestResult =
     try {
-        // NIP-59 wraps carry two encryption layers (kind:1059 → kind:13 → rumor).
-        // [unwrapAndUnsealOrNull] peels both so we land directly on the inner
-        // kind:444 Welcome rumor. Checking `isWelcomeEvent` on the seal itself
-        // (the old bug) always took the Ignored branch and silently dropped
-        // every inbound Welcome.
-        val rumor = wrap.unwrapAndUnsealOrNull(signer) ?: return MarmotIngestResult.Ignored("gift wrap is not for us")
+        // NIP-59 wraps carry two encryption layers (kind:1059 → kind:13 → rumor),
+        // and MIP-02 requires both: the Welcome rumor is sealed by the
+        // inviter. A wrap whose inner event is not a seal carries a Welcome
+        // nobody signed for, so it is refused here rather than read as one
+        // (Quartz's unwrapAndUnsealOrNull handed such an inner event back
+        // as-is). The rumor must claim the seal's author (NIP-59's
+        // impersonation rule). The seal's signature is not checked here: its
+        // author is proven by its NIP-44 encryption (only that key and ours
+        // derive the conversation key), and the app verifies the seal itself
+        // when it stores it (Amethyst's LocalCache skips one it already holds).
+        val seal = wrap.unwrapOrNull(signer) ?: return MarmotIngestResult.Ignored("gift wrap is not for us")
+        if (seal !is SealEvent) return MarmotIngestResult.Ignored("gift wrap does not carry a seal")
+        val unsealed =
+            try {
+                seal.unsealRumorThrowing(signer)
+            } catch (e: Exception) {
+                currentCoroutineContext().ensureActive()
+                return MarmotIngestResult.Ignored("gift wrap's seal does not open")
+            }
+        if (unsealed.pubKey != null && unsealed.pubKey != seal.pubKey) {
+            return MarmotIngestResult.Ignored("gift wrap's rumor claims another author than its seal")
+        }
+        val rumor = seal.unsealed(unsealed)
         if (!MarmotInboundProcessor.isWelcomeEvent(rumor) || rumor !is WelcomeEvent) {
             return MarmotIngestResult.Ignored("gift wrap does not carry a Welcome")
         }
@@ -225,6 +243,9 @@ private suspend fun MarmotManager.joinFromOrdinaryWelcome(welcome: WelcomeEvent)
     }
 
 private suspend fun MarmotManager.ingestGroupEvent(ge: GroupEvent): MarmotIngestResult {
+    // An application message this device sent: its echo can never decrypt here (see buildGroupMessage).
+    // (Before 3.4 own echoes were kept with the terminal ingest markers; those still count.)
+    if (isOwnEcho(ge.id) || isTerminallyIngested(ge.id)) return MarmotIngestResult.Ignored("own message")
     val result = ingestGroupEventUnrefreshed(ge)
     // A device-group Commit, applied directly or by a convergence pass, may change the roster.
     deviceGroups?.refresh()
@@ -245,19 +266,19 @@ private suspend fun MarmotManager.ingestGroupEventUnrefreshed(ge: GroupEvent): M
                 // never stored or surfaced as a message (`device-group.md` "Keeping it out of sight").
                 deviceGroups.onAppEvent(result.groupId, result.innerEventJson, result.senderLeafIndex, result.epoch)
                 MarmotIngestResult.Ignored("device-group traffic")
-            } else if (isRetiredStreamStart(result.innerEventJson)) {
+            } else if (isRetiredStreamStart(result.innerEvent)) {
                 MarmotIngestResult.Ignored("retired agent text stream start")
-            } else if (isDeviceGroupTraffic(result.innerEventJson)) {
+            } else if (isDeviceGroupTraffic(result.innerEvent)) {
                 // `features/device-group.md`: these kinds are read only in the device group the device
                 // trusts and ignored in every other group, so no chat projects one.
                 MarmotIngestResult.Ignored("device-group kind outside a trusted device group")
             } else {
                 // MLS ratchets once we decrypt; future reads of the same ciphertext
                 // would fail — persist the plaintext now so restarts/replays see it.
-                persistDecryptedMessage(result.groupId, result.innerEventJson, result.epoch)
+                persistDecryptedMessage(result.groupId, result.innerEventJson, result.innerEvent, result.epoch)
                 // Traffic is the natural clock for expiry: a group that is being
                 // read is a group whose expired messages should already be gone.
-                pruneExpiredMessages(result.groupId)
+                pruneExpiredMessagesIfDue(result.groupId)
                 MarmotIngestResult.Message(result)
             }
         }
@@ -305,7 +326,7 @@ private suspend fun MarmotManager.ingestGroupEventUnrefreshed(ge: GroupEvent): M
         }
     }
 
-private fun isRetiredStreamStart(innerEventJson: String): Boolean = Event.fromJsonOrNull(innerEventJson)?.kind?.let(AgentTextStreamRetirement::isStreamStart) == true
+private fun isRetiredStreamStart(inner: Event?): Boolean = inner?.kind?.let(AgentTextStreamRetirement::isStreamStart) == true
 
 /** Whether a decrypted inner event is a device-group app event (`MarmotDeviceGroupKinds`). */
-private fun isDeviceGroupTraffic(innerEventJson: String): Boolean = Event.fromJsonOrNull(innerEventJson)?.let { MarmotDeviceGroupKinds.isDeviceGroupKind(it.kind) } ?: false
+private fun isDeviceGroupTraffic(inner: Event?): Boolean = inner?.let { MarmotDeviceGroupKinds.isDeviceGroupKind(it.kind) } ?: false

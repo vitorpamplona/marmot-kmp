@@ -84,4 +84,39 @@ class MarmotMessageReferencesTest {
         assertNull(MarmotMessageReferences.customEmojiUrl(event(7, ":party:", arrayOf("e", target), arrayOf("emoji", "cake", "https://x/c.png"))))
         assertNull(MarmotMessageReferences.customEmojiUrl(event(7, "+", arrayOf("e", target))))
     }
+
+    @Test
+    fun aMentionInInlineCodeDoesNotCount() {
+        val npub = NPub.create(bob)
+        assertEquals(emptySet(), MarmotMessageReferences.mentions(event(9, "try `nostr:$npub` here")))
+        assertEquals(emptySet(), MarmotMessageReferences.mentions(event(9, "``a ` nostr:$npub``")))
+        assertEquals(setOf(bob), MarmotMessageReferences.mentions(event(9, "`code` then nostr:$npub")))
+    }
+
+    @Test
+    fun anUnclosedBacktickIsLiteral() {
+        assertEquals(setOf(bob), MarmotMessageReferences.mentions(event(9, "a ` nostr:${NPub.create(bob)}")))
+        // A code span ends with its paragraph.
+        assertEquals(setOf(bob), MarmotMessageReferences.mentions(event(9, "a `\n\nnostr:${NPub.create(bob)} `")))
+        // An escaped backtick opens nothing.
+        assertEquals(setOf(bob), MarmotMessageReferences.mentions(event(9, "\\` nostr:${NPub.create(bob)} `")))
+    }
+
+    @Test
+    fun aMentionInAFencedBlockDoesNotCount() {
+        val npub = NPub.create(bob)
+        val other = NPub.create(alice)
+        assertEquals(emptySet(), MarmotMessageReferences.mentions(event(9, "look:\n```kotlin\nval x = \"nostr:$npub\"\n```")))
+        assertEquals(emptySet(), MarmotMessageReferences.mentions(event(9, "~~~~\n@$npub\n~~~\nstill code\n~~~~")))
+        assertEquals(setOf(alice), MarmotMessageReferences.mentions(event(9, "```\nnostr:$npub\n```\nhi nostr:$other")))
+        // An unclosed fence runs to the end of the message.
+        assertEquals(emptySet(), MarmotMessageReferences.mentions(event(9, "```\nnostr:$npub")))
+        // Inside a quote too.
+        assertEquals(emptySet(), MarmotMessageReferences.mentions(event(9, "> ```\n> nostr:$npub\n> ```")))
+    }
+
+    @Test
+    fun aPTagCountsEvenWhenTheTextNamesItInCode() {
+        assertEquals(setOf(bob), MarmotMessageReferences.mentions(event(9, "`nostr:${NPub.create(bob)}`", arrayOf("p", bob))))
+    }
 }

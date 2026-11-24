@@ -60,3 +60,38 @@ subprojects {
     tasks.withType<KotlinNativeCompile>().configureEach { compilerOptions.freeCompilerArgs.add(klibPathBase) }
     tasks.withType<Kotlin2JsCompile>().configureEach { compilerOptions.freeCompilerArgs.add(klibPathBase) }
 }
+
+// The release gate (create-release.yml): a release's POM names the Quartz and mls-kmp versions it
+// was built against, so each must resolve from Nostr + Blossom through Magpie before this library
+// can be released. A GitHub tag is not enough: it is pushed before the Nostr publish, which can
+// still fail or wait on the signer. Resolving the exact pinned versions asks Magpie for each one's
+// signed release event and files, the same way a consumer would. Run it without -PquartzDir or
+// -PmlsKmpDir, which would substitute the checkouts.
+tasks.register("verifyDependenciesPublished") {
+    group = "verification"
+    description = "Fails unless the pinned Quartz and mls-kmp releases resolve through Magpie."
+    val pinned =
+        listOf(
+            "com.vitorpamplona.quartz:quartz-jvm:${libs.versions.quartzKmp.get()}",
+            "com.vitorpamplona.mls:mls-jvm:${libs.versions.mlsKmp.get()}",
+        )
+    val substituted = listOf("quartzDir", "mlsKmpDir").filter { providers.gradleProperty(it).isPresent }
+    val resolved =
+        provider {
+            pinned.map { coordinates ->
+                val config = configurations.detachedConfiguration(dependencies.create(coordinates)).apply { isTransitive = false }
+                val artifacts = config.incoming.artifactView { lenient(true) }.artifacts
+                val failure = artifacts.failures.firstOrNull()?.let { generateSequence(it) { e -> e.cause }.last().message }
+                Triple(coordinates, artifacts.artifacts.isNotEmpty(), failure)
+            }
+        }
+    doLast {
+        check(substituted.isEmpty()) { "Run without ${substituted.joinToString { "-P$it" }}: it replaces the published artifact." }
+        val missing = resolved.get().filterNot { it.second }
+        check(missing.isEmpty()) {
+            "Not published on Nostr + Blossom (Magpie could not resolve it), release it first: " +
+                missing.joinToString { "${it.first} (${it.third ?: "no artifact"})" }
+        }
+        resolved.get().forEach { logger.lifecycle("Published: ${it.first}") }
+    }
+}

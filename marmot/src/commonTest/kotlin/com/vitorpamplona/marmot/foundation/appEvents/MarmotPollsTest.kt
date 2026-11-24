@@ -147,4 +147,83 @@ class MarmotPollsTest {
         assertNull(MarmotPolls.castVote(p.id, definition, vote(p.id, 150, listOf("0", "1"))), "two choices in a single-choice poll")
         assertNull(MarmotPolls.castVote(p.id, definition, vote(p.id, 150, listOf("7"))), "an option the poll never declared")
     }
+
+    private fun voteBy(
+        voter: String,
+        id: Char,
+        pollId: String,
+        createdAt: Long,
+        optionIds: List<String>,
+    ) = Event(id.toString().repeat(64), voter, createdAt, MarmotPolls.KIND_POLL_RESPONSE, MarmotPolls.responseTags(pollId, optionIds)!!, "", "")
+
+    @Test
+    fun theTallyCountsEachVotersNewestValidVote() {
+        val p = poll(MarmotPolls.PollType.MULTIPLE_CHOICE)
+        val definition = MarmotPolls.parsePoll(p)!!
+        val tally =
+            MarmotPolls.tally(
+                p.id,
+                definition,
+                listOf(
+                    voteBy(bob, '2', p.id, 110, listOf("0")),
+                    voteBy(bob, '3', p.id, 120, listOf("1", "2")),
+                    voteBy(alice, '4', p.id, 130, listOf("2")),
+                ),
+            )
+        assertEquals(setOf("1", "2"), tally.votes[bob]?.optionIds)
+        assertEquals(setOf("2"), tally.votes[alice]?.optionIds)
+        assertEquals(mapOf("1" to 1, "2" to 2), tally.counts())
+        assertEquals(2, tally.voters)
+    }
+
+    @Test
+    fun aLaterInvalidVoteLeavesTheEarlierOneStanding() {
+        val p = poll()
+        val definition = MarmotPolls.parsePoll(p)!!
+        val tally =
+            MarmotPolls.tally(
+                p.id,
+                definition,
+                listOf(
+                    voteBy(bob, '2', p.id, 110, listOf("0")),
+                    // Two options in a single-choice poll, and one after the deadline: no votes.
+                    voteBy(bob, '3', p.id, 120, listOf("0", "1")),
+                    voteBy(bob, '4', p.id, 250, listOf("2")),
+                ),
+            )
+        assertEquals(setOf("0"), tally.votes[bob]?.optionIds)
+        assertEquals("2".repeat(64), tally.votes[bob]?.responseId)
+    }
+
+    @Test
+    fun aTieInTimeGoesToTheLargerId() {
+        val p = poll()
+        val definition = MarmotPolls.parsePoll(p)!!
+        val votes = listOf(voteBy(bob, '9', p.id, 110, listOf("2")), voteBy(bob, '5', p.id, 110, listOf("0")))
+        assertEquals(setOf("2"), MarmotPolls.tally(p.id, definition, votes).votes[bob]?.optionIds)
+        assertEquals(setOf("2"), MarmotPolls.tally(p.id, definition, votes.reversed()).votes[bob]?.optionIds)
+    }
+
+    @Test
+    fun onlyAVotersNewestResponsesAreLookedAt() {
+        // MDK reads a voter's newest 64 responses: 64 newer malformed ones hide an older valid vote.
+        val p = poll(endsAt = null)
+        val definition = MarmotPolls.parsePoll(p)!!
+        val valid = voteBy(bob, '2', p.id, 110, listOf("0"))
+        val noise =
+            (0 until MarmotPolls.MAX_RESPONSES_PER_VOTER).map { i ->
+                Event(i.toString().padStart(64, 'a'), bob, 200L + i, MarmotPolls.KIND_POLL_RESPONSE, MarmotPolls.responseTags(p.id, listOf("0", "1"))!!, "", "")
+            }
+        assertNull(MarmotPolls.tally(p.id, definition, noise + valid).votes[bob])
+        assertEquals(setOf("0"), MarmotPolls.tally(p.id, definition, noise.drop(1) + valid).votes[bob]?.optionIds)
+    }
+
+    @Test
+    fun responsesToAnotherPollOrSignedOnesAreNotCounted() {
+        val p = poll()
+        val definition = MarmotPolls.parsePoll(p)!!
+        val signed = Event("2".repeat(64), bob, 110, MarmotPolls.KIND_POLL_RESPONSE, MarmotPolls.responseTags(p.id, listOf("0"))!!, "", "f".repeat(128))
+        val elsewhere = voteBy(alice, '3', "3".repeat(64), 110, listOf("0"))
+        assertTrue(MarmotPolls.tally(p.id, definition, listOf(signed, elsewhere)).votes.isEmpty())
+    }
 }

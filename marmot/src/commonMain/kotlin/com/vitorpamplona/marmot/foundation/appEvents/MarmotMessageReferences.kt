@@ -66,7 +66,9 @@ object MarmotMessageReferences {
      * mentions whoever its text names. Only the first [MAX_MENTION_SCAN_BYTES] of the text are
      * scanned, as MDK does.
      *
-     * MDK reads the text as Markdown and skips entities inside code; this scan does not.
+     * MDK reads the text as Markdown and finds no mention inside code, so neither does this:
+     * fenced code blocks (``` or ~~~, to their closing fence or the end of the text) and inline
+     * code spans are skipped ([outsideCode]). A `p` tag counts wherever the text names it.
      */
     fun mentions(event: Event): Set<HexKey> {
         if (event.kind != MarmotAppEvent.KIND_CHAT) return emptySet()
@@ -74,7 +76,7 @@ object MarmotMessageReferences {
         for (tag in event.tags) {
             if (tag.size > 1 && tag[0] == "p" && isHexKey(tag[1])) found.add(tag[1])
         }
-        INLINE_MENTION.findAll(boundedPrefix(event.content)).forEach { match ->
+        INLINE_MENTION.findAll(outsideCode(boundedPrefix(event.content))).forEach { match ->
             pubKeyOf(match.groupValues[1])?.let { found.add(it) }
         }
         return found
@@ -104,6 +106,128 @@ object MarmotMessageReferences {
     private fun isHexKey(value: String) = value.length == 64 && value.all { it in '0'..'9' || it in 'a'..'f' }
 
     private fun pubKeyOf(bech32: String): HexKey? = (Nip19Parser.uriToRoute(bech32)?.entity as? IPubKeyEntity)?.hex
+
+    /**
+     * [text] with its Markdown code blanked out, as CommonMark reads it: fenced code blocks (a line
+     * of three or more backticks or tildes, up to three spaces in and after any `>` quote markers,
+     * to a closing fence of the same character at least as long, or to the end of the text) and
+     * inline code spans (a run of backticks to the next run of the same length within the
+     * paragraph; an unmatched run, or one a backslash escapes, is literal). Everything else keeps
+     * its place, so a mention never joins across blanked code.
+     */
+    fun outsideCode(text: String): String {
+        if ('`' !in text && '~' !in text) return text
+        val out = StringBuilder(text.length)
+        val paragraph = StringBuilder()
+
+        fun flushParagraph() {
+            out.append(blankCodeSpans(paragraph))
+            paragraph.setLength(0)
+        }
+        var fence: Pair<Char, Int>? = null
+        for (line in text.split('\n').withIndex()) {
+            val newline = if (line.index > 0) "\n" else ""
+            val body = line.value
+            val marker = fenceOf(body)
+            if (fence != null) {
+                // Inside a fence: everything is code, up to a closing fence.
+                out.append(newline).append(" ".repeat(body.length))
+                if (marker != null && marker.first == fence.first && marker.second >= fence.second && marker.third.isBlank()) fence = null
+                continue
+            }
+            if (marker != null && (marker.first == '~' || '`' !in marker.third)) {
+                flushParagraph()
+                out.append(newline).append(" ".repeat(body.length))
+                fence = marker.first to marker.second
+                continue
+            }
+            if (body.isBlank()) {
+                flushParagraph()
+                out.append(newline).append(body)
+                continue
+            }
+            paragraph.append(newline).append(body)
+        }
+        flushParagraph()
+        return out.toString()
+    }
+
+    /** The fence character, its run length and what follows the run on [line], or null for no fence. */
+    private fun fenceOf(line: String): Triple<Char, Int, String>? {
+        var i = 0
+        // Quote markers, each with an optional space after it.
+        while (true) {
+            var j = i
+            while (j < line.length && j - i < 3 && line[j] == ' ') j++
+            if (j < line.length && line[j] == '>') {
+                i = j + 1
+                if (i < line.length && line[i] == ' ') i++
+            } else {
+                break
+            }
+        }
+        var indent = 0
+        while (i < line.length && line[i] == ' ' && indent < 4) {
+            i++
+            indent++
+        }
+        if (indent > 3 || i >= line.length) return null
+        val c = line[i]
+        if (c != '`' && c != '~') return null
+        var n = 0
+        while (i + n < line.length && line[i + n] == c) n++
+        if (n < 3) return null
+        return Triple(c, n, line.substring(i + n))
+    }
+
+    /** [paragraph] with each inline code span blanked out. */
+    private fun blankCodeSpans(paragraph: CharSequence): CharSequence {
+        if ('`' !in paragraph) return paragraph
+        val chars = StringBuilder(paragraph)
+        var i = 0
+        while (i < chars.length) {
+            val c = chars[i]
+            if (c == '\\' && i + 1 < chars.length) {
+                i += 2
+                continue
+            }
+            if (c != '`') {
+                i++
+                continue
+            }
+            val run = runLength(chars, i)
+            var j = i + run
+            var close = -1
+            while (j < chars.length) {
+                if (chars[j] == '`') {
+                    val other = runLength(chars, j)
+                    if (other == run) {
+                        close = j
+                        break
+                    }
+                    j += other
+                } else {
+                    j++
+                }
+            }
+            if (close < 0) {
+                i += run
+                continue
+            }
+            for (k in i until close + run) if (chars[k] != '\n') chars[k] = ' '
+            i = close + run
+        }
+        return chars
+    }
+
+    private fun runLength(
+        chars: CharSequence,
+        from: Int,
+    ): Int {
+        var n = 0
+        while (from + n < chars.length && chars[from + n] == '`') n++
+        return n
+    }
 
     /** The longest prefix of [text] that fits in [MAX_MENTION_SCAN_BYTES] of UTF-8, cut at a character boundary. */
     private fun boundedPrefix(text: String): String {

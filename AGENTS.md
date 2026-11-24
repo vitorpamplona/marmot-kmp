@@ -42,7 +42,8 @@ checked against MDK, the reference implementation (<https://github.com/marmot-pr
 - `gradle/kmp-purity.gradle.kts`: the `verifyKmpPurity` task, the same file as Quartz's.
 - `tools/ci/quartz-args.sh`: points the build at a Quartz checkout while the pinned Quartz release is
   not out yet (CI and the pre-push hook call it). `tools/ci/mls-kmp-args.sh` does the same for
-  mls-kmp. Both count a GitHub tag as released.
+  mls-kmp. Both count a GitHub tag as released; the release gate does not (`verifyDependenciesPublished`
+  resolves the pinned versions through Magpie).
 - Quartz, mls-kmp, crypto-kmp, negentropy-kmp, libschnorr256k1-kotlin and this library are
   released on Nostr + Blossom: the Magpie settings plugin (`settings.gradle.kts`) serves their
   groups, and `gradle/magpie.lock` pins their release key and files. Commit the lock's changes;

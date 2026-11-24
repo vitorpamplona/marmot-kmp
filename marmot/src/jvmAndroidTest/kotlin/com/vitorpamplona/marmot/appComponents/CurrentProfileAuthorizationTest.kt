@@ -182,13 +182,15 @@ class CurrentProfileAuthorizationTest {
                 .fromExtensionsOrEmpty(alice.groupContextExtensionsSnapshot())
                 .with(AppComponentIds.GROUP_PROFILE_V1, byteArrayOf(0x7f))
 
-        alice.proposeGroupContextExtensions(listOf(corrupted.toExtension()))
-        alice.commit()
-
-        assertEquals(setOf(aliceAccount.toHexKey()), alice.currentAdminIdentities())
-        assertTrue(alice.isLocalAdmin())
+        // A commit can no longer write it (GroupContextComponents, as MDK refuses it), so read
+        // the admin set straight off a GroupContext that already holds one.
+        assertEquals(setOf(aliceAccount.toHexKey()), MarmotGroupPolicy.adminIdentitiesIn(listOf(corrupted.toExtension())))
         assertFailsWith<IllegalArgumentException>("the corrupt component still surfaces when read") {
-            alice.currentGroupState()
+            MarmotGroupState.fromExtensions(listOf(corrupted.toExtension()))
         }
+
+        alice.proposeGroupContextExtensions(listOf(corrupted.toExtension()))
+        assertFailsWith<IllegalStateException>("a commit writing it is refused") { alice.commit() }
+        assertTrue(alice.isLocalAdmin())
     }
 }

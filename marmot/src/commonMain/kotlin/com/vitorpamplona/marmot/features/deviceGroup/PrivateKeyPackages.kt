@@ -203,6 +203,11 @@ class MarmotDeviceGroupConfig(
      */
     val client: String = "",
     val platform: String = "",
+    /**
+     * Owed histories, deliveries waiting for their chat or blob, user roster edits a fork may undo,
+     * and imported attachment keys ([DeviceGroupWork]), so they survive a restart. Encrypt at rest.
+     */
+    val workStore: DeviceGroupWorkStore = InMemoryDeviceGroupWorkStore(),
 ) {
     @Deprecated("Kept for binary compatibility", level = DeprecationLevel.HIDDEN)
     constructor(
@@ -211,4 +216,15 @@ class MarmotDeviceGroupConfig(
         relays: List<String>,
         accountSyncStore: AccountSyncStore,
     ) : this(trustStore, privateKeyPackageStore, relays, accountSyncStore, null, "", "")
+
+    @Deprecated("Kept for binary compatibility", level = DeprecationLevel.HIDDEN)
+    constructor(
+        trustStore: DeviceGroupTrustStore,
+        privateKeyPackageStore: PrivateKeyPackageStore,
+        relays: List<String>,
+        accountSyncStore: AccountSyncStore,
+        relayProvider: (suspend () -> List<String>)?,
+        client: String,
+        platform: String,
+    ) : this(trustStore, privateKeyPackageStore, relays, accountSyncStore, relayProvider, client, platform, InMemoryDeviceGroupWorkStore())
 }

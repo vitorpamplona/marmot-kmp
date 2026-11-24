@@ -71,9 +71,13 @@ class EncryptedMediaV2Cipher(
         ciphertextSha256 = reference.ciphertextSha256
     }
 
+    /** Set by [withFileKey]: the attachment's own key, used instead of deriving it from [mediaSecret]. */
+    private var fileKey: ByteArray? = null
+
     override fun name(): String = EncryptedMediaV2.VERSION
 
     override fun encrypt(bytesToEncrypt: ByteArray): ByteArray {
+        check(fileKey == null) { "a cipher built from one file's key only decrypts that file" }
         val result = EncryptedMediaV2.encrypt(bytesToEncrypt, mediaSecret, mediaType, filename)
         nonce = result.nonce
         plaintextSha256 = result.plaintextSha256
@@ -82,7 +86,9 @@ class EncryptedMediaV2Cipher(
     }
 
     override fun decrypt(bytesToDecrypt: ByteArray): ByteArray =
-        EncryptedMediaV2.decrypt(
+        fileKey?.let { key ->
+            EncryptedMediaV2.decryptWithFileKey(bytesToDecrypt, key, nonce, plaintextSha256, mediaType, filename)
+        } ?: EncryptedMediaV2.decrypt(
             ciphertext = bytesToDecrypt,
             mediaSecret = mediaSecret,
             nonce = nonce,
@@ -97,4 +103,15 @@ class EncryptedMediaV2Cipher(
         } catch (_: Exception) {
             null
         }
+
+    companion object {
+        /**
+         * The receiving side for an attachment whose `file_key` arrived in a sibling's history bundle
+         * (`account-sync.md` "History bundles"): the file of an epoch this device never held.
+         */
+        fun withFileKey(
+            fileKey: ByteArray,
+            reference: EncryptedMediaReferenceV2,
+        ): EncryptedMediaV2Cipher = EncryptedMediaV2Cipher(ByteArray(EncryptedMediaV2.KEY_LENGTH), reference).also { it.fileKey = fileKey.copyOf() }
+    }
 }

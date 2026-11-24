@@ -213,7 +213,29 @@ object EncryptedMediaV2 {
         }
         requireValidFilename(filename)
 
-        val fileKey = deriveFileKey(mediaSecret, plaintextSha256, mediaType, filename)
+        return decryptWithFileKey(ciphertext, deriveFileKey(mediaSecret, plaintextSha256, mediaType, filename), nonce, plaintextSha256, mediaType, filename)
+    }
+
+    /**
+     * [decrypt] with the attachment's `file_key` itself rather than the epoch's media secret: the
+     * key a sibling handed over in a history bundle (`account-sync.md` "History bundles") for a
+     * file of an epoch this device never held.
+     */
+    fun decryptWithFileKey(
+        ciphertext: ByteArray,
+        fileKey: ByteArray,
+        nonce: ByteArray,
+        plaintextSha256: ByteArray,
+        mediaType: String,
+        filename: String,
+    ): ByteArray {
+        require(fileKey.size == KEY_LENGTH) { "file_key must be $KEY_LENGTH bytes" }
+        require(nonce.size == NONCE_LENGTH) { "nonce must be $NONCE_LENGTH bytes" }
+        require(plaintextSha256.size == 32) { "plaintext_sha256 must be 32 bytes" }
+        require(MarmotMediaType.canonicalize(mediaType) == mediaType) {
+            "media type must already be canonical, was '$mediaType'"
+        }
+        requireValidFilename(filename)
         val aad = buildAad(plaintextSha256, mediaType, filename)
         val plaintext = ChaCha20Poly1305.decrypt(ciphertext, aad, nonce, fileKey)
         check(sha256(plaintext).contentEquals(plaintextSha256)) {
@@ -221,6 +243,12 @@ object EncryptedMediaV2 {
         }
         return plaintext
     }
+
+    /** The `file_key` of [reference] under the media secret of the epoch that carried it. */
+    fun fileKeyOf(
+        mediaSecret: ByteArray,
+        reference: EncryptedMediaReferenceV2,
+    ): ByteArray = deriveFileKey(mediaSecret, reference.plaintextSha256, reference.mediaType, reference.filename)
 
     /**
      * Parse an `imeta` tag, or throw naming the reason.

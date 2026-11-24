@@ -46,15 +46,43 @@ interface MarmotIngestDedupStore {
     suspend fun mark(eventId: HexKey)
 
     suspend fun loadAll(): Set<HexKey>
+
+    /**
+     * Remember the id of a kind:445 this device sent, so its relay echo is skipped after a
+     * restart: our own application message never decrypts here (the sender's ratchet
+     * generation was spent encrypting it).
+     *
+     * Kept apart from [mark]: a device writes one per message it sends, so in the same record they
+     * soon crowd out the Welcome and created-locally markers an app keeps bounded. Keep only the
+     * newest [OWN_ECHO_LIMIT]; an echo older than that reads as an undecryptable message, which
+     * costs a log line, never correctness. The default keeps none.
+     */
+    suspend fun markOwnEcho(eventId: HexKey) {}
+
+    /** The ids [markOwnEcho] kept, oldest first. */
+    suspend fun loadOwnEchoes(): List<HexKey> = emptyList()
+
+    companion object {
+        /** How many own-echo ids a store keeps, and the client holds in memory. */
+        const val OWN_ECHO_LIMIT = 4096
+    }
 }
 
 /** Non-durable default. Re-decides everything after a restart. */
 class InMemoryIngestDedupStore : MarmotIngestDedupStore {
     private val ids = LinkedHashSet<HexKey>()
+    private val ownEchoes = LinkedHashSet<HexKey>()
 
     override suspend fun mark(eventId: HexKey) {
         ids.add(eventId)
     }
 
     override suspend fun loadAll(): Set<HexKey> = ids.toSet()
+
+    override suspend fun markOwnEcho(eventId: HexKey) {
+        ownEchoes.add(eventId)
+        while (ownEchoes.size > MarmotIngestDedupStore.OWN_ECHO_LIMIT) ownEchoes.remove(ownEchoes.first())
+    }
+
+    override suspend fun loadOwnEchoes(): List<HexKey> = ownEchoes.toList()
 }

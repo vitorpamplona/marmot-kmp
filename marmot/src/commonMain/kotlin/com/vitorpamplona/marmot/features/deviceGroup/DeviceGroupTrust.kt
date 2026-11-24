@@ -33,9 +33,12 @@ import com.vitorpamplona.quartz.nip01Core.core.toHexKey
  * is recorded when the device creates the group or joins it through its link's Welcome, and is never
  * inferred from group state.
  *
- * Persisted format (API): [encode] / [decode], version 1, in the Marmot binary profile; the layout is
- * written out in `plans/2026-11-21-device-groups.md`. It holds the tag signing seed, so a store MUST
- * encrypt it at rest.
+ * Persisted format (API): [encode] / [decode], in the Marmot binary profile; the layout is written
+ * out in `plans/2026-11-21-device-groups.md`. Version 1 is the record without a move; version 2 adds,
+ * after version 1's fields, the move in progress ([move]), the group it left ([movedFrom]) and the
+ * rejections it carries ([carriedRejections]). A record with none of those is still written as
+ * version 1, so a library that reads only version 1 keeps reading it. It holds tag signing seeds, so a
+ * store MUST encrypt it at rest.
  */
 data class DeviceGroupTrust(
     /** This device's KeyPackage publication slot. */
@@ -66,6 +69,16 @@ data class DeviceGroupTrust(
     val firstCheckSlots: List<HexKey>? = null,
     /** Sign-ins this device's user answered "This wasn't me". */
     val ownRejections: List<SlotTime> = emptyList(),
+    /**
+     * A move to another device group (`device-group.md` "Moving between device groups") whose
+     * confirmed Welcome this device joined, not made yet: the trusted group above stays the sole
+     * trusted one until it is.
+     */
+    val move: Move? = null,
+    /** The device group this device moved out of, until its `moved` status settles there and the copy is discarded. */
+    val movedFrom: MovedFrom? = null,
+    /** `What it brings`: the old roster's `not_me` and `removed` records, still to import into the new one. */
+    val carriedRejections: List<CarriedRejection> = emptyList(),
 ) {
     val trustsDeviceGroup: Boolean get() = trustedGroupId != null
 
@@ -101,9 +114,33 @@ data class DeviceGroupTrust(
         val lastActivity: Long,
     )
 
+    /** The destination of a move: its group ids, this device's tag signing seed there (secret), and the link's KeyPackageRef. */
+    data class Move(
+        val groupId: HexKey,
+        val nostrGroupId: HexKey,
+        val tagSigningSeed: HexKey,
+        val linkedKeyPackageRef: HexKey,
+    )
+
+    /** The device group a made move left. */
+    data class MovedFrom(
+        val groupId: HexKey,
+        val nostrGroupId: HexKey,
+    )
+
+    /** One rejected slot of the old roster, with its original reason, time and key ([RejectionReasonV1] code). */
+    data class CarriedRejection(
+        val slot: HexKey,
+        val reason: Int,
+        val rejectedAt: Long,
+        val tagSignatureKey: HexKey?,
+    )
+
+    private val hasMoveFields: Boolean get() = move != null || movedFrom != null || carriedRejections.isNotEmpty()
+
     fun encode(): ByteArray {
         val w = TlsWriter()
-        w.putUint8(VERSION)
+        w.putUint8(if (hasMoveFields) VERSION else VERSION_1)
         w.putBytes(ownSlot.hexToByteArray())
         putOptionalVar(w, trustedGroupId)
         putOptionalVar(w, trustedNostrGroupId)
@@ -149,11 +186,41 @@ data class DeviceGroupTrust(
             w.putOpaqueVarInt(TlsWriter().also { a -> firstCheckSlots.forEach { a.putBytes(it.hexToByteArray()) } }.toByteArray())
         }
         putSlotTimes(w, ownRejections)
+        if (hasMoveFields) {
+            if (move == null) {
+                w.putUint8(0)
+            } else {
+                w.putUint8(1)
+                listOf(move.groupId, move.nostrGroupId, move.tagSigningSeed, move.linkedKeyPackageRef).forEach { w.putOpaqueVarInt(it.hexToByteArray()) }
+            }
+            if (movedFrom == null) {
+                w.putUint8(0)
+            } else {
+                w.putUint8(1)
+                w.putOpaqueVarInt(movedFrom.groupId.hexToByteArray())
+                w.putOpaqueVarInt(movedFrom.nostrGroupId.hexToByteArray())
+            }
+            w.putOpaqueVarInt(
+                TlsWriter()
+                    .also { a ->
+                        carriedRejections.forEach {
+                            a.putBytes(it.slot.hexToByteArray())
+                            a.putUint8(it.reason)
+                            a.putUint64(it.rejectedAt)
+                            putOptionalVar(a, it.tagSignatureKey)
+                        }
+                    }.toByteArray(),
+            )
+        }
         return w.toByteArray()
     }
 
     companion object {
-        const val VERSION = 1
+        /** The newest layout: version 1 and the move fields. */
+        const val VERSION = 2
+
+        /** The layout without a move, still written when there is none. */
+        const val VERSION_1 = 1
 
         private fun putOptionalVar(
             w: TlsWriter,
@@ -198,7 +265,8 @@ data class DeviceGroupTrust(
 
         fun decode(bytes: ByteArray): DeviceGroupTrust {
             val r = TlsReader(bytes)
-            require(r.readUint8() == VERSION) { "unknown device-group trust version" }
+            val version = r.readUint8()
+            require(version == VERSION_1 || version == VERSION) { "unknown device-group trust version" }
             val ownSlot = r.readBytes(32).toHexKey()
             val group = readOptionalVar(r)
             val nostr = readOptionalVar(r)
@@ -246,8 +314,27 @@ data class DeviceGroupTrust(
                     else -> throw IllegalArgumentException("invalid presence byte")
                 }
             val rejections = readSlotTimes(r)
+            var move: Move? = null
+            var movedFrom: MovedFrom? = null
+            val carried = ArrayList<CarriedRejection>()
+            if (version == VERSION) {
+                move =
+                    when (r.readUint8()) {
+                        0 -> null
+                        1 -> List(4) { r.readOpaqueVarInt().toHexKey() }.let { Move(it[0], it[1], it[2], it[3]) }
+                        else -> throw IllegalArgumentException("invalid presence byte")
+                    }
+                movedFrom =
+                    when (r.readUint8()) {
+                        0 -> null
+                        1 -> MovedFrom(r.readOpaqueVarInt().toHexKey(), r.readOpaqueVarInt().toHexKey())
+                        else -> throw IllegalArgumentException("invalid presence byte")
+                    }
+                val cr = TlsReader(r.readOpaqueVarInt())
+                while (cr.hasRemaining) carried.add(CarriedRejection(cr.readBytes(32).toHexKey(), cr.readUint8(), cr.readUint64(), readOptionalVar(cr)))
+            }
             require(!r.hasRemaining) { "device-group trust has trailing bytes" }
-            return DeviceGroupTrust(ownSlot, group, nostr, seed, pending, linkedRef, unlinked, approvals, decisions, lastHeartbeat, activity, removed, first, rejections)
+            return DeviceGroupTrust(ownSlot, group, nostr, seed, pending, linkedRef, unlinked, approvals, decisions, lastHeartbeat, activity, removed, first, rejections, move, movedFrom, carried)
         }
     }
 }

@@ -207,15 +207,18 @@ class DeviceGroupHistoryTest {
             assertTrue(a.groups.isTrustedDeviceGroup(deviceGroup) && b.groups.isTrustedDeviceGroup(deviceGroup), "the group id is kept")
         }
 
-    @Test
-    fun aNewlyLinkedDeviceGetsTheEarlierMessagesOfTheChatsItIsAddedTo() =
-        runBlocking<Unit> {
-            val keys = KeyPair()
-            val a = Device(keys)
-            val b = Device(keys)
-            val c = Device(KeyPair(), deviceGroups = false)
-            // A chat A had, with messages from both sides, before B existed.
-            val chat = "d4".repeat(32)
+    /** A history scenario: C and A chat before B exists, then B is linked and added to the chat. */
+    private inner class Scenario {
+        val keys = KeyPair()
+        val a = Device(keys)
+        val b = Device(keys)
+        val c = Device(KeyPair(), deviceGroups = false)
+        val chat = "d4".repeat(32)
+        lateinit var adds: List<MarmotDeviceGroupManager.SiblingAdd>
+        lateinit var deliveries: List<OutboundGroupEvent>
+
+        /** The chat with a message from each side, B linked and added, A's deliveries kept by B. */
+        suspend fun upToTheDeliveries() {
             a.manager.createCurrentProfileGroup(chat, relays, null)
             c.manager.ingest(
                 a.manager
@@ -232,7 +235,7 @@ class DeviceGroupHistoryTest {
 
             link(a, b)
             a.ingest(b.groups.topUpSiblings(now))
-            val adds = a.groups.addNewDeviceToChats(b.slot(), now)
+            adds = a.groups.addNewDeviceToChats(b.slot(), now)
             assertEquals(1, adds.size)
             c.manager.ingest(
                 adds
@@ -243,13 +246,29 @@ class DeviceGroupHistoryTest {
             assertEquals(1, a.groups.owedHistoryCount())
 
             // The deliveries go out before B has the chat: B keeps them until its sibling Welcome joins.
-            val deliveries = a.groups.historyDeliveries(now)
+            deliveries = a.groups.historyDeliveries(now)
             assertEquals(1, deliveries.size)
             assertEquals(0, a.groups.owedHistoryCount())
             b.ingest(deliveries).forEach { assertIs<MarmotIngestResult.Ignored>(it) }
             assertEquals(1, b.groups.keptHistoryCount())
+        }
+
+        /** B joins the chat through its sibling Welcome, which imports the kept delivery. */
+        suspend fun bJoins() {
             b.ingest(adds.single().deviceGroupEvents)
             assertTrue(b.manager.groupManager.isMember(chat))
+        }
+    }
+
+    @Test
+    fun aNewlyLinkedDeviceGetsTheEarlierMessagesOfTheChatsItIsAddedTo() =
+        runBlocking<Unit> {
+            val s = Scenario()
+            s.upToTheDeliveries()
+            val b = s.b
+            val chat = s.chat
+            assertNull(b.groups.beforeHistoryImport, "no hook unless the app sets one")
+            s.bJoins()
             assertEquals(0, b.groups.keptHistoryCount())
             assertEquals(listOf("hello from C", "hi from A"), texts(b, chat))
             val imported = b.groups.drainImportedHistory().single()
@@ -259,11 +278,70 @@ class DeviceGroupHistoryTest {
             assertEquals(imported.events.map { it.id }.toSet(), imported.epochs.keys)
 
             // Live traffic still reads after the import, and a second import adds nothing.
-            val later = c.manager.buildTextMessage(chat, "after the link")
+            val later = s.c.manager.buildTextMessage(chat, "after the link")
             assertIs<MarmotIngestResult.Message>(b.manager.ingest(later.outbound.signedEvent))
-            b.ingest(deliveries)
+            b.ingest(s.deliveries)
             assertTrue(b.groups.drainImportedHistory().isEmpty())
             assertEquals(listOf("after the link", "hello from C", "hi from A"), texts(b, chat))
+        }
+
+    @Test
+    fun theImportHookSeesTheFreshEventsBeforeTheStoreHoldsAnyOfThem() =
+        runBlocking<Unit> {
+            val s = Scenario()
+            s.upToTheDeliveries()
+            val b = s.b
+            val calls = ArrayList<Pair<String, List<String>>>()
+            val storedAtCall = ArrayList<List<String>>()
+            b.groups.beforeHistoryImport = { nostrGroupId, events ->
+                calls.add(nostrGroupId to events.map { it.content }.sorted())
+                storedAtCall.add(texts(b, nostrGroupId))
+            }
+            s.bJoins()
+            assertEquals(listOf(s.chat to listOf("hello from C", "hi from A")), calls, "called once, with the chat and its fresh events")
+            assertEquals(listOf(emptyList()), storedAtCall, "nothing of the bundle was stored when the hook ran")
+            assertEquals(listOf("hello from C", "hi from A"), texts(b, s.chat))
+            val imported = b.groups.drainImportedHistory().single()
+            assertEquals(calls.single().second, imported.events.map { it.content }.sorted(), "the drain still reports the same events")
+
+            // Events already held are not fresh: a second import neither calls the hook nor reports anything.
+            b.ingest(s.deliveries)
+            assertEquals(1, calls.size)
+            assertTrue(b.groups.drainImportedHistory().isEmpty())
+        }
+
+    @Test
+    fun aThrowingImportHookLeavesTheStoreUntouchedAndTheDeliveryKept() =
+        runBlocking<Unit> {
+            val s = Scenario()
+            s.upToTheDeliveries()
+            val b = s.b
+            var refusals = 0
+            b.groups.beforeHistoryImport = { _, _ ->
+                refusals++
+                throw IllegalStateException("the read record could not be written")
+            }
+            s.bJoins()
+            assertEquals(1, refusals)
+            assertEquals(emptyList(), texts(b, s.chat), "no event of the refused bundle is stored")
+            assertTrue(b.groups.drainImportedHistory().isEmpty(), "nothing is reported as imported")
+            assertEquals(1, b.groups.keptHistoryCount(), "the delivery is kept for a later pass")
+
+            // Each pass tries again until the hook lets it through.
+            b.groups.importKeptHistory(now, fetch = false)
+            assertEquals(2, refusals)
+            assertEquals(1, b.groups.keptHistoryCount())
+            b.groups.beforeHistoryImport = null
+            b.groups.importKeptHistory(now, fetch = false)
+            assertEquals(0, b.groups.keptHistoryCount())
+            assertEquals(listOf("hello from C", "hi from A"), texts(b, s.chat))
+            assertEquals(
+                2,
+                b.groups
+                    .drainImportedHistory()
+                    .single()
+                    .events.size,
+            )
         }
 
     @Test

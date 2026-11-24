@@ -36,6 +36,7 @@ import com.vitorpamplona.marmot.appComponents.CurrentProfileGroupFactory
 import com.vitorpamplona.marmot.appComponents.EncryptedMediaPolicyV2
 import com.vitorpamplona.marmot.appComponents.EncryptedMediaReferenceV2
 import com.vitorpamplona.marmot.appComponents.EncryptedMediaV2
+import com.vitorpamplona.marmot.appComponents.EncryptedMediaV2Cipher
 import com.vitorpamplona.marmot.appComponents.GroupAvatarUrlV1
 import com.vitorpamplona.marmot.appComponents.GroupBlossomImageV1
 import com.vitorpamplona.marmot.appComponents.GroupLifecycleV1
@@ -77,6 +78,7 @@ import com.vitorpamplona.marmot.protocolCore.MarmotPublishObligationStore
 import com.vitorpamplona.marmot.protocolCore.PublishOutcome
 import com.vitorpamplona.mls.components.ComponentsList
 import com.vitorpamplona.mls.group.MlsGroup
+import com.vitorpamplona.mls.group.MlsGroupState
 import com.vitorpamplona.mls.messages.CommitResult
 import com.vitorpamplona.mls.messages.KeyPackageBundle
 import com.vitorpamplona.mls.messages.MlsKeyPackage
@@ -273,6 +275,9 @@ class MarmotManager(
             // Also restore previously-published KeyPackage bundles so that
             // Welcomes referencing them remain processable across restarts.
             keyPackageRotationManager.restoreFromStore()
+            ingestDedupStore?.loadOwnEchoes()?.let { echoes ->
+                terminallyIngestedMutex.withLock { echoes.forEach { addOwnEcho(it) } }
+            }
             ingestDedupStore?.loadAll()?.let { marks ->
                 terminallyIngestedMutex.withLock { terminallyIngested.addAll(marks) }
                 val created = activeIds.filter { createdLocallyMarker(it) in marks }
@@ -293,6 +298,13 @@ class MarmotManager(
      */
     private val terminallyIngested = mutableSetOf<HexKey>()
     private val terminallyIngestedMutex = Mutex()
+
+    /**
+     * Ids of the kind:445 this device sent, newest last, bounded to
+     * [MarmotIngestDedupStore.OWN_ECHO_LIMIT]: one per sent message, so never in [terminallyIngested],
+     * which grows for the life of the process.
+     */
+    private val ownEchoes = LinkedHashSet<HexKey>()
 
     // Groups this device created. Holding leaf 0 is not proof: a commit that removes leaf 0
     // and adds someone in the same epoch places the invitee there, which let a crafted
@@ -327,6 +339,18 @@ class MarmotManager(
             }
         }
     }
+
+    /**
+     * Write the receive state of every group whose ratchets moved since it was last written.
+     *
+     * Opening an application message moves a receive ratchet and deletes the key it used, and
+     * the group is written only every [MlsGroupManager.RECEIVED_PERSIST_BATCH] opened messages:
+     * until this runs, a restart opens those messages again and their keys stay on disk. A front
+     * end calls it after each batch of live events ([MarmotReceiver.flush]) and when the app goes
+     * to the background; [MarmotSyncPolicy] calls it after every catch-up. A group whose write
+     * fails is logged and left for the next call; the others are still written.
+     */
+    suspend fun flushReceivedState() = groupManager.flushReceivedState()
 
     /**
      * Re-emit every publish obligation a previous run left unresolved.
@@ -396,6 +420,19 @@ class MarmotManager(
     ): GroupLifecycleState {
         val state = publishGate.resolve(obligation.obligationId, PublishOutcome.CONFIRMED)
         val framedCommit = framedCommitOf(obligation, event)
+        // The group moved on before the confirmation (see [commitAndPublish]): ours competes.
+        if (!isCurrentState(obligation.groupId, obligation.pendingState)) {
+            val offered =
+                if (framedCommit != null) {
+                    inboundProcessor.offerOwnCommit(obligation.groupId, framedCommit, obligation.priorState.groupContext.epoch, obligation.pendingState)
+                } else if (event is GroupEvent) {
+                    inboundProcessor.processGroupEvent(event)
+                } else {
+                    null
+                }
+            if (offered is GroupEventResult.CommitPending) startConvergenceSettler()
+            return state
+        }
         if (framedCommit != null) {
             inboundProcessor.markMessageProcessed(sha256(framedCommit).toHexKey())
             inboundProcessor.recordLocalCommit(
@@ -471,11 +508,14 @@ class MarmotManager(
      * Computes a per-group kind:445 subscription `since` from the newest
      * persisted decrypted message of each group.
      *
-     * Subscription state does not survive a restart, and neither does the
-     * application ratchet position (group state is persisted only at
-     * commits). Without a `since`, every restart re-downloads the group's
-     * full kind:445 backlog, and the rewound ratchet re-decrypts old
-     * application messages as if they had just arrived.
+     * Subscription state does not survive a restart, and the receive ratchets
+     * are written only every few messages
+     * ([MlsGroupManager.flushReceivedState]). Without a `since`, every restart
+     * re-downloads the group's full kind:445 backlog, and a rewound ratchet
+     * re-decrypts recent application messages as if they had just arrived.
+     *
+     * The newest time comes from [MarmotMessageStore.newestMessageCreatedAt],
+     * which a store answers without reading its whole log.
      *
      * [GROUP_EVENT_REFETCH_OVERLAP_SEC] of overlap is kept so late or
      * out-of-order events published shortly before the newest stored message
@@ -487,13 +527,12 @@ class MarmotManager(
         val result = mutableMapOf<HexKey, Long>()
         for (groupId in groupIds) {
             val newestStored =
-                loadStoredMessages(groupId).maxOfOrNull { json ->
-                    try {
-                        Event.fromJson(json).createdAt
-                    } catch (e: Exception) {
-                        Log.w("MarmotManager", "Unparseable persisted message for $groupId: ${e.message}", e)
-                        0L
-                    }
+                try {
+                    messageStore.newestMessageCreatedAt(groupId)
+                } catch (e: Exception) {
+                    currentCoroutineContext().ensureActive()
+                    Log.w("MarmotManager", "Failed to read the newest persisted message of $groupId", e)
+                    null
                 } ?: continue
             // Clamp at wall-clock now: inner createdAt is sender-controlled,
             // and a single future-dated message must not push `since` past
@@ -525,7 +564,7 @@ class MarmotManager(
         val result = inboundProcessor.processGroupEvent(groupEvent)
 
         if (result is GroupEventResult.ApplicationMessage) {
-            Event.fromJsonOrNull(result.innerEventJson)?.let { inner ->
+            result.innerEvent?.let { inner ->
                 if (requiresSourceAuthority(inner.kind)) decideAdminAction(result.groupId, inner, result.epoch)
             }
         }
@@ -649,8 +688,46 @@ class MarmotManager(
         require(!MarmotDeviceGroupKinds.isDeviceGroupKind(innerEvent.kind) || deviceGroups?.isTrustedDeviceGroup(nostrGroupId) == true) {
             "kind ${innerEvent.kind} is sent only in this device's device group"
         }
-        return outboundProcessor.buildGroupEvent(nostrGroupId, innerEvent, expectedEpoch)
+        val outbound = outboundProcessor.buildGroupEvent(nostrGroupId, innerEvent, expectedEpoch)
+        rememberOwnGroupEvent(outbound)
+        return outbound
     }
+
+    /**
+     * Our own application message is never ours to read back: the sender's ratchet generation
+     * was spent encrypting it, so its relay echo decrypts on no epoch here. Unmarked, every echo
+     * came back as a "decrypts on no canonical epoch" failure, logged as an error and counted
+     * by [MarmotDesyncDetector] against a group that was fine, newer than the last message we
+     * decrypted, so a member who only sent could see a healthy group flagged out of sync.
+     *
+     * Marked twice: by Marmot message id, for this process ([MarmotInboundProcessor] answers
+     * [GroupEventResult.Duplicate]), and by the event's id in a bounded own-echo record
+     * ([MarmotIngestDedupStore.markOwnEcho]), so a client that runs one command per process (`amy`)
+     * skips the echo on its next sync. Not in the terminal ingest markers: one per sent message
+     * crowded out the Welcome and created-locally markers an app keeps bounded. The signed event
+     * is ours, so its id names exactly these bytes.
+     */
+    private suspend fun rememberOwnGroupEvent(outbound: OutboundGroupEvent) {
+        inboundProcessor.markMessageProcessed(outbound.marmotMessageId)
+        val id = outbound.signedEvent.id
+        terminallyIngestedMutex.withLock { addOwnEcho(id) }
+        try {
+            ingestDedupStore?.markOwnEcho(id)
+        } catch (e: Exception) {
+            currentCoroutineContext().ensureActive()
+            Log.w("MarmotManager", "could not persist the own-echo marker for ${id.take(8)}", e)
+        }
+    }
+
+    /** Under [terminallyIngestedMutex]. */
+    private fun addOwnEcho(eventId: HexKey) {
+        ownEchoes.remove(eventId)
+        ownEchoes.add(eventId)
+        while (ownEchoes.size > MarmotIngestDedupStore.OWN_ECHO_LIMIT) ownEchoes.remove(ownEchoes.first())
+    }
+
+    /** Whether [eventId] is a kind:445 this device sent: see [rememberOwnGroupEvent]. */
+    suspend fun isOwnEcho(eventId: HexKey): Boolean = terminallyIngestedMutex.withLock { eventId in ownEchoes }
 
     /**
      * Build a kind:9 chat-message GroupEvent from plain text. The inner
@@ -1533,6 +1610,24 @@ class MarmotManager(
             if (confirmed) PublishOutcome.CONFIRMED else PublishOutcome.UNKNOWN,
         )
 
+        // Confirmed, but the group moved on while it was in flight (a peer's
+        // Commits applied from live ingest): ours did not become canonical and
+        // is a competitor of theirs. Offered to convergence as any peer's
+        // would be, it is selected or not on the same rule, instead of
+        // rewinding the group off the branch the others are on.
+        if (confirmed && !isCurrentState(nostrGroupId, staged.pendingState)) {
+            Log.d("MarmotManager") { "commitAndPublish($nostrGroupId): the group moved on during the publish; our commit goes to convergence" }
+            val offered =
+                inboundProcessor.offerOwnCommit(
+                    groupId = nostrGroupId,
+                    framedCommitBytes = staged.result.framedCommitBytes,
+                    sourceEpoch = staged.priorState.groupContext.epoch,
+                    resultingState = staged.pendingState,
+                )
+            if (offered is GroupEventResult.CommitPending) startConvergenceSettler()
+            return CommitPublication(event, staged.result, obligation.obligationId, confirmed)
+        }
+
         if (confirmed) {
             // The published kind:445 echoes back from the relay — without this
             // dedup our own inbound pipeline would try to re-apply a commit
@@ -1563,6 +1658,16 @@ class MarmotManager(
 
         return CommitPublication(event, staged.result, obligation.obligationId, confirmed)
     }
+
+    private fun isCurrentState(
+        nostrGroupId: HexKey,
+        state: MlsGroupState,
+    ): Boolean =
+        groupManager
+            .snapshot(nostrGroupId)
+            ?.groupContext
+            ?.toTlsBytes()
+            ?.contentEquals(state.groupContext.toTlsBytes()) == true
 
     /**
      * Carry open convergence passes to their cutoff and resolve them.
@@ -1871,10 +1976,17 @@ class MarmotManager(
          * current one.
          */
         epoch: Long? = null,
+    ) = persistDecryptedMessage(nostrGroupId, innerEventJson, Event.fromJsonOrNull(innerEventJson), epoch)
+
+    /** [persistDecryptedMessage] for a caller that already parsed [innerEventJson] into [parsed]. */
+    internal suspend fun persistDecryptedMessage(
+        nostrGroupId: HexKey,
+        innerEventJson: String,
+        parsed: Event?,
+        epoch: Long?,
     ) {
         try {
             messageStore?.appendMessage(nostrGroupId, innerEventJson)
-            val parsed = Event.fromJsonOrNull(innerEventJson)
             if (epoch != null && parsed != null) {
                 messageStore?.recordEpoch(nostrGroupId, parsed.id, epoch)
                 rememberMessageEpoch(nostrGroupId, parsed.id, epoch)
@@ -2120,6 +2232,32 @@ class MarmotManager(
         return if (isAuthorizedAdminAction(nostrGroupId, event)) reportIds else emptyList()
     }
 
+    /** The authority verdict this device holds for [eventId], a kind 4891 or 1985, or null when it decided none. */
+    internal suspend fun moderationVerdict(
+        nostrGroupId: HexKey,
+        eventId: HexKey,
+    ): Boolean? = moderationMutex.withLock { moderationVerdictsUnlocked(nostrGroupId)[eventId] }
+
+    /**
+     * An imported history's `grant` for [eventId] (`account-sync.md` "History bundles"): the recorded
+     * verdict of its author's authority, kept like one this device decided. A verdict already held wins.
+     */
+    internal suspend fun recordImportedModerationVerdict(
+        nostrGroupId: HexKey,
+        eventId: HexKey,
+        granted: Boolean,
+    ) = moderationMutex.withLock {
+        val verdicts = moderationVerdictsUnlocked(nostrGroupId)
+        if (verdicts.containsKey(eventId)) return@withLock
+        verdicts[eventId] = granted
+        try {
+            messageStore?.recordModerationVerdict(nostrGroupId, eventId, granted)
+        } catch (e: Exception) {
+            currentCoroutineContext().ensureActive()
+            Log.w("MarmotManager", "Failed to persist the imported verdict of $eventId for $nostrGroupId", e)
+        }
+    }
+
     private suspend fun isAuthorizedAdminAction(
         nostrGroupId: HexKey,
         event: Event,
@@ -2321,6 +2459,27 @@ class MarmotManager(
             }
         }
 
+    /** [epoch]'s media secret of [nostrGroupId]: captured, or derived now while the epoch is held. */
+    internal suspend fun mediaSecretAtEpoch(
+        nostrGroupId: HexKey,
+        epoch: Long,
+    ): ByteArray? = mediaKeyMutex.withLock { mediaSecretAtUnlocked(nostrGroupId, epoch) }
+
+    /**
+     * The cipher that opens [reference], an attachment of [innerEventId] in [nostrGroupId]: under the
+     * media secret of the epoch that carried it ([mediaSecretForMessage]), or, for a message a
+     * linked sibling's history brought from an epoch this device never held, under the `file_key`
+     * that history gave for it. Null when neither is at hand.
+     */
+    suspend fun mediaCipherForMessage(
+        nostrGroupId: HexKey,
+        innerEventId: HexKey,
+        reference: EncryptedMediaReferenceV2,
+    ): EncryptedMediaV2Cipher? {
+        mediaSecretForMessage(nostrGroupId, innerEventId)?.let { return EncryptedMediaV2Cipher(it, reference) }
+        return deviceGroups?.importedFileKey(nostrGroupId, reference.ciphertextSha256.toHexKey())?.let { EncryptedMediaV2Cipher.withFileKey(it, reference) }
+    }
+
     /** Inner event id → delivering MLS epoch, for whatever the store kept. */
     suspend fun storedEpochs(nostrGroupId: HexKey): Map<String, Long> =
         try {
@@ -2385,7 +2544,9 @@ class MarmotManager(
         val seconds = retentionForEpoch(nostrGroupId, sourceEpoch)
         if (seconds <= 0L) return
         try {
-            messageStore?.recordExpiry(nostrGroupId, innerEvent.id, innerEvent.createdAt + seconds)
+            val expiresAt = innerEvent.createdAt + seconds
+            messageStore?.recordExpiry(nostrGroupId, innerEvent.id, expiresAt)
+            nextExpiryLock.withLock { nextExpiry[nostrGroupId]?.let { nextExpiry[nostrGroupId] = minOf(it, expiresAt) } }
         } catch (e: Exception) {
             Log.w("MarmotManager", "Failed to pin expiry for ${innerEvent.id} in $nostrGroupId", e)
         }
@@ -2462,7 +2623,10 @@ class MarmotManager(
     ): Set<HexKey> {
         val store = messageStore ?: return emptySet()
         return try {
-            val expired = store.loadExpiries(nostrGroupId).filterValues { it <= nowSecs }.keys
+            val expiries = store.loadExpiries(nostrGroupId)
+            val expired = expiries.filterValues { it <= nowSecs }.keys
+            val next = expiries.values.filter { it > nowSecs }.minOrNull() ?: Long.MAX_VALUE
+            nextExpiryLock.withLock { nextExpiry[nostrGroupId] = next }
             if (expired.isEmpty()) return emptySet()
             store.removeMessages(nostrGroupId, expired)
             Log.d("MarmotManager") { "expired ${expired.size} message(s) in ${nostrGroupId.take(8)}…" }
@@ -2472,6 +2636,27 @@ class MarmotManager(
             Log.w("MarmotManager", "Failed to expire messages for $nostrGroupId", e)
             emptySet()
         }
+    }
+
+    /**
+     * Per group, the earliest expiry still pending as the last prune and the pins since left it.
+     * Absent means not known yet; [Long.MAX_VALUE] means none.
+     */
+    private val nextExpiry = HashMap<HexKey, Long>()
+    private val nextExpiryLock = PlatformLock()
+
+    /**
+     * [pruneExpiredMessages], skipped while the group's earliest pending expiry is still ahead. The
+     * ingest path calls it for every message, and a full prune reads the group's whole expiry
+     * table, which made a catch-up batch quadratic.
+     */
+    internal suspend fun pruneExpiredMessagesIfDue(
+        nostrGroupId: HexKey,
+        nowSecs: Long = TimeUtils.now(),
+    ) {
+        val next = nextExpiryLock.withLock { nextExpiry[nostrGroupId] }
+        if (next != null && next > nowSecs) return
+        pruneExpiredMessages(nostrGroupId, nowSecs)
     }
 
     /**
