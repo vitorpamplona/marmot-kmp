@@ -2003,6 +2003,24 @@ class MarmotDeviceGroupManager internal constructor(
     @Volatile
     var historyBlobUploader: (suspend (ciphertext: ByteArray) -> List<String>?)? = null
 
+    /**
+     * Runs before the events of a history bundle that this device does not hold yet are stored,
+     * with the chat's Nostr group id and those events, so the app can write down what it needs
+     * about them durably first (for instance that they count as read: imported history is old
+     * news, and a process that dies between the store and [drainImportedHistory] would otherwise
+     * restore it as unread). Called only when the bundle brings at least one such event, once per
+     * bundle, possibly more than once for the same events when an earlier call threw; nothing of the
+     * bundle (events, moderation verdicts, attachment keys) is stored yet when it runs.
+     *
+     * A throw other than a cancellation refuses the bundle: nothing of it is stored and nothing is
+     * reported to [drainImportedHistory], and its delivery stays kept, like one whose blob could not
+     * be fetched yet, to be tried again by the next [importKeptHistory] pass (the app's timer, a
+     * [refresh], a new delivery) until it expires a week after it was read. A cancellation
+     * propagates. It runs under this manager's lock: it must not call back into this manager.
+     */
+    @Volatile
+    var beforeHistoryImport: (suspend (nostrGroupId: HexKey, events: List<Event>) -> Unit)? = null
+
     /** The histories imported since the last call, for the app to show. */
     fun drainImportedHistory(): List<ImportedHistory> = imported.toList().also { imported.clear() }
 
@@ -2205,11 +2223,16 @@ class MarmotDeviceGroupManager internal constructor(
                 }
                 continue
             }
+            val plaintext = HistoryBundles.decrypt(ciphertext, kept.key)
+            val bundle = plaintext?.let { HistoryBundles.parse(it.decodeToString(), kept.delivery.chat, now) }
+            if (bundle != null && !importBundle(nostrId, bundle)) {
+                // The app's hook refused it: kept, with its ciphertext, for a later pass.
+                kept.ciphertext = ciphertext
+                continue
+            }
+            // Imported, or a bundle that does not open or parse, which no later pass would open.
             keptDeliveries.remove(kept)
             changed = true
-            val plaintext = HistoryBundles.decrypt(ciphertext, kept.key) ?: continue
-            val bundle = HistoryBundles.parse(plaintext.decodeToString(), kept.delivery.chat, now) ?: continue
-            importBundle(nostrId, bundle)
         }
         if (changed) saveWork()
     }
@@ -2233,16 +2256,29 @@ class MarmotDeviceGroupManager internal constructor(
      * Adds the events of [bundle] this device does not hold yet; never touches the ones it holds. A
      * review label's or admin removal's `grant` becomes its recorded authority before the event is
      * stored, and the attachment keys are kept for files of epochs this device never held.
+     *
+     * [beforeHistoryImport] runs first, with the fresh events. False when it threw: nothing was
+     * stored, and the caller keeps the delivery. True otherwise, including a bundle with nothing new.
      */
     private suspend fun importBundle(
         nostrGroupId: HexKey,
         bundle: HistoryBundles.Parsed,
-    ) {
-        val m = manager ?: return
+    ): Boolean {
+        val m = manager ?: return true
         val held = HashSet<HexKey>(m.storedEpochs(nostrGroupId).keys)
         m.loadStoredMessages(nostrGroupId).forEach { json -> Event.fromJsonOrNull(json)?.let { held.add(it.id) } }
         val fresh = bundle.events.filter { held.add(it.event.id) }
-        if (fresh.isEmpty()) return
+        if (fresh.isEmpty()) return true
+        val hook = beforeHistoryImport
+        if (hook != null) {
+            try {
+                hook(nostrGroupId, fresh.map { it.event })
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                Log.w(TAG, "the app refused ${fresh.size} imported event(s) of ${nostrGroupId.take(8)}; the delivery is kept", e)
+                return false
+            }
+        }
         var keysAdded = false
         fresh.forEach {
             it.grant?.let { granted -> m.recordImportedModerationVerdict(nostrGroupId, it.event.id, granted) }
@@ -2258,6 +2294,7 @@ class MarmotDeviceGroupManager internal constructor(
         }
         imported.add(ImportedHistory(nostrGroupId, fresh.map { it.event }, fresh.associate { it.event.id to it.epoch }))
         Log.d(TAG) { "imported ${fresh.size} event(s) of history into ${nostrGroupId.take(8)}" }
+        return true
     }
 
     // ---- sign-ins ------------------------------------------------------------------------------------
