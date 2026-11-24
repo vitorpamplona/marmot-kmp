@@ -24,6 +24,7 @@ import com.vitorpamplona.marmot.appComponents.GroupProfileV1
 import com.vitorpamplona.marmot.groups.MlsGroupStateStore
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.core.HexKey
+import com.vitorpamplona.quartz.nip01Core.core.toHexKey
 import com.vitorpamplona.quartz.nip01Core.crypto.KeyPair
 import com.vitorpamplona.quartz.nip01Core.relay.normalizer.NormalizedRelayUrl
 import com.vitorpamplona.quartz.nip01Core.relay.normalizer.RelayUrlNormalizer
@@ -44,8 +45,10 @@ import kotlin.test.assertTrue
 class MarmotConvergenceRestartTest {
     private val nostrGroupId = "e".repeat(64)
 
-    private class Member {
-        val signer = NostrSignerInternal(KeyPair())
+    private class Member(
+        keyPair: KeyPair = KeyPair(),
+    ) {
+        val signer = NostrSignerInternal(keyPair)
         val store: MlsGroupStateStore = SnapshotStateStore()
         val messages = SnapshotMessageStore()
         val bundles = SnapshotBundleStore()
@@ -76,10 +79,20 @@ class MarmotConvergenceRestartTest {
         }
     }
 
-    private suspend fun threeMembers(): List<Member> {
+    /** Two accounts, the first lower: it wins the committer tie-break between equal branches. */
+    private fun lowerThenHigher(): Pair<KeyPair, KeyPair> {
+        val a = KeyPair()
+        val b = KeyPair()
+        return if (a.pubKey.toHexKey() < b.pubKey.toHexKey()) a to b else b to a
+    }
+
+    private suspend fun threeMembers(
+        bobKey: KeyPair = KeyPair(),
+        carolKey: KeyPair = KeyPair(),
+    ): List<Member> {
         val alice = Member()
-        val bob = Member()
-        val carol = Member()
+        val bob = Member(bobKey)
+        val carol = Member(carolKey)
         alice.manager.createCurrentProfileGroup(nostrGroupId, listOf("wss://relay.invalid"), GroupProfileV1("fork", ""))
         for (m in listOf(bob, carol)) {
             val kp = m.manager.generateKeyPackageEvent(relays = emptyList())
@@ -300,5 +313,130 @@ class MarmotConvergenceRestartTest {
             assertContentEquals(after.groupContext.toTlsBytes(), alice.context())
             assertEquals(true, groups.installStateIfAt(nostrGroupId, after, before))
             assertContentEquals(before.groupContext.toTlsBytes(), alice.context())
+        }
+
+    /**
+     * A peer's Commit applied while ours was in flight, and ours wins the tie-break: we must land
+     * on our own branch as every peer does. A committer cannot replay its own Commit, so offered
+     * like a peer's it produced no state, dropped out of our selection, and we stayed on the
+     * peer's branch while the others moved to ours.
+     */
+    @Test
+    fun ourCommitThatWinsAfterAPeerCommitWasAppliedIsInstalled() =
+        runBlocking {
+            val (lower, higher) = lowerThenHigher()
+            val (alice, bob, carol) = threeMembers(bobKey = lower, carolKey = higher)
+            val c1 = carol.manager.selfUpdate(nostrGroupId).signedEvent
+            bob.duringPublish = { bob.manager.ingest(c1) }
+            val b1 = bob.manager.selfUpdate(nostrGroupId).signedEvent
+            carol.manager.ingest(b1)
+            for (e in listOf(c1, b1)) alice.manager.ingest(e)
+            for (m in listOf(alice, bob, carol)) m.manager.driveConvergenceToSettlement(pollMs = 20)
+
+            assertContentEquals(alice.context(), carol.context(), "Carol must land on Alice's branch")
+            assertContentEquals(alice.context(), bob.context(), "Bob must land on his own winning branch")
+            // Its echo changes nothing and opens no pass.
+            val before = bob.context()
+            bob.manager.ingest(b1)
+            assertTrue(
+                bob.manager.inboundProcessor
+                    .openConvergencePasses()
+                    .isEmpty(),
+            )
+            assertContentEquals(before, bob.context())
+        }
+
+    @Test
+    fun ourCommitThatLosesAfterAPeerCommitWasAppliedLeavesUsOnThePeersBranch() =
+        runBlocking {
+            val (lower, higher) = lowerThenHigher()
+            val (alice, bob, carol) = threeMembers(bobKey = higher, carolKey = lower)
+            val c1 = carol.manager.selfUpdate(nostrGroupId).signedEvent
+            bob.duringPublish = { bob.manager.ingest(c1) }
+            val b1 = bob.manager.selfUpdate(nostrGroupId).signedEvent
+            carol.manager.ingest(b1)
+            for (e in listOf(c1, b1)) alice.manager.ingest(e)
+            for (m in listOf(alice, bob, carol)) m.manager.driveConvergenceToSettlement(pollMs = 20)
+
+            assertContentEquals(carol.context(), alice.context(), "Alice must land on Carol's winning branch")
+            assertContentEquals(carol.context(), bob.context(), "Bob must land on Carol's winning branch")
+        }
+
+    /** The same, when our winning Commit is confirmed by a later retry of an unresolved publish. */
+    @Test
+    fun aRetriedConfirmationOfAWinningCommitIsInstalled() =
+        runBlocking {
+            val (lower, higher) = lowerThenHigher()
+            val (alice, bob, carol) = threeMembers(bobKey = lower, carolKey = higher)
+            val c1 = carol.manager.selfUpdate(nostrGroupId).signedEvent
+            bob.accepting = false
+            val b1 = bob.manager.selfUpdate(nostrGroupId).signedEvent
+            bob.manager.ingest(c1)
+            bob.accepting = true
+            bob.manager.retryPendingPublishObligations()
+            carol.manager.ingest(b1)
+            for (e in listOf(c1, b1)) alice.manager.ingest(e)
+            for (m in listOf(alice, bob, carol)) m.manager.driveConvergenceToSettlement(pollMs = 20)
+
+            assertContentEquals(alice.context(), carol.context())
+            assertContentEquals(alice.context(), bob.context(), "Bob must land on his own winning branch")
+        }
+
+    /**
+     * A losing Commit fetched again after the pass settled, in a later process: the contest is
+     * decided, so it opens no pass and moves nothing (a catch-up that refetches a forked group's
+     * batch used to reopen one on every run).
+     */
+    @Test
+    fun aSettledLosingCommitRedeliveredAfterARestartOpensNoPass() =
+        runBlocking {
+            val (alice, bob, carol) = threeMembers()
+            val c1 = carol.manager.selfUpdate(nostrGroupId).signedEvent
+            val c2 = carol.manager.selfUpdate(nostrGroupId).signedEvent
+            val b1 = bob.manager.selfUpdate(nostrGroupId).signedEvent
+            for (e in listOf(c1, c2, b1)) alice.manager.ingest(e)
+            alice.manager.driveConvergenceToSettlement(pollMs = 20)
+            val settled = alice.context()
+
+            alice.restart()
+            for (e in listOf(c1, c2, b1)) alice.manager.ingest(e)
+
+            assertTrue(
+                alice.manager.inboundProcessor
+                    .openConvergencePasses()
+                    .isEmpty(),
+                "a decided contest opens no pass",
+            )
+            assertContentEquals(settled, alice.context())
+        }
+
+    /** The same when the losing branch was the one we were on: the pass rewound us off it. */
+    @Test
+    fun aRewoundBranchRedeliveredAfterARestartOpensNoPass() =
+        runBlocking {
+            val (alice, bob, carol) = threeMembers()
+            val c1 = carol.manager.selfUpdate(nostrGroupId).signedEvent
+            val c2 = carol.manager.selfUpdate(nostrGroupId).signedEvent
+            val b1 = bob.manager.selfUpdate(nostrGroupId).signedEvent
+            for (e in listOf(b1, c1, c2)) alice.manager.ingest(e)
+            alice.manager.driveConvergenceToSettlement(pollMs = 20)
+            assertEquals(
+                true,
+                alice.manager.inboundProcessor
+                    .lastContestedResolution(nostrGroupId)
+                    ?.rewound,
+            )
+            val settled = alice.context()
+
+            alice.restart()
+            for (e in listOf(b1, c1, c2)) alice.manager.ingest(e)
+
+            assertTrue(
+                alice.manager.inboundProcessor
+                    .openConvergencePasses()
+                    .isEmpty(),
+                "a decided contest opens no pass",
+            )
+            assertContentEquals(settled, alice.context())
         }
 }

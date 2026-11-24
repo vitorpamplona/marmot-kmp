@@ -163,7 +163,37 @@ class MarmotConvergenceEngine(
 
         var pass: ConvergencePass? = null
         var lifecycle: GroupLifecycleState = GroupLifecycleState.STABLE
+
+        /**
+         * The state each of OUR divergent Commits produces, by commit id: the pending state it was
+         * staged with. A committer cannot replay its own Commit (MLS encrypts the UpdatePath to
+         * everyone but the committer), so without it our branch had no state, dropped out of
+         * selection, and we stayed on the peer's branch while the others picked ours.
+         */
+        val ownResults = HashMap<HexKey, MlsGroupState>()
+
+        /**
+         * Commits a settled pass ruled out, oldest first, persisted with the window. A redelivery
+         * (a catch-up whose cursor did not move, another relay) still authenticates against the
+         * parent we retain, and used to reopen a pass for a contest already decided.
+         */
+        val settledLosers = LinkedHashSet<HexKey>()
+
+        /** The encoding of each retained state already written, so a write encodes only new ones. */
+        val encodedStates = HashMap<String, Pair<MlsGroupState, ByteArray>>()
     }
+
+    /** One window write, taken under [mutex] and written after it is released. */
+    private class WindowWrite(
+        val groupId: HexKey,
+        val revision: Long,
+        val bytes: ByteArray,
+    )
+
+    /** Orders window writes made outside [mutex]: an older snapshot never lands after a newer one. */
+    private val writeMutex = Mutex()
+    private val writtenRevision = HashMap<HexKey, Long>()
+    private var nextRevision = 0L
 
     companion object {
         /**
@@ -180,6 +210,9 @@ class MarmotConvergenceEngine(
          * is an attack, not usage.
          */
         private const val MAX_CANDIDATE_BRANCHES = 4
+
+        /** How many settled losing Commit ids a group remembers: a few passes' worth. */
+        private const val MAX_SETTLED_LOSERS = 64
     }
 
     /**
@@ -246,6 +279,8 @@ class MarmotConvergenceEngine(
                 null
             } ?: return
         val window = RetainedConvergenceWindow.decodeOrNull(bytes, ::candidateOf) ?: return
+        // Decided contests stay decided whichever state the window ends at.
+        ctx.settledLosers.addAll(window.settledLosers)
         // The window ends at the state it was written with; a newer state saved
         // without it (a crash between the two writes) keeps only the tip.
         val at = window.states.indexOfLast { sameState(it, current) }
@@ -256,21 +291,40 @@ class MarmotConvergenceEngine(
         trim(ctx)
     }
 
-    /** Write the retained window, so a restart resolves a fork as this process would have. */
-    private suspend fun persistWindow(
+    /**
+     * Snapshot the retained window for [writeWindow], under [mutex]. Only states not written
+     * before are encoded: the window moves one state per Commit, and re-encoding up to
+     * `max_rewind_commits + 1` full group states on each one, under the one lock every group's
+     * convergence shares, was the cost of keeping it durable.
+     */
+    private fun windowSnapshot(
         groupId: HexKey,
         ctx: GroupContext,
-    ) {
-        try {
-            groupManager.saveConvergenceWindow(
-                groupId,
-                RetainedConvergenceWindow(ctx.retained.toList(), ctx.canonicalCommits.toList()).encode(),
-            )
-        } catch (e: Exception) {
-            currentCoroutineContext().ensureActive()
-            Log.w("MarmotConvergence", "could not save the convergence window of $groupId", e)
-        }
+    ): WindowWrite {
+        val written = HashMap<String, Pair<MlsGroupState, ByteArray>>()
+        val bytes =
+            RetainedConvergenceWindow(ctx.retained.toList(), ctx.canonicalCommits.toList(), ctx.settledLosers.toList()).encode { state ->
+                val id = stateEngine.stateId(state)
+                val cached = ctx.encodedStates[id]?.takeIf { it.first === state }
+                (cached ?: (state to state.encodeTls())).also { written[id] = it }.second
+            }
+        ctx.encodedStates.clear()
+        ctx.encodedStates.putAll(written)
+        return WindowWrite(groupId, ++nextRevision, bytes)
     }
+
+    /** Write a window snapshot, so a restart resolves a fork as this process would have. Outside [mutex]. */
+    private suspend fun writeWindow(write: WindowWrite) =
+        writeMutex.withLock {
+            if ((writtenRevision[write.groupId] ?: -1L) >= write.revision) return@withLock
+            try {
+                groupManager.saveConvergenceWindow(write.groupId, write.bytes)
+                writtenRevision[write.groupId] = write.revision
+            } catch (e: Exception) {
+                currentCoroutineContext().ensureActive()
+                Log.w("MarmotConvergence", "could not save the convergence window of ${write.groupId}", e)
+            }
+        }
 
     /**
      * Record that [commitBytes] was applied to canonical state, moving the
@@ -285,19 +339,23 @@ class MarmotConvergenceEngine(
         commitBytes: ByteArray,
         sourceEpoch: Long,
         preState: MlsGroupState?,
-    ) = mutex.withLock {
-        val ctx = contexts.getOrPut(groupId) { GroupContext() }
-        if (preState != null && ctx.retained.none { sameState(it, preState) }) {
-            ctx.retained.addLast(preState)
-        }
-        val post = groupManager.snapshot(groupId)
-        if (post != null && ctx.retained.none { sameState(it, post) }) {
-            ctx.retained.addLast(post)
-        }
-        ctx.canonicalCommits.addLast(candidateOf(commitBytes, sourceEpoch))
-        trim(ctx)
-        persistWindow(groupId, ctx)
-        admitDisbandForSelection(groupId, ctx)
+    ) {
+        val write =
+            mutex.withLock {
+                val ctx = contexts.getOrPut(groupId) { GroupContext() }
+                if (preState != null && ctx.retained.none { sameState(it, preState) }) {
+                    ctx.retained.addLast(preState)
+                }
+                val post = groupManager.snapshot(groupId)
+                if (post != null && ctx.retained.none { sameState(it, post) }) {
+                    ctx.retained.addLast(post)
+                }
+                ctx.canonicalCommits.addLast(candidateOf(commitBytes, sourceEpoch))
+                trim(ctx)
+                admitDisbandForSelection(groupId, ctx)
+                windowSnapshot(groupId, ctx)
+            }
+        writeWindow(write)
     }
 
     /**
@@ -414,10 +472,35 @@ class MarmotConvergenceEngine(
         groupId: HexKey,
         commitBytes: ByteArray,
         sourceEpoch: Long,
+    ): ConvergenceAdmission = offer(groupId, commitBytes, sourceEpoch, ownResult = null)
+
+    /**
+     * Offer a Commit WE authored that did not become canonical: the group moved on while its
+     * publish was in flight, so it competes with what was applied meanwhile.
+     *
+     * [resultingState] is the pending state it was staged with. The committer cannot replay its
+     * own Commit from the parent (the UpdatePath is encrypted to everyone else), so this is the
+     * only way our branch gets a state to be scored, and installed, by: without it our branch was
+     * dropped here while every peer could still select it, and the group split for good.
+     */
+    suspend fun offerOwnDivergent(
+        groupId: HexKey,
+        commitBytes: ByteArray,
+        sourceEpoch: Long,
+        resultingState: MlsGroupState,
+    ): ConvergenceAdmission = offer(groupId, commitBytes, sourceEpoch, resultingState)
+
+    private suspend fun offer(
+        groupId: HexKey,
+        commitBytes: ByteArray,
+        sourceEpoch: Long,
+        ownResult: MlsGroupState?,
     ): ConvergenceAdmission =
         mutex.withLock {
             val ctx = contexts.getOrPut(groupId) { GroupContext() }
             val candidate = candidateOf(commitBytes, sourceEpoch)
+            // A contest already settled against it: redelivered, it is the same input again.
+            if (candidate.id in ctx.settledLosers) return@withLock ConvergenceAdmission.DUPLICATE
             if (ctx.divergent.containsKey(candidate.id)) {
                 ctx.pass?.admit(candidate, InputRelevance.ORDINARY)
                 return@withLock ConvergenceAdmission.DUPLICATE
@@ -439,6 +522,7 @@ class MarmotConvergenceEngine(
             val hasParent = parents.any { stateEngine.authenticatesAgainst(it, commitBytes) }
             if (!hasParent) return@withLock ConvergenceAdmission.NOT_A_CANDIDATE
 
+            if (ownResult != null) ctx.ownResults[candidate.id] = ownResult
             ctx.divergent[candidate.id] = candidate
             // Replay it now, not only at resolution. The resulting state is
             // what an app message on this branch decrypts against, and
@@ -447,7 +531,7 @@ class MarmotConvergenceEngine(
             for (parent in parents) {
                 if (!stateEngine.authenticatesAgainst(parent, commitBytes)) continue
                 if (!stateEngine.isAuthorized(parent, commitBytes)) continue
-                val child = stateEngine.replay(parent, commitBytes) ?: continue
+                val child = ctx.ownResults[candidate.id] ?: stateEngine.replay(parent, commitBytes) ?: continue
                 if (!stateEngine.resultingStateIsValid(child)) continue
                 ctx.candidateStates[stateEngine.stateId(child)] = child
                 trimCandidates(ctx)
@@ -648,44 +732,56 @@ class MarmotConvergenceEngine(
             }
         }
 
-        return mutex.withLock {
-            val ctx = contexts[groupId] ?: return@withLock null
-            if (rewound) {
-                adoptBranch(ctx, graph, selectedTipId, inputs.baseId)
-                persistWindow(groupId, ctx)
-            }
-            // Keep the states of branches that LOST but stay eligible: losing
-            // one pass is not permanent ineligibility, and a payload that
-            // arrives afterwards still needs somewhere to decrypt. Everything
-            // now on the canonical path is dropped from the candidate set — it
-            // is reachable as retained state.
-            val canonical = ctx.retained.map { stateEngine.stateId(it) }.toSet()
-            ctx.candidateStates.keys.retainAll { it !in canonical }
-            graph.branches
-                .mapNotNull { graph.branchTips[it.tipDigestHex] }
-                .forEach { tipId ->
-                    var cursor: String? = tipId
-                    while (cursor != null && cursor !in canonical) {
-                        graph.statesById[cursor]?.let { ctx.candidateStates[cursor] = it }
-                        cursor = graph.parentOf[cursor]
-                    }
+        var write: WindowWrite? = null
+        val resolution =
+            mutex.withLock {
+                val ctx = contexts[groupId] ?: return@withLock null
+                if (rewound) {
+                    adoptBranch(ctx, graph, selectedTipId, inputs.baseId)
                 }
-            trimCandidates(ctx)
-            ctx.divergent.clear()
-            ctx.pass = null
-            endRecovery(ctx)
-            terminalizeIfDisbanded(groupId, ctx)
-            val epoch = groupManager.getGroup(groupId)?.epoch ?: inputs.tipEpoch
-            ConvergenceResolution(
-                groupId = groupId,
-                status = ConvergenceStatus.SETTLED,
-                lifecycle = ctx.lifecycle,
-                canonicalEpoch = epoch,
-                rewound = rewound,
-                outcomes = graph.outcomes,
-                decisiveRule = decisiveRule,
-            ).also { ctx.lastContested = it }
-        }
+                // Every Commit this pass weighed that is not on the canonical path now lost it.
+                val canonicalIds = ctx.canonicalCommits.mapTo(HashSet()) { it.id }
+                var losersChanged = false
+                for (commit in inputs.commits) {
+                    if (commit.id !in canonicalIds && ctx.settledLosers.add(commit.id)) losersChanged = true
+                }
+                while (ctx.settledLosers.size > MAX_SETTLED_LOSERS) ctx.settledLosers.remove(ctx.settledLosers.first())
+                if (rewound || losersChanged) write = windowSnapshot(groupId, ctx)
+                ctx.ownResults.clear()
+                // Keep the states of branches that LOST but stay eligible: losing
+                // one pass is not permanent ineligibility, and a payload that
+                // arrives afterwards still needs somewhere to decrypt. Everything
+                // now on the canonical path is dropped from the candidate set — it
+                // is reachable as retained state.
+                val canonical = ctx.retained.map { stateEngine.stateId(it) }.toSet()
+                ctx.candidateStates.keys.retainAll { it !in canonical }
+                graph.branches
+                    .mapNotNull { graph.branchTips[it.tipDigestHex] }
+                    .forEach { tipId ->
+                        var cursor: String? = tipId
+                        while (cursor != null && cursor !in canonical) {
+                            graph.statesById[cursor]?.let { ctx.candidateStates[cursor] = it }
+                            cursor = graph.parentOf[cursor]
+                        }
+                    }
+                trimCandidates(ctx)
+                ctx.divergent.clear()
+                ctx.pass = null
+                endRecovery(ctx)
+                terminalizeIfDisbanded(groupId, ctx)
+                val epoch = groupManager.getGroup(groupId)?.epoch ?: inputs.tipEpoch
+                ConvergenceResolution(
+                    groupId = groupId,
+                    status = ConvergenceStatus.SETTLED,
+                    lifecycle = ctx.lifecycle,
+                    canonicalEpoch = epoch,
+                    rewound = rewound,
+                    outcomes = graph.outcomes,
+                    decisiveRule = decisiveRule,
+                ).also { ctx.lastContested = it }
+            }
+        write?.let { writeWindow(it) }
+        return resolution
     }
 
     /**
@@ -800,7 +896,9 @@ class MarmotConvergenceEngine(
             canonicalSuffix
                 .mapNotNull { commit ->
                     retained.lastOrNull { stateEngine.epoch(it) == commit.sourceEpoch + 1 }?.let { commit.id to it }
-                }.toMap()
+                }.toMap() +
+                // Our own divergent Commits: their pending state, which nothing else can rebuild.
+                divergent.mapNotNull { commit -> ctx.ownResults[commit.id]?.let { commit.id to it } }
 
         return FrozenInputs(
             retained = retained,

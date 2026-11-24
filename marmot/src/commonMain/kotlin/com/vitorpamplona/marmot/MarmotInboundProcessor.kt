@@ -625,6 +625,32 @@ class MarmotInboundProcessor(
     }
 
     /**
+     * Offer a Commit WE authored and published that did not become canonical: peer Commits were
+     * applied while its publish was in flight, so it competes with them.
+     *
+     * Not through [processGroupEvent]: a committer cannot process its own UpdatePath, so replayed
+     * from its parent our Commit produced no state and our branch dropped out of selection here
+     * while every peer could still select it. [resultingState] is the pending state it was staged
+     * with, which convergence scores and, when our branch wins, installs. The Commit is also marked
+     * processed, so its relay echo reads as a duplicate.
+     */
+    suspend fun offerOwnCommit(
+        groupId: HexKey,
+        framedCommitBytes: ByteArray,
+        sourceEpoch: Long,
+        resultingState: MlsGroupState,
+    ): GroupEventResult {
+        val ingestLock = processedIdsMutex.withLock { ingestLocks.getOrPut(groupId) { Mutex() } }
+        return ingestLock.withLock {
+            markMessageProcessed(marmotMessageId(framedCommitBytes))
+            when (convergence.offerOwnDivergent(groupId, framedCommitBytes, sourceEpoch, resultingState)) {
+                ConvergenceAdmission.ADMITTED -> GroupEventResult.CommitPending(groupId, sourceEpoch, forkDetected = true)
+                ConvergenceAdmission.DUPLICATE, ConvergenceAdmission.NOT_A_CANDIDATE -> GroupEventResult.Duplicate(groupId)
+            }
+        }
+    }
+
+    /**
      * Resolve [groupId]'s open convergence pass now, without waiting for its
      * cutoff.
      *

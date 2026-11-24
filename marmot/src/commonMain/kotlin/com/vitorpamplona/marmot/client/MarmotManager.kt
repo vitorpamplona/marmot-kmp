@@ -407,12 +407,20 @@ class MarmotManager(
         event: Event,
     ): GroupLifecycleState {
         val state = publishGate.resolve(obligation.obligationId, PublishOutcome.CONFIRMED)
+        val framedCommit = framedCommitOf(obligation, event)
         // The group moved on before the confirmation (see [commitAndPublish]): ours competes.
         if (!isCurrentState(obligation.groupId, obligation.pendingState)) {
-            if (event is GroupEvent && inboundProcessor.processGroupEvent(event) is GroupEventResult.CommitPending) startConvergenceSettler()
+            val offered =
+                if (framedCommit != null) {
+                    inboundProcessor.offerOwnCommit(obligation.groupId, framedCommit, obligation.priorState.groupContext.epoch, obligation.pendingState)
+                } else if (event is GroupEvent) {
+                    inboundProcessor.processGroupEvent(event)
+                } else {
+                    null
+                }
+            if (offered is GroupEventResult.CommitPending) startConvergenceSettler()
             return state
         }
-        val framedCommit = framedCommitOf(obligation, event)
         if (framedCommit != null) {
             inboundProcessor.markMessageProcessed(sha256(framedCommit).toHexKey())
             inboundProcessor.recordLocalCommit(
@@ -1597,7 +1605,14 @@ class MarmotManager(
         // rewinding the group off the branch the others are on.
         if (confirmed && !isCurrentState(nostrGroupId, staged.pendingState)) {
             Log.d("MarmotManager") { "commitAndPublish($nostrGroupId): the group moved on during the publish; our commit goes to convergence" }
-            if (inboundProcessor.processGroupEvent(event.signedEvent) is GroupEventResult.CommitPending) startConvergenceSettler()
+            val offered =
+                inboundProcessor.offerOwnCommit(
+                    groupId = nostrGroupId,
+                    framedCommitBytes = staged.result.framedCommitBytes,
+                    sourceEpoch = staged.priorState.groupContext.epoch,
+                    resultingState = staged.pendingState,
+                )
+            if (offered is GroupEventResult.CommitPending) startConvergenceSettler()
             return CommitPublication(event, staged.result, obligation.obligationId, confirmed)
         }
 

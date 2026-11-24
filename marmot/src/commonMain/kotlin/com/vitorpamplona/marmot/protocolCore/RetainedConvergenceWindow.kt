@@ -23,6 +23,8 @@ package com.vitorpamplona.marmot.protocolCore
 import com.vitorpamplona.mls.codec.TlsReader
 import com.vitorpamplona.mls.codec.TlsWriter
 import com.vitorpamplona.mls.group.MlsGroupState
+import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
+import com.vitorpamplona.quartz.nip01Core.core.toHexKey
 
 /**
  * The part of [MarmotConvergenceEngine]'s memory that has to survive a restart: the retained
@@ -35,34 +37,49 @@ import com.vitorpamplona.mls.group.MlsGroupState
  * group stays split for good. Only canonical material is kept. Divergent Commits and witnesses
  * are input, which relays deliver again, and candidate states are rebuilt from them.
  *
+ * The settled losers are the ids of Commits a pass already ruled out. A relay or a catch-up whose
+ * cursor did not move delivers them again, and each still authenticates against the parent this
+ * window retains: without the list, every redelivery after a restart reopened a pass for a contest
+ * already decided.
+ *
  * The encoding is a persisted format, so it never changes in place: a new layout takes a new
- * [VERSION] and keeps reading this one.
+ * [VERSION] and keeps reading the older ones.
  *
  * ```text
- * uint8 version = 1
+ * uint8 version = 2  (1: the same, without settled_losers)
  * uint16 state_count;  state_count  x opaque<V> MlsGroupState
  * uint16 commit_count; commit_count x (uint64 source_epoch, opaque<V> framed_commit)
+ * uint16 loser_count;  loser_count  x opaque<V> commit_digest          (version 2 only)
  * ```
  */
 internal class RetainedConvergenceWindow(
     val states: List<MlsGroupState>,
     val commits: List<CandidateCommit>,
+    /** Commit digests (hex, [CandidateCommit.id]) that lost a settled pass, oldest first. */
+    val settledLosers: List<String> = emptyList(),
 ) {
-    fun encode(): ByteArray {
+    /**
+     * [encodeState] lets the engine reuse the bytes of a state it already wrote: the window moves
+     * by one state per Commit, so re-encoding all of them on every write was the whole cost.
+     */
+    fun encode(encodeState: (MlsGroupState) -> ByteArray = { it.encodeTls() }): ByteArray {
         val writer = TlsWriter()
         writer.putUint8(VERSION)
         writer.putUint16(states.size)
-        states.forEach { writer.putOpaqueVarInt(it.encodeTls()) }
+        states.forEach { writer.putOpaqueVarInt(encodeState(it)) }
         writer.putUint16(commits.size)
         commits.forEach {
             writer.putUint64(it.sourceEpoch)
             writer.putOpaqueVarInt(it.bytes)
         }
+        writer.putUint16(settledLosers.size)
+        settledLosers.forEach { writer.putOpaqueVarInt(it.hexToByteArray()) }
         return writer.toByteArray()
     }
 
     companion object {
-        const val VERSION = 1
+        const val VERSION = 2
+        private const val VERSION_ONE = 1
 
         /** Null for bytes this version cannot read: the caller starts over from its tip. */
         fun decodeOrNull(
@@ -71,7 +88,8 @@ internal class RetainedConvergenceWindow(
         ): RetainedConvergenceWindow? =
             try {
                 val reader = TlsReader(bytes)
-                if (reader.readUint8() != VERSION) {
+                val version = reader.readUint8()
+                if (version != VERSION && version != VERSION_ONE) {
                     null
                 } else {
                     val states = (0 until reader.readUint16()).map { MlsGroupState.decodeTls(reader.readOpaqueVarInt()) }
@@ -80,7 +98,13 @@ internal class RetainedConvergenceWindow(
                             val epoch = reader.readUint64()
                             commitOf(reader.readOpaqueVarInt(), epoch)
                         }
-                    if (reader.remaining != 0) null else RetainedConvergenceWindow(states, commits)
+                    val losers =
+                        if (version == VERSION_ONE) {
+                            emptyList()
+                        } else {
+                            (0 until reader.readUint16()).map { reader.readOpaqueVarInt().toHexKey() }
+                        }
+                    if (reader.remaining != 0) null else RetainedConvergenceWindow(states, commits, losers)
                 }
             } catch (_: Exception) {
                 null

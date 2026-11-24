@@ -34,21 +34,33 @@ class RetainedConvergenceWindowTest {
     ) = CandidateCommit(bytes.joinToString("") { it.toString() }, bytes, sourceEpoch)
 
     @Test
-    fun versionOneLayoutIsPinned() {
-        val window = RetainedConvergenceWindow(emptyList(), listOf(commit(byteArrayOf(7, 8), 3)))
-        val expected = byteArrayOf(1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 3, 2, 7, 8)
-        assertContentEquals(expected, window.encode())
-
-        val decoded = assertNotNull(RetainedConvergenceWindow.decodeOrNull(expected, ::commit))
+    fun versionOneLayoutStillReads() {
+        // What 3.3.0 wrote: no settled losers.
+        val v1 = byteArrayOf(1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 3, 2, 7, 8)
+        val decoded = assertNotNull(RetainedConvergenceWindow.decodeOrNull(v1, ::commit))
         assertEquals(0, decoded.states.size)
         assertEquals(3L, decoded.commits.single().sourceEpoch)
         assertContentEquals(byteArrayOf(7, 8), decoded.commits.single().bytes)
+        assertEquals(emptyList(), decoded.settledLosers)
+    }
+
+    @Test
+    fun versionTwoLayoutIsPinned() {
+        val loser = "ab".repeat(32)
+        val window = RetainedConvergenceWindow(emptyList(), listOf(commit(byteArrayOf(7, 8), 3)), listOf(loser))
+        val expected = byteArrayOf(2, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 3, 2, 7, 8, 0, 1, 32) + ByteArray(32) { 0xab.toByte() }
+        assertContentEquals(expected, window.encode())
+
+        val decoded = assertNotNull(RetainedConvergenceWindow.decodeOrNull(expected, ::commit))
+        assertEquals(3L, decoded.commits.single().sourceEpoch)
+        assertEquals(listOf(loser), decoded.settledLosers)
     }
 
     @Test
     fun unreadableBytesStartOverFromTheTip() {
-        assertNull(RetainedConvergenceWindow.decodeOrNull(byteArrayOf(2, 0, 0, 0, 0), ::commit), "an unknown version")
+        assertNull(RetainedConvergenceWindow.decodeOrNull(byteArrayOf(3, 0, 0, 0, 0, 0, 0), ::commit), "an unknown version")
         assertNull(RetainedConvergenceWindow.decodeOrNull(byteArrayOf(1, 0, 0, 0, 0, 9), ::commit), "trailing bytes")
         assertNull(RetainedConvergenceWindow.decodeOrNull(byteArrayOf(1, 0, 1), ::commit), "a cut record")
+        assertNull(RetainedConvergenceWindow.decodeOrNull(byteArrayOf(2, 0, 0, 0, 0), ::commit), "a version 2 record without its losers")
     }
 }
