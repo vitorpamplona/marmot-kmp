@@ -316,9 +316,13 @@ class MlsGroupManager(
      * Replace a group's state wholesale — the convergence rewind primitive.
      *
      * Used when branch selection picks a candidate branch over what was
-     * canonical. The outgoing epoch's secrets are pushed into the retention
-     * window first, so application messages already sent on the abandoned
-     * branch still decrypt for as long as any other past epoch would.
+     * canonical. The outgoing epoch's exporter secret is pushed into the
+     * retention window first, so the outer layer of a kind:445 sent on the
+     * abandoned branch still peels. The MLS message inside does NOT open: the
+     * receiver data of a former epoch is mls-kmp's, and the installed state
+     * carries its own branch's history, not the abandoned one's. Such a message
+     * opens only against a candidate state convergence still holds for that
+     * branch, and then as a witness for it, never as a delivery.
      *
      * This deliberately takes a whole state rather than a commit: the state was
      * produced by replaying MLS bytes during graph construction, and replaying
@@ -1656,6 +1660,11 @@ class MlsGroupManager(
          * MDK's `DEFAULT_EPOCH_LOOKBACK` so a message encrypted under the prior
          * N epochs' exporter secrets can still be peeled after a Commit
          * advances the group. Capped for forward-secrecy reasons.
+         *
+         * One more than mls-kmp keeps receiver data for ([MlsGroup.RETAIN_EPOCHS]):
+         * a Commit that old still peels and reaches convergence, but an
+         * application message that old cannot open, and the inbound processor
+         * reports it as undecryptable, as it does one from before the join.
          */
         const val EPOCH_RETENTION_WINDOW = 5
 

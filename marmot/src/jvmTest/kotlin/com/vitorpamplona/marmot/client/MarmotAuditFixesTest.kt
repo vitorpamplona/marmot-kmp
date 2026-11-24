@@ -205,4 +205,34 @@ class MarmotAuditFixesTest {
             messages.forEach { assertIs<MarmotIngestResult.Message>(bob.manager.ingest(it)) }
             assertEquals(1, bobMessages.expiryReads)
         }
+
+    /**
+     * mls-kmp keeps receiver data for four former epochs while the outer layer peels for five
+     * (MDK's lookback): a message five epochs back peeled, then failed as a decryption error.
+     * It is now what any message too old to open is.
+     */
+    @Test
+    fun `a message older than the engine keeps epochs for is undecryptable not a failure`() =
+        runBlocking<Unit> {
+            val alice = Member()
+            val bob = Member()
+            alice.createGroup()
+            val (_, bobWelcome) = alice.manager.addMember(nostrGroupId, bob.keyPackage(), emptyList())
+            bob.manager.ingest(bobWelcome!!.giftWrapEvent)
+
+            val fiveBack =
+                alice.manager
+                    .buildTextMessage(nostrGroupId, "five back")
+                    .outbound.signedEvent
+            val commits = mutableListOf(alice.manager.selfUpdate(nostrGroupId).signedEvent)
+            val fourBack =
+                alice.manager
+                    .buildTextMessage(nostrGroupId, "four back")
+                    .outbound.signedEvent
+            repeat(4) { commits += alice.manager.selfUpdate(nostrGroupId).signedEvent }
+            commits.forEach { assertIs<MarmotIngestResult.Commit>(bob.manager.ingest(it)) }
+
+            assertIs<MarmotIngestResult.Message>(bob.manager.ingest(fourBack))
+            assertIs<MarmotIngestResult.UndecryptableOuter>(bob.manager.ingest(fiveBack))
+        }
 }

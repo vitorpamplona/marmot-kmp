@@ -37,6 +37,7 @@ import com.vitorpamplona.mls.framing.MlsMessage
 import com.vitorpamplona.mls.framing.PrivateMessage
 import com.vitorpamplona.mls.framing.PublicMessage
 import com.vitorpamplona.mls.framing.WireFormat
+import com.vitorpamplona.mls.group.MlsGroup
 import com.vitorpamplona.mls.group.MlsGroupState
 import com.vitorpamplona.mls.messages.KeyPackageBundle
 import com.vitorpamplona.mls.messages.Welcome
@@ -111,6 +112,13 @@ sealed class GroupEventResult {
      * secrecy, the new member never held those keys, so the bytes are
      * unreadable to them — and that is by design, not an error. Callers
      * should surface this at DEBUG, not WARN.
+     *
+     * An application message from an epoch older than mls-kmp keeps receiver
+     * data for (`MlsGroup.RETAIN_EPOCHS` former epochs) is reported the same
+     * way, even when its outer layer peels: the outer keys are kept for
+     * [MlsGroupManager.EPOCH_RETENTION_WINDOW] epochs, MDK's lookback, so a
+     * Commit that old still reaches convergence, but the message itself can no
+     * more be opened than one from before the join.
      */
     data class UndecryptableOuterLayer(
         val groupId: HexKey,
@@ -711,7 +719,17 @@ class MarmotInboundProcessor(
                     // failed. Before giving up, try the branches convergence is
                     // holding — a payload sent on a fork decrypts on no
                     // canonical epoch by construction.
-                    processCandidateBranchMessage(groupId, bytes)
+                    val onCandidate = processCandidateBranchMessage(groupId, bytes)
+                    val currentEpoch = groupManager.currentEpoch(groupId)
+                    if (onCandidate is GroupEventResult.Error && currentEpoch != null && privMsg.epoch < currentEpoch - MlsGroup.RETAIN_EPOCHS) {
+                        // Older than mls-kmp keeps an epoch's receiver data. The outer layer
+                        // still peels (exporters are kept for MDK's five-epoch lookback, so a
+                        // Commit that old still reaches convergence), but the message cannot
+                        // open: it is what a message from before we joined is, not a failure.
+                        GroupEventResult.UndecryptableOuterLayer(groupId, retainedEpochCount = groupManager.retainedExporterCount(groupId))
+                    } else {
+                        onCandidate
+                    }
                 } else {
                     val payload = readPayload(decrypted.content.decodeToString())
                     if (payload.forgedId) {
