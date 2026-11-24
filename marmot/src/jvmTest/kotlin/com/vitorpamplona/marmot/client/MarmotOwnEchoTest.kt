@@ -21,7 +21,9 @@
 package com.vitorpamplona.marmot.client
 
 import com.vitorpamplona.marmot.InMemoryIngestDedupStore
+import com.vitorpamplona.marmot.MarmotIngestDedupStore
 import com.vitorpamplona.marmot.appComponents.GroupProfileV1
+import com.vitorpamplona.quartz.nip01Core.core.HexKey
 import com.vitorpamplona.quartz.nip01Core.crypto.KeyPair
 import com.vitorpamplona.quartz.nip01Core.signers.NostrSignerInternal
 import kotlinx.coroutines.runBlocking
@@ -43,7 +45,7 @@ class MarmotOwnEchoTest {
         val state: SnapshotStateStore = SnapshotStateStore(),
         val messages: SnapshotMessageStore = SnapshotMessageStore(),
         val bundles: SnapshotBundleStore = SnapshotBundleStore(),
-        val ingested: InMemoryIngestDedupStore = InMemoryIngestDedupStore(),
+        val ingested: MarmotIngestDedupStore = InMemoryIngestDedupStore(),
     ) {
         val manager = MarmotManager(signer, state, messages, bundles, publisher = ACCEPTING_RELAY, ingestDedupStore = ingested)
 
@@ -84,5 +86,45 @@ class MarmotOwnEchoTest {
 
             val result = alice.restarted().manager.ingest(sent)
             assertEquals(MarmotIngestResult.Ignored("own message"), result)
+        }
+
+    /** Records which kind of marker each write was. */
+    private class RecordingDedupStore(
+        private val inner: InMemoryIngestDedupStore = InMemoryIngestDedupStore(),
+    ) : MarmotIngestDedupStore by inner {
+        val marks = mutableListOf<HexKey>()
+
+        override suspend fun mark(eventId: HexKey) {
+            marks += eventId
+            inner.mark(eventId)
+        }
+    }
+
+    /**
+     * Every sent message used to add a durable ingest marker, so the markers an app keeps bounded
+     * (Amethyst keeps the newest ten thousand) soon held only own echoes and lost the Welcome and
+     * created-locally markers they exist for. Own echoes now go to their own bounded record.
+     */
+    @Test
+    fun sentMessagesDoNotCrowdOutTheIngestMarkers() =
+        runBlocking<Unit> {
+            val store = RecordingDedupStore()
+            val alice = Device(ingested = store).manager
+            alice.createCurrentProfileGroup(nostrGroupId = nostrGroupId, relays = listOf("wss://relay.invalid"), profile = GroupProfileV1("echo", ""))
+            val before = store.marks.size
+            val sent = (1..3).map { alice.buildTextMessage(nostrGroupId, "hi $it").outbound.signedEvent }
+
+            assertEquals(before, store.marks.size, "no ingest marker per sent message")
+            sent.forEach { assertEquals(MarmotIngestResult.Ignored("own message"), alice.ingest(it)) }
+            assertEquals(sent.map { it.id }, store.loadOwnEchoes().takeLast(3))
+        }
+
+    @Test
+    fun theOwnEchoRecordIsBounded() =
+        runBlocking<Unit> {
+            val store = InMemoryIngestDedupStore()
+            val ids = (0 until MarmotIngestDedupStore.OWN_ECHO_LIMIT + 10).map { it.toString().padStart(64, '0') }
+            ids.forEach { store.markOwnEcho(it) }
+            assertEquals(ids.takeLast(MarmotIngestDedupStore.OWN_ECHO_LIMIT), store.loadOwnEchoes())
         }
 }

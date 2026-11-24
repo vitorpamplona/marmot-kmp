@@ -275,6 +275,9 @@ class MarmotManager(
             // Also restore previously-published KeyPackage bundles so that
             // Welcomes referencing them remain processable across restarts.
             keyPackageRotationManager.restoreFromStore()
+            ingestDedupStore?.loadOwnEchoes()?.let { echoes ->
+                terminallyIngestedMutex.withLock { echoes.forEach { addOwnEcho(it) } }
+            }
             ingestDedupStore?.loadAll()?.let { marks ->
                 terminallyIngestedMutex.withLock { terminallyIngested.addAll(marks) }
                 val created = activeIds.filter { createdLocallyMarker(it) in marks }
@@ -295,6 +298,13 @@ class MarmotManager(
      */
     private val terminallyIngested = mutableSetOf<HexKey>()
     private val terminallyIngestedMutex = Mutex()
+
+    /**
+     * Ids of the kind:445 this device sent, newest last, bounded to
+     * [MarmotIngestDedupStore.OWN_ECHO_LIMIT]: one per sent message, so never in [terminallyIngested],
+     * which grows for the life of the process.
+     */
+    private val ownEchoes = LinkedHashSet<HexKey>()
 
     // Groups this device created. Holding leaf 0 is not proof: a commit that removes leaf 0
     // and adds someone in the same epoch places the invitee there, which let a crafted
@@ -671,14 +681,33 @@ class MarmotManager(
      * decrypted, so a member who only sent could see a healthy group flagged out of sync.
      *
      * Marked twice: by Marmot message id, for this process ([MarmotInboundProcessor] answers
-     * [GroupEventResult.Duplicate]), and by the event's id in the durable ingest markers, so a
-     * client that runs one command per process (`amy`) skips the echo on its next sync. The
-     * signed event is ours, so its id names exactly these bytes.
+     * [GroupEventResult.Duplicate]), and by the event's id in a bounded own-echo record
+     * ([MarmotIngestDedupStore.markOwnEcho]), so a client that runs one command per process (`amy`)
+     * skips the echo on its next sync. Not in the terminal ingest markers: one per sent message
+     * crowded out the Welcome and created-locally markers an app keeps bounded. The signed event
+     * is ours, so its id names exactly these bytes.
      */
     private suspend fun rememberOwnGroupEvent(outbound: OutboundGroupEvent) {
         inboundProcessor.markMessageProcessed(outbound.marmotMessageId)
-        markTerminallyIngested(outbound.signedEvent.id)
+        val id = outbound.signedEvent.id
+        terminallyIngestedMutex.withLock { addOwnEcho(id) }
+        try {
+            ingestDedupStore?.markOwnEcho(id)
+        } catch (e: Exception) {
+            currentCoroutineContext().ensureActive()
+            Log.w("MarmotManager", "could not persist the own-echo marker for ${id.take(8)}", e)
+        }
     }
+
+    /** Under [terminallyIngestedMutex]. */
+    private fun addOwnEcho(eventId: HexKey) {
+        ownEchoes.remove(eventId)
+        ownEchoes.add(eventId)
+        while (ownEchoes.size > MarmotIngestDedupStore.OWN_ECHO_LIMIT) ownEchoes.remove(ownEchoes.first())
+    }
+
+    /** Whether [eventId] is a kind:445 this device sent: see [rememberOwnGroupEvent]. */
+    suspend fun isOwnEcho(eventId: HexKey): Boolean = terminallyIngestedMutex.withLock { eventId in ownEchoes }
 
     /**
      * Build a kind:9 chat-message GroupEvent from plain text. The inner

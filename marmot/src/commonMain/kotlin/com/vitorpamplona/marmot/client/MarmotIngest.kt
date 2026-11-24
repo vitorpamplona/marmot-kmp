@@ -243,7 +243,8 @@ private suspend fun MarmotManager.joinFromOrdinaryWelcome(welcome: WelcomeEvent)
 
 private suspend fun MarmotManager.ingestGroupEvent(ge: GroupEvent): MarmotIngestResult {
     // An application message this device sent: its echo can never decrypt here (see buildGroupMessage).
-    if (isTerminallyIngested(ge.id)) return MarmotIngestResult.Ignored("own message")
+    // (Before 3.4 own echoes were kept with the terminal ingest markers; those still count.)
+    if (isOwnEcho(ge.id) || isTerminallyIngested(ge.id)) return MarmotIngestResult.Ignored("own message")
     val result = ingestGroupEventUnrefreshed(ge)
     // A device-group Commit, applied directly or by a convergence pass, may change the roster.
     deviceGroups?.refresh()
