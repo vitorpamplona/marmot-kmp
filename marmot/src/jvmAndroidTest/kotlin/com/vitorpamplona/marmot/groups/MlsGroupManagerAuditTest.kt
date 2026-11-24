@@ -248,4 +248,48 @@ class MlsGroupManagerAuditTest {
             assertEquals(MlsGroupManager.EPOCH_RETENTION_WINDOW, alice.retainedExporterSecrets(groupId).size)
             assertContentEquals(alice.getGroup(groupId)!!.exporterSecret("marmot", "group-event".encodeToByteArray(), 32), alice.exporterSecret(groupId))
         }
+
+    /** A store whose writes of one group fail, as a full disk or a locked file does. */
+    private class FailingSaves(
+        private val inner: InMemoryGroupStateStore = InMemoryGroupStateStore(),
+    ) : MlsGroupStateStore by inner {
+        var failFor: String? = null
+
+        override suspend fun save(
+            nostrGroupId: String,
+            state: ByteArray,
+        ) {
+            check(nostrGroupId != failFor) { "disk full" }
+            inner.save(nostrGroupId, state)
+        }
+    }
+
+    /**
+     * One group's failed write used to end the flush: every group after it kept its moved receive
+     * ratchets unwritten, so its opened messages opened again after a restart.
+     */
+    @Test
+    fun oneGroupsFailedWriteStillFlushesTheOthers() =
+        runBlocking<Unit> {
+            val first = "1".repeat(64)
+            val second = "2".repeat(64)
+            val alice = MlsGroupManager(InMemoryGroupStateStore())
+            val bobStore = FailingSaves()
+            val bob = MlsGroupManager(bobStore)
+            for (id in listOf(first, second)) {
+                alice.createGroup(id, "alice".encodeToByteArray(), initialExtensions = listOf(MarmotGroupData(nostrGroupId = id, name = "x").toExtension()))
+                val bobKp = kp("bob")
+                bob.processWelcome(alice.addMember(id, bobKp.keyPackage.toTlsBytes()).welcomeBytes!!, bobKp, id)
+            }
+            val inFirst = alice.encrypt(first, "one".encodeToByteArray())
+            val inSecond = alice.encrypt(second, "two".encodeToByteArray())
+            bob.decrypt(first, inFirst)
+            bob.decrypt(second, inSecond)
+
+            bobStore.failFor = first
+            bob.flushReceivedState()
+
+            val restarted = MlsGroupManager(bobStore).also { it.restoreAll() }
+            assertFailsWith<Exception>("the second group's ratchet was written") { restarted.decrypt(second, inSecond) }
+        }
 }

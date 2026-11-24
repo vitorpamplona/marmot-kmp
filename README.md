@@ -62,6 +62,18 @@ marmot.restoreAll()
 The store interfaces live in `com.vitorpamplona.marmot.groups` and
 `com.vitorpamplona.marmot.mip00KeyPackages`; in-memory versions exist for tests.
 
+Feed inbound events through a `MarmotReceiver`, which holds the ones that arrive ahead of the
+Commit they need and replays them once it lands. Opening a message moves a receive ratchet that is
+written only every few messages, so call `flush()` after each batch of live events and when the app
+goes to the background (`MarmotSyncPolicy` does it after every catch-up):
+
+```kotlin
+val receiver = MarmotReceiver(marmot) { event, result -> /* index, notify */ }
+events.forEach { receiver.receive(it) }
+receiver.commitStagedProposals()
+receiver.flush()
+```
+
 The agent text stream over raw QUIC (`marmot-quic`, kind 1200 stream starts) is retired, as the
 spec and MDK 0.19.0 retired it: see [the plan](marmot/plans/2026-11-22-retire-agent-text-stream.md).
 [marmot-bench](marmot-bench/README.md) measures this library against MDK, operation for operation.

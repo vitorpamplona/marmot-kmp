@@ -51,6 +51,15 @@ import kotlinx.coroutines.sync.withLock
  * one batch must go out in one commit, because a proposal sent at an epoch cannot be committed
  * once the group moved past it. A batch caller calls [commitStagedProposals] after the batch; a
  * live one, once the events in hand are applied.
+ *
+ * Opening an application message moves a receive ratchet that is written only every few
+ * messages, so a live front end calls [flush] once the events in hand are applied (the same
+ * moment as [commitStagedProposals]) and when the app goes to the background; [MarmotSyncPolicy]
+ * calls it after each catch-up. Until then a restart opens those messages again.
+ *
+ * A catch-up must not move a group's `since` cursor past an event still [held] here: one that
+ * is still waiting when the process ends (a one-shot `amy` run) is fetched again next time only
+ * if the cursor stayed at or before it.
  */
 class MarmotReceiver(
     private val marmot: MarmotManager,
@@ -65,7 +74,18 @@ class MarmotReceiver(
      * nothing will open it, or a commit that advances us to it has not arrived yet; the two look
      * the same from here, so both wait, bounded.
      */
-    private val pending = mutableMapOf<HexKey, ArrayDeque<GroupEvent>>()
+    private val pending = mutableMapOf<HexKey, ArrayDeque<HeldEvent>>()
+
+    /** An event [MarmotReceiver] holds, and why. */
+    class HeldEvent(
+        val event: GroupEvent,
+        /**
+         * A commit naming a proposal not received yet. Its outer layer opened, so it belongs to an
+         * epoch this device is at; an event whose outer layer did not open may instead be from
+         * before this device joined, and never open.
+         */
+        val waitingForProposal: Boolean,
+    )
 
     /** Groups that staged a proposal since the last [commitStagedProposals]. */
     private val staged = linkedSetOf<HexKey>()
@@ -76,7 +96,7 @@ class MarmotReceiver(
         onResult(event, result)
         when (result) {
             is MarmotIngestResult.UndecryptableOuter -> {
-                if (event is GroupEvent) hold(result.groupId, event)
+                if (event is GroupEvent) hold(result.groupId, event, waitingForProposal = false)
             }
 
             is MarmotIngestResult.ProposalStaged -> {
@@ -87,7 +107,7 @@ class MarmotReceiver(
 
             is MarmotIngestResult.Failure -> {
                 val missing = result.cause as? MarmotMissingProposalException
-                if (missing != null && event is GroupEvent) hold(missing.groupId, event)
+                if (missing != null && event is GroupEvent) hold(missing.groupId, event, waitingForProposal = true)
             }
 
             is MarmotIngestResult.Commit -> {
@@ -101,6 +121,16 @@ class MarmotReceiver(
 
     /** How many events wait on a commit for [nostrGroupId]. */
     suspend fun pendingCount(nostrGroupId: HexKey): Int = lock.withLock { pending[nostrGroupId]?.size ?: 0 }
+
+    /** The events held for [nostrGroupId], oldest held first. */
+    suspend fun held(nostrGroupId: HexKey): List<HeldEvent> = lock.withLock { pending[nostrGroupId]?.toList().orEmpty() }
+
+    /**
+     * Write the receive state of every group whose ratchets moved since it was last written
+     * ([MarmotManager.flushReceivedState]). Call it after a batch of live events and when the app
+     * goes to the background.
+     */
+    suspend fun flush() = marmot.flushReceivedState()
 
     /** Whether any group staged a proposal that [commitStagedProposals] has not handled yet. */
     suspend fun hasStagedProposals(): Boolean = lock.withLock { staged.isNotEmpty() }
@@ -125,11 +155,12 @@ class MarmotReceiver(
     private suspend fun hold(
         groupId: HexKey,
         event: GroupEvent,
+        waitingForProposal: Boolean,
     ) = lock.withLock {
         val queue = pending.getOrPut(groupId) { ArrayDeque() }
-        if (queue.any { it.id == event.id }) return@withLock
+        if (queue.any { it.event.id == event.id }) return@withLock
         if (queue.size >= maxPendingPerGroup) queue.removeFirst()
-        queue.addLast(event)
+        queue.addLast(HeldEvent(event, waitingForProposal))
     }
 
     /**
@@ -145,7 +176,7 @@ class MarmotReceiver(
      */
     private suspend fun replay(groupId: HexKey) {
         val held = lock.withLock { pending.remove(groupId)?.toList() } ?: return
-        for (event in held) receive(event)
+        for (h in held) receive(h.event)
     }
 
     companion object {

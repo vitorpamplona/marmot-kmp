@@ -29,10 +29,12 @@ import com.vitorpamplona.quartz.nip01Core.crypto.KeyPair
 import com.vitorpamplona.quartz.nip01Core.relay.normalizer.NormalizedRelayUrl
 import com.vitorpamplona.quartz.nip01Core.relay.normalizer.RelayUrlNormalizer
 import com.vitorpamplona.quartz.nip01Core.signers.NostrSignerInternal
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 /**
@@ -438,5 +440,136 @@ class MarmotConvergenceRestartTest {
                 "a decided contest opens no pass",
             )
             assertContentEquals(settled, alice.context())
+        }
+
+    private class RecordingCursors : MarmotSyncPolicy.Cursors {
+        override var giftWrapSince: Long? = null
+        val groups = mutableMapOf<HexKey, Long>()
+
+        override fun groupSince(groupId: HexKey): Long? = groups[groupId]
+
+        override fun setGroupSince(
+            groupId: HexKey,
+            value: Long,
+        ) {
+            groups[groupId] = value
+        }
+    }
+
+    private fun Member.catchUp(
+        cursors: MarmotSyncPolicy.Cursors,
+        batch: List<Event>,
+    ): MarmotSyncPolicy {
+        val relay = RelayUrlNormalizer.normalizeOrNull("wss://relay.invalid")!!
+        return MarmotSyncPolicy(
+            marmot = manager,
+            userPubKey = signer.pubKey,
+            cursors = cursors,
+            relays =
+                object : MarmotSyncPolicy.Relays {
+                    override suspend fun inboxRelays() = setOf(relay)
+
+                    override suspend fun outboxRelays() = setOf(relay)
+
+                    override suspend fun keyPackageRelays() = emptySet<NormalizedRelayUrl>()
+
+                    override suspend fun anyRelays() = setOf(relay)
+
+                    override fun groupRelays(nostrGroupId: HexKey) = setOf(relay)
+                },
+            drain = { _, _ -> batch.map { relay to it } },
+            publish = { _, _ -> },
+        )
+    }
+
+    /**
+     * A catch-up whose fork kept the branch it was on read the batch right: its cursor moves on.
+     * It used to stay for every forked group, so each later run refetched the batch, waited out a
+     * pass for the losing Commit again, and showed the messages it had opened as failures.
+     */
+    @Test
+    fun aCatchUpThatKeepsItsBranchMovesTheCursor() =
+        runBlocking {
+            val (alice, bob, carol) = threeMembers()
+            val c1 = carol.manager.selfUpdate(nostrGroupId).signedEvent
+            val c2 = carol.manager.selfUpdate(nostrGroupId).signedEvent
+            val b1 = bob.manager.selfUpdate(nostrGroupId).signedEvent
+            alice.manager.ingest(c1)
+            alice.manager.ingest(c2)
+
+            val cursors = RecordingCursors()
+            alice.catchUp(cursors, listOf(c1, c2, b1)).syncIncoming(timeoutMs = 10)
+
+            assertEquals(
+                false,
+                alice.manager.inboundProcessor
+                    .lastContestedResolution(nostrGroupId)
+                    ?.rewound,
+            )
+            assertEquals(maxOf(c1.createdAt, c2.createdAt, b1.createdAt), cursors.groups[nostrGroupId])
+        }
+
+    /** One that rewound read part of the batch on the branch it left, and fetches it again. */
+    @Test
+    fun aCatchUpThatRewindsKeepsTheCursor() =
+        runBlocking {
+            val (alice, bob, carol) = threeMembers()
+            val c1 = carol.manager.selfUpdate(nostrGroupId).signedEvent
+            val c2 = carol.manager.selfUpdate(nostrGroupId).signedEvent
+            val b1 = bob.manager.selfUpdate(nostrGroupId).signedEvent
+            alice.manager.ingest(b1)
+            alice.manager.ingest(c1)
+
+            val cursors = RecordingCursors()
+            alice.catchUp(cursors, listOf(c2)).syncIncoming(timeoutMs = 10)
+
+            assertEquals(
+                true,
+                alice.manager.inboundProcessor
+                    .lastContestedResolution(nostrGroupId)
+                    ?.rewound,
+            )
+            assertContentEquals(carol.context(), alice.context())
+            assertEquals(null, cursors.groups[nostrGroupId])
+        }
+
+    /**
+     * Events still held when a one-shot catch-up ends (waiting on a Commit the relays did not
+     * return this time) are dropped with the process: the cursor must stay at or before the oldest
+     * of them, or the next run never fetches them again.
+     */
+    @Test
+    fun aCatchUpDoesNotMoveTheCursorPastAHeldEvent() =
+        runBlocking {
+            val (alice, _, carol) = threeMembers()
+            val m0 =
+                carol.manager
+                    .buildTextMessage(nostrGroupId, "before")
+                    .outbound.signedEvent
+            delay(1_100)
+            val c1 = carol.manager.selfUpdate(nostrGroupId).signedEvent
+            val m1 =
+                carol.manager
+                    .buildTextMessage(nostrGroupId, "after")
+                    .outbound.signedEvent
+            delay(1_100)
+            val m2 =
+                carol.manager
+                    .buildTextMessage(nostrGroupId, "later")
+                    .outbound.signedEvent
+            assertTrue(m0.createdAt < m1.createdAt && m1.createdAt < m2.createdAt)
+
+            val cursors = RecordingCursors()
+            alice.catchUp(cursors, listOf(m0, m1, m2)).syncIncoming(timeoutMs = 10)
+            val cursor = cursors.groups[nostrGroupId]
+            assertNotNull(cursor)
+            assertTrue(cursor <= m1.createdAt, "the cursor ($cursor) moved past the held message (${m1.createdAt})")
+
+            // The next run, from that cursor, gets the Commit and opens both.
+            val next = listOf(c1, m1, m2).filter { it.createdAt >= cursor }
+            assertEquals(3, next.size)
+            alice.catchUp(cursors, next).syncIncoming(timeoutMs = 10)
+            assertEquals(m2.createdAt, cursors.groups[nostrGroupId])
+            assertContentEquals(carol.context(), alice.context())
         }
 }

@@ -341,6 +341,18 @@ class MarmotManager(
     }
 
     /**
+     * Write the receive state of every group whose ratchets moved since it was last written.
+     *
+     * Opening an application message moves a receive ratchet and deletes the key it used, and
+     * the group is written only every [MlsGroupManager.RECEIVED_PERSIST_BATCH] opened messages:
+     * until this runs, a restart opens those messages again and their keys stay on disk. A front
+     * end calls it after each batch of live events ([MarmotReceiver.flush]) and when the app goes
+     * to the background; [MarmotSyncPolicy] calls it after every catch-up. A group whose write
+     * fails is logged and left for the next call; the others are still written.
+     */
+    suspend fun flushReceivedState() = groupManager.flushReceivedState()
+
+    /**
      * Re-emit every publish obligation a previous run left unresolved.
      *
      * The bytes are republished VERBATIM — the same signed kind-445, to the

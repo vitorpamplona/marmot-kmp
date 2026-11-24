@@ -186,48 +186,60 @@ class MarmotSyncPolicy(
 
         var maxGwSeen = gwSince ?: 0L
         val maxGroupSeen = perGroupFilters.keys.associateWith { cursors.groupSince(it) ?: 0L }.toMutableMap()
+        // The newest event of each group this batch opened or applied: a held event older than it
+        // is one nothing in this batch was waiting to open (a message from before we joined).
+        val newestOpened = mutableMapOf<HexKey, Long>()
         var sawGiftWrap = false
         val sawGroupEvent = mutableSetOf<HexKey>()
+        // How each group's last contested pass was decided before this batch, to tell a pass this
+        // batch settled (in the loop below, or in the drive after it) from an older one.
+        val contestedBefore = activeGroupIds.associateWith { marmot.inboundProcessor.lastContestedResolution(it) }
 
-        for ((relay, event) in events) {
-            // All the MLS/NIP-59 decryption + persistence lives in MarmotIngest, and
-            // replaying what a commit unblocks in MarmotReceiver — we only care about
-            // bookkeeping (since-cursors, logging) here. Same-second ties and cross-relay
-            // stragglers can still put an event ahead of the commit it needs; the receiver
-            // gives those another go when that commit lands.
-            log("from $relay: ${event.kind}/${event.id.take(8)}")
-            receiver.receive(event)
+        try {
+            for ((relay, event) in events) {
+                // All the MLS/NIP-59 decryption + persistence lives in MarmotIngest, and
+                // replaying what a commit unblocks in MarmotReceiver — we only care about
+                // bookkeeping (since-cursors, logging) here. Same-second ties and cross-relay
+                // stragglers can still put an event ahead of the commit it needs; the receiver
+                // gives those another go when that commit lands.
+                log("from $relay: ${event.kind}/${event.id.take(8)}")
+                val result = receiver.receive(event)
 
-            when (event.kind) {
-                GiftWrapEvent.KIND -> {
-                    sawGiftWrap = true
-                    if (event.createdAt > maxGwSeen) maxGwSeen = event.createdAt
-                }
+                when (event.kind) {
+                    GiftWrapEvent.KIND -> {
+                        sawGiftWrap = true
+                        if (event.createdAt > maxGwSeen) maxGwSeen = event.createdAt
+                    }
 
-                GroupEvent.KIND -> {
-                    val gid = (event as? GroupEvent)?.groupId() ?: continue
-                    sawGroupEvent.add(gid)
-                    val prev = maxGroupSeen[gid] ?: 0L
-                    if (event.createdAt > prev) maxGroupSeen[gid] = event.createdAt
+                    GroupEvent.KIND -> {
+                        val gid = (event as? GroupEvent)?.groupId() ?: continue
+                        sawGroupEvent.add(gid)
+                        val prev = maxGroupSeen[gid] ?: 0L
+                        if (event.createdAt > prev) maxGroupSeen[gid] = event.createdAt
+                        if (result is MarmotIngestResult.Message || result is MarmotIngestResult.Commit || result is MarmotIngestResult.ProposalStaged) {
+                            newestOpened[gid] = maxOf(newestOpened[gid] ?: 0L, event.createdAt)
+                        }
+                    }
                 }
             }
-        }
 
-        // A fork this batch found opened a convergence pass, and a pass lives in this process
-        // only: resolve it before the run ends, or a one-shot caller (amy) exits with the group
-        // split and its next run cannot tell the other branch from an echo. Nothing else waits on
-        // a quiet group's pass when the manager has no scope to carry it.
-        val forked = marmot.inboundProcessor.openConvergencePasses().keys
-        if (forked.isNotEmpty()) {
-            marmot.driveConvergenceToSettlement()
-            for (gid in forked) {
-                log("convergence settled for ${gid.take(8)}")
-                receiver.retryHeld(gid)
+            // A fork this batch found opened a convergence pass, and a pass lives in this process
+            // only: resolve it before the run ends, or a one-shot caller (amy) exits with the group
+            // split and its next run cannot tell the other branch from an echo. Nothing else waits on
+            // a quiet group's pass when the manager has no scope to carry it.
+            val forked = marmot.inboundProcessor.openConvergencePasses().keys
+            if (forked.isNotEmpty()) {
+                marmot.driveConvergenceToSettlement()
+                for (gid in forked) {
+                    log("convergence settled for ${gid.take(8)}")
+                    receiver.retryHeld(gid)
+                }
             }
+        } finally {
+            // The receive ratchets this batch moved (settlement's replays included), written once for
+            // the batch, whatever ended it: a message opened and not written opens again next run.
+            receiver.flush()
         }
-
-        // The receive ratchets this batch moved (settlement's replays included), written once for the batch.
-        marmot.groupManager.flushReceivedState()
 
         // A member's SelfRemove only takes effect once an admin commits it; one commit per
         // group for the whole batch.
@@ -239,9 +251,21 @@ class MarmotSyncPolicy(
             cursors.giftWrapSince = maxGwSeen
         }
         for (gid in sawGroupEvent) {
-            // A rewound group may have read this batch on the branch it left: fetch it again.
-            if (gid in forked) continue
-            val seen = maxGroupSeen[gid] ?: continue
+            // A group this batch rewound read part of it on the branch it left: fetch it again.
+            // One whose pass kept the branch it was on read it right, and moves on.
+            val contested = marmot.inboundProcessor.lastContestedResolution(gid)
+            if (contested != null && contested !== contestedBefore[gid] && contested.rewound) continue
+            var seen = maxGroupSeen[gid] ?: continue
+            // Never past an event the receiver still holds: when this run ends it is dropped, and a
+            // cursor beyond it would never fetch it again. Held events older than the newest one
+            // this batch opened are left out: nothing in the batch was waiting on them (an epoch
+            // from before we joined), and pinning on them would refetch the group's history forever.
+            val opened = newestOpened[gid]
+            receiver
+                .held(gid)
+                .filter { it.waitingForProposal || (opened != null && it.event.createdAt >= opened) }
+                .minOfOrNull { it.event.createdAt }
+                ?.let { if (it < seen) seen = it }
             if (seen > 0) cursors.setGroupSince(gid, seen)
         }
 

@@ -1623,14 +1623,27 @@ class MlsGroupManager(
 
     /**
      * Writes every group whose receive ratchets moved since it was last written. A front end calls
-     * it after a batch of inbound events and when it goes to the background; [MarmotSyncPolicy] calls
-     * it after each catch-up. Until then up to [RECEIVED_PERSIST_BATCH] opened messages per group
-     * would open again after a restart, and their keys stay on disk.
+     * it after a batch of inbound events and when it goes to the background
+     * (`MarmotManager.flushReceivedState`, `MarmotReceiver.flush`); `MarmotSyncPolicy` calls it after
+     * each catch-up. Until then up to [RECEIVED_PERSIST_BATCH] opened messages per group would open
+     * again after a restart, and their keys stay on disk.
+     *
+     * One group's failed write is logged and keeps its count, so the next call tries it again; it
+     * never stops the groups after it from being written.
      */
     suspend fun flushReceivedState() =
         mutex.withLock {
             for (nostrGroupId in receivedSinceSave.keys.toList()) {
-                if (groups.containsKey(nostrGroupId)) persistGroup(nostrGroupId) else receivedSinceSave.remove(nostrGroupId)
+                if (!groups.containsKey(nostrGroupId)) {
+                    receivedSinceSave.remove(nostrGroupId)
+                    continue
+                }
+                try {
+                    persistGroup(nostrGroupId)
+                } catch (e: Exception) {
+                    currentCoroutineContext().ensureActive()
+                    Log.w(TAG, "could not write the receive state of $nostrGroupId", e)
+                }
             }
         }
 
