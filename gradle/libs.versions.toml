@@ -13,7 +13,7 @@ mavenPublish = "0.37.0"
 # RFC 9420 MLS engine (vitorpamplona/mls-kmp), on Nostr + Blossom from 1.3.1 (settings.gradle.kts).
 # 1.4.0 added the policy hooks this library needs (validateResultingState, the GroupInfo signer in
 # validateJoin); 1.4.1 is the first of that line on Nostr + Blossom.
-mlsKmp = "1.5.0"
+mlsKmp = "1.5.1"
 # The Nostr protocol library (vitorpamplona/quartz), on Nostr + Blossom only since 2.19.0
 # (settings.gradle.kts).
 quartzKmp = "2.20.0"
