@@ -1661,10 +1661,11 @@ class MlsGroupManager(
          * N epochs' exporter secrets can still be peeled after a Commit
          * advances the group. Capped for forward-secrecy reasons.
          *
-         * One more than mls-kmp keeps receiver data for ([MlsGroup.RETAIN_EPOCHS]):
-         * a Commit that old still peels and reaches convergence, but an
-         * application message that old cannot open, and the inbound processor
-         * reports it as undecryptable, as it does one from before the join.
+         * The same five epochs mls-kmp keeps receiver data for from 1.5.1 on
+         * ([MlsGroup.RETAIN_EPOCHS]; four before). With an older engine a Commit
+         * in the gap still peels and reaches convergence, but an application
+         * message that old cannot open, and the inbound processor reports it as
+         * undecryptable, as it does one from before the join.
          */
         const val EPOCH_RETENTION_WINDOW = 5
 

@@ -115,10 +115,11 @@ sealed class GroupEventResult {
      *
      * An application message from an epoch older than mls-kmp keeps receiver
      * data for (`MlsGroup.RETAIN_EPOCHS` former epochs) is reported the same
-     * way, even when its outer layer peels: the outer keys are kept for
+     * way, even when its outer layer peels. The outer keys are kept for
      * [MlsGroupManager.EPOCH_RETENTION_WINDOW] epochs, MDK's lookback, so a
-     * Commit that old still reaches convergence, but the message itself can no
-     * more be opened than one from before the join.
+     * Commit that old still reaches convergence; mls-kmp keeps the same five
+     * from 1.5.1 on (four before), and with an older engine a message in the gap
+     * can no more be opened than one from before the join.
      */
     data class UndecryptableOuterLayer(
         val groupId: HexKey,
@@ -726,6 +727,8 @@ class MarmotInboundProcessor(
                         // still peels (exporters are kept for MDK's five-epoch lookback, so a
                         // Commit that old still reaches convergence), but the message cannot
                         // open: it is what a message from before we joined is, not a failure.
+                        // From mls-kmp 1.5.1 both windows are five and this is reached only by
+                        // a message the outer layer peeled from a branch no longer held.
                         GroupEventResult.UndecryptableOuterLayer(groupId, retainedEpochCount = groupManager.retainedExporterCount(groupId))
                     } else {
                         onCandidate

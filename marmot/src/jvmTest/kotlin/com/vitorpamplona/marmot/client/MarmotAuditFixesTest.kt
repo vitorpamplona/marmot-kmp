@@ -23,6 +23,7 @@ package com.vitorpamplona.marmot.client
 import com.vitorpamplona.marmot.GroupEventResult
 import com.vitorpamplona.marmot.appComponents.GroupProfileV1
 import com.vitorpamplona.marmot.groups.MarmotMessageStore
+import com.vitorpamplona.mls.group.MlsGroup
 import com.vitorpamplona.quartz.marmot.mip02Welcome.WelcomeEvent
 import com.vitorpamplona.quartz.marmot.mip03GroupMessages.GroupEvent
 import com.vitorpamplona.quartz.nip01Core.core.Event
@@ -220,19 +221,22 @@ class MarmotAuditFixesTest {
             val (_, bobWelcome) = alice.manager.addMember(nostrGroupId, bob.keyPackage(), emptyList())
             bob.manager.ingest(bobWelcome!!.giftWrapEvent)
 
-            val fiveBack =
+            // Follows the engine's own window, so it holds whichever mls-kmp is on the classpath:
+            // the oldest epoch it keeps still opens, the one before it does not.
+            val kept = MlsGroup.RETAIN_EPOCHS
+            val pastTheWindow =
                 alice.manager
-                    .buildTextMessage(nostrGroupId, "five back")
+                    .buildTextMessage(nostrGroupId, "one past the window")
                     .outbound.signedEvent
             val commits = mutableListOf(alice.manager.selfUpdate(nostrGroupId).signedEvent)
-            val fourBack =
+            val oldestKept =
                 alice.manager
-                    .buildTextMessage(nostrGroupId, "four back")
+                    .buildTextMessage(nostrGroupId, "oldest kept")
                     .outbound.signedEvent
-            repeat(4) { commits += alice.manager.selfUpdate(nostrGroupId).signedEvent }
+            repeat(kept) { commits += alice.manager.selfUpdate(nostrGroupId).signedEvent }
             commits.forEach { assertIs<MarmotIngestResult.Commit>(bob.manager.ingest(it)) }
 
-            assertIs<MarmotIngestResult.Message>(bob.manager.ingest(fourBack))
-            assertIs<MarmotIngestResult.UndecryptableOuter>(bob.manager.ingest(fiveBack))
+            assertIs<MarmotIngestResult.Message>(bob.manager.ingest(oldestKept))
+            assertIs<MarmotIngestResult.UndecryptableOuter>(bob.manager.ingest(pastTheWindow))
         }
 }
