@@ -84,6 +84,8 @@ import com.vitorpamplona.quartz.nip59Giftwrap.rumors.RumorAssembler
 import com.vitorpamplona.quartz.utils.Log
 import com.vitorpamplona.quartz.utils.TimeUtils
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlin.concurrent.Volatile
 
 /**
@@ -142,6 +144,23 @@ class MarmotDeviceGroupManager internal constructor(
     private var cached: DeviceGroupTrust? = null
 
     private val outbox = ArrayList<OutboundGroupEvent>()
+
+    /**
+     * One device-group operation at a time. [refresh] runs after every kind:445 of every group,
+     * and ingest is serialized only per group, so it raced [onAppEvent] and the `stage*` calls of
+     * the front end's tick: a read-modify-write of the trust record lost one side's change, and the
+     * work lists ([edits], [owedHistories], …) are plain lists. Never held across a publish:
+     * [applyStaged] takes it only for its [refresh].
+     */
+    private val lock = Mutex()
+
+    /**
+     * The device-group state [refresh] last brought everything up to date for (group, epoch,
+     * epoch authenticator). The per-leaf claims (an AEAD open and an Ed25519 check per leaf) and
+     * the KeyPackage store read depend only on it, so a refresh for another group's event, which is
+     * almost every one, skips them.
+     */
+    private var refreshedAt: String? = null
 
     /** Live gap-fill claims: (chat, target slot) to claimant slot to expiry. */
     private val claims = HashMap<Pair<HexKey, HexKey>, MutableMap<HexKey, Long>>()
@@ -515,28 +534,29 @@ class MarmotDeviceGroupManager internal constructor(
      * The new device's first Commit: its own roster entry with its `tag_signature_key`, and an
      * UpdatePath leaf tagged under that key. Publish, then [applyStaged].
      */
-    suspend fun stageFirstCommit(): Staged {
-        val t = trust()
-        // A moving device makes its first Commit in the destination, under the destination's seed.
-        val nostrId = t.move?.nostrGroupId ?: checkNotNull(t.trustedNostrGroupId) { "No device group is trusted" }
-        val seed = checkNotNull(t.move?.tagSigningSeed ?: t.tagSigningSeed).hexToByteArray()
-        val group = checkNotNull(groupManager.getGroup(nostrId))
-        val view = group.view()
-        val roster = checkNotNull(DeviceRosterRules.rosterOf(view.extensions))
-        val entry = checkNotNull(roster.device(ownSlot)) { "The roster does not list this device" }
-        val tagPublic = Ed25519.keyPairFromSeed(seed).publicKey.toHexKey()
-        val leaf = checkNotNull(view.leafNode(view.myLeafIndex))
-        val tag = DeviceTagV1.produce(roster.leafTagKey.hexToByteArray(), ownSlot.hexToByteArray(), leaf.signatureKey, seed)
-        val update = DeviceRosterUpdateV1(listOf(RosterOperationV1.SetDevice(withOwnFields(entry, seed).copy(tagSignatureKey = tagPublic)))).encode()
-        val staged =
-            groupManager.stageOwn(nostrId) { clone ->
-                val v = clone.view()
-                clone.advertiseInNextCommit(checkNotNull(v.leafCapabilities(v.myLeafIndex)), withTag(leaf.extensions, tag))
-                clone.proposeAppDataUpdate(DeviceRosterV1.COMPONENT_ID, update)
-                clone.commit()
-            }
-        return Staged(nostrId, staged)
-    }
+    suspend fun stageFirstCommit(): Staged =
+        lock.withLock {
+            val t = trust()
+            // A moving device makes its first Commit in the destination, under the destination's seed.
+            val nostrId = t.move?.nostrGroupId ?: checkNotNull(t.trustedNostrGroupId) { "No device group is trusted" }
+            val seed = checkNotNull(t.move?.tagSigningSeed ?: t.tagSigningSeed).hexToByteArray()
+            val group = checkNotNull(groupManager.getGroup(nostrId))
+            val view = group.view()
+            val roster = checkNotNull(DeviceRosterRules.rosterOf(view.extensions))
+            val entry = checkNotNull(roster.device(ownSlot)) { "The roster does not list this device" }
+            val tagPublic = Ed25519.keyPairFromSeed(seed).publicKey.toHexKey()
+            val leaf = checkNotNull(view.leafNode(view.myLeafIndex))
+            val tag = DeviceTagV1.produce(roster.leafTagKey.hexToByteArray(), ownSlot.hexToByteArray(), leaf.signatureKey, seed)
+            val update = DeviceRosterUpdateV1(listOf(RosterOperationV1.SetDevice(withOwnFields(entry, seed).copy(tagSignatureKey = tagPublic)))).encode()
+            val staged =
+                groupManager.stageOwn(nostrId) { clone ->
+                    val v = clone.view()
+                    clone.advertiseInNextCommit(checkNotNull(v.leafCapabilities(v.myLeafIndex)), withTag(leaf.extensions, tag))
+                    clone.proposeAppDataUpdate(DeviceRosterV1.COMPONENT_ID, update)
+                    clone.commit()
+                }
+            return@withLock Staged(nostrId, staged)
+        }
 
     /**
      * Whether this device joined a device group through its link (a new link, or a move's destination)
@@ -577,18 +597,19 @@ class MarmotDeviceGroupManager internal constructor(
      * removes the new device's leaf and, with `remove_device` alone, its entry. Publish, then
      * [applyStaged]. Null when nothing is due.
      */
-    suspend fun checkLinkDeadlines(now: Long): Staged? {
-        val t = trust()
-        val roster = roster() ?: return null
-        val due = t.approvals.filter { it.outcome == DeviceGroupTrust.Outcome.PENDING && now >= it.linkedAt + FIRST_COMMIT_DEADLINE_SECS }
-        val failed = t.approvals.filter { it.outcome == DeviceGroupTrust.Outcome.FAILED } + due.map { it.copy(outcome = DeviceGroupTrust.Outcome.FAILED) }
-        if (due.isNotEmpty()) saveTrust(t.copy(approvals = t.approvals.map { a -> if (a in due) a.copy(outcome = DeviceGroupTrust.Outcome.FAILED) else a }))
-        val undo = failed.filter { roster.device(it.slot)?.linkedBy == ownSlot }
-        if (undo.isEmpty()) return null
-        val view = checkNotNull(deviceGroup()).view()
-        val leaves = undo.mapNotNull { a -> (0 until view.leafCount).firstOrNull { view.leafNode(it)?.signatureKey?.toHexKey() == a.leafSignatureKey } }
-        return stageRosterUpdate(leaves, undo.map { RosterOperationV1.RemoveDevice(it.slot) })
-    }
+    suspend fun checkLinkDeadlines(now: Long): Staged? =
+        lock.withLock {
+            val t = trust()
+            val roster = roster() ?: return@withLock null
+            val due = t.approvals.filter { it.outcome == DeviceGroupTrust.Outcome.PENDING && now >= it.linkedAt + FIRST_COMMIT_DEADLINE_SECS }
+            val failed = t.approvals.filter { it.outcome == DeviceGroupTrust.Outcome.FAILED } + due.map { it.copy(outcome = DeviceGroupTrust.Outcome.FAILED) }
+            if (due.isNotEmpty()) saveTrust(t.copy(approvals = t.approvals.map { a -> if (a in due) a.copy(outcome = DeviceGroupTrust.Outcome.FAILED) else a }))
+            val undo = failed.filter { roster.device(it.slot)?.linkedBy == ownSlot }
+            if (undo.isEmpty()) return@withLock null
+            val view = checkNotNull(deviceGroup()).view()
+            val leaves = undo.mapNotNull { a -> (0 until view.leafCount).firstOrNull { view.leafNode(it)?.signatureKey?.toHexKey() == a.leafSignatureKey } }
+            return@withLock stageRosterUpdate(leaves, undo.map { RosterOperationV1.RemoveDevice(it.slot) })
+        }
 
     /** Whether this device must announce [keyPackageRef] in its roster entry before publishing it. */
     suspend fun announcementNeeded(keyPackageRef: HexKey): Boolean {
@@ -600,10 +621,11 @@ class MarmotDeviceGroupManager internal constructor(
      * `Slot announcements`: the Commit that names [keyPackageRef] in this device's own entry, every
      * other field unchanged. The device publishes that KeyPackage only once this Commit is applied.
      */
-    suspend fun stageAnnouncement(keyPackageRef: HexKey): Staged {
-        val entry = checkNotNull(roster()?.device(ownSlot)) { "The roster does not list this device" }
-        return stageRosterUpdate(emptyList(), listOf(RosterOperationV1.SetDevice(withOwnFields(entry).copy(announcedKeyPackage = keyPackageRef))))
-    }
+    suspend fun stageAnnouncement(keyPackageRef: HexKey): Staged =
+        lock.withLock {
+            val entry = checkNotNull(roster()?.device(ownSlot)) { "The roster does not list this device" }
+            return@withLock stageRosterUpdate(emptyList(), listOf(RosterOperationV1.SetDevice(withOwnFields(entry).copy(announcedKeyPackage = keyPackageRef))))
+        }
 
     /**
      * This device's own entry with its current `client`, `platform` and history key; every other
@@ -628,13 +650,14 @@ class MarmotDeviceGroupManager internal constructor(
      * announcement ([stageAnnouncement]) carries the same fields, so this is only for a device that
      * announces nothing for a while.
      */
-    suspend fun stageOwnEntryRefresh(): Staged? {
-        val entry = roster()?.device(ownSlot) ?: return null
-        if (entry.tagSignatureKey == null) return null
-        val current = withOwnFields(entry)
-        if (current == entry) return null
-        return stageRosterUpdate(emptyList(), listOf(RosterOperationV1.SetDevice(current)))
-    }
+    suspend fun stageOwnEntryRefresh(): Staged? =
+        lock.withLock {
+            val entry = roster()?.device(ownSlot) ?: return@withLock null
+            if (entry.tagSignatureKey == null) return@withLock null
+            val current = withOwnFields(entry)
+            if (current == entry) return@withLock null
+            return@withLock stageRosterUpdate(emptyList(), listOf(RosterOperationV1.SetDevice(current)))
+        }
 
     /**
      * A user's rename of [slot], its own entry included (`Labels, clients and platforms`): the Commit
@@ -647,33 +670,34 @@ class MarmotDeviceGroupManager internal constructor(
     suspend fun stageRename(
         slot: HexKey,
         label: String,
-    ): Staged? {
-        val entry = checkNotNull(roster()?.device(slot)) { "The roster does not list that device" }
-        loadWork()
-        if (entry.label == label) {
-            // The roster already reads as the user wants: an earlier lost edit to another label is cancelled.
-            if (edits.removeAll { it.slot == slot && entry.renameId !in it.written }) saveWork()
-            return null
+    ): Staged? =
+        lock.withLock {
+            val entry = checkNotNull(roster()?.device(slot)) { "The roster does not list that device" }
+            loadWork()
+            if (entry.label == label) {
+                // The roster already reads as the user wants: an earlier lost edit to another label is cancelled.
+                if (edits.removeAll { it.slot == slot && entry.renameId !in it.written }) saveWork()
+                return@withLock null
+            }
+            val renameId = RandomInstance.bytes(DeviceRosterV1.RENAME_ID_SIZE).toHexKey()
+            val earlier = edits.firstOrNull { it.slot == slot }
+            val replaced = LinkedHashSet<HexKey>()
+            // The entry still holds an id the earlier edit kept: that edit's ids stand in for it now.
+            if (earlier != null && (entry.renameId in earlier.written || entry.renameId in earlier.replaced)) {
+                replaced.addAll(earlier.replaced)
+                replaced.addAll(earlier.written)
+            }
+            // Last, so trimming never forgets the id the entry held when this edit was built.
+            entry.renameId?.let {
+                replaced.remove(it)
+                replaced.add(it)
+            }
+            edits.removeAll { it.slot == slot }
+            edits.add(DeviceGroupWork.KeptEdit(slot, label, null, listOf(renameId), replaced.toList().takeLast(MAX_KEPT_RENAME_IDS)))
+            saveWork()
+            val renamed = entry.copy(label = label, renameId = renameId)
+            return@withLock stageRosterUpdate(emptyList(), listOf(RosterOperationV1.SetDevice(renamed)))
         }
-        val renameId = RandomInstance.bytes(DeviceRosterV1.RENAME_ID_SIZE).toHexKey()
-        val earlier = edits.firstOrNull { it.slot == slot }
-        val replaced = LinkedHashSet<HexKey>()
-        // The entry still holds an id the earlier edit kept: that edit's ids stand in for it now.
-        if (earlier != null && (entry.renameId in earlier.written || entry.renameId in earlier.replaced)) {
-            replaced.addAll(earlier.replaced)
-            replaced.addAll(earlier.written)
-        }
-        // Last, so trimming never forgets the id the entry held when this edit was built.
-        entry.renameId?.let {
-            replaced.remove(it)
-            replaced.add(it)
-        }
-        edits.removeAll { it.slot == slot }
-        edits.add(DeviceGroupWork.KeptEdit(slot, label, null, listOf(renameId), replaced.toList().takeLast(MAX_KEPT_RENAME_IDS)))
-        saveWork()
-        val renamed = entry.copy(label = label, renameId = renameId)
-        return stageRosterUpdate(emptyList(), listOf(RosterOperationV1.SetDevice(renamed)))
-    }
 
     /**
      * User-edit recovery (`Labels, clients and platforms`): reads where each kept rename stands from the
@@ -684,42 +708,43 @@ class MarmotDeviceGroupManager internal constructor(
      * label. Any other: another user edit won and stands, and the kept edit is dropped, as is one for
      * a device the roster no longer lists. Null when there is nothing to make again.
      */
-    suspend fun stageEditRecovery(): Staged? {
-        loadWork()
-        if (edits.isEmpty()) return null
-        val nostrId = trust().trustedNostrGroupId ?: return null
-        val m = manager
-        if (m != null && m.lifecycle(nostrId) != GroupLifecycleState.STABLE) return null
-        val roster = roster() ?: return null
-        var changed = false
-        var again: Pair<DeviceGroupWork.KeptEdit, DeviceEntryV1>? = null
-        for (edit in edits.toList()) {
-            val entry = roster.device(edit.slot)
-            val id = entry?.renameId
-            when {
-                entry == null || id == null -> {
-                    edits.remove(edit)
-                    changed = true
-                }
-                id in edit.written -> {}
-                id in edit.replaced -> if (entry.label != edit.label && again == null) again = edit to entry
-                else -> {
-                    edits.remove(edit)
-                    changed = true
+    suspend fun stageEditRecovery(): Staged? =
+        lock.withLock {
+            loadWork()
+            if (edits.isEmpty()) return@withLock null
+            val nostrId = trust().trustedNostrGroupId ?: return@withLock null
+            val m = manager
+            if (m != null && m.lifecycle(nostrId) != GroupLifecycleState.STABLE) return@withLock null
+            val roster = roster() ?: return@withLock null
+            var changed = false
+            var again: Pair<DeviceGroupWork.KeptEdit, DeviceEntryV1>? = null
+            for (edit in edits.toList()) {
+                val entry = roster.device(edit.slot)
+                val id = entry?.renameId
+                when {
+                    entry == null || id == null -> {
+                        edits.remove(edit)
+                        changed = true
+                    }
+                    id in edit.written -> {}
+                    id in edit.replaced -> if (entry.label != edit.label && again == null) again = edit to entry
+                    else -> {
+                        edits.remove(edit)
+                        changed = true
+                    }
                 }
             }
+            val (edit, entry) =
+                again ?: run {
+                    if (changed) saveWork()
+                    return@withLock null
+                }
+            val renameId = RandomInstance.bytes(DeviceRosterV1.RENAME_ID_SIZE).toHexKey()
+            edits[edits.indexOf(edit)] = edit.copy(written = (edit.written + renameId).takeLast(MAX_KEPT_RENAME_IDS))
+            saveWork()
+            Log.d(TAG) { "a rename of ${edit.slot.take(8)} lost a fork; making it again" }
+            return@withLock stageRosterUpdate(emptyList(), listOf(RosterOperationV1.SetDevice(entry.copy(label = edit.label, renameId = renameId))))
         }
-        val (edit, entry) =
-            again ?: run {
-                if (changed) saveWork()
-                return null
-            }
-        val renameId = RandomInstance.bytes(DeviceRosterV1.RENAME_ID_SIZE).toHexKey()
-        edits[edits.indexOf(edit)] = edit.copy(written = (edit.written + renameId).takeLast(MAX_KEPT_RENAME_IDS))
-        saveWork()
-        Log.d(TAG) { "a rename of ${edit.slot.take(8)} lost a fork; making it again" }
-        return stageRosterUpdate(emptyList(), listOf(RosterOperationV1.SetDevice(entry.copy(label = edit.label, renameId = renameId))))
-    }
 
     /** The user edits this device keeps for recovery, by slot and label (for tests and diagnostics). */
     fun keptEdits(): List<Pair<HexKey, String>> = edits.map { it.slot to it.label }
@@ -730,25 +755,26 @@ class MarmotDeviceGroupManager internal constructor(
      * those, when none is valid, or when no device group is trusted. Publish (to the relays the
      * siblings listen on now), then [applyStaged]; the group's traffic follows the new routing.
      */
-    suspend fun stageRelays(relays: Collection<String>): Staged? {
-        val nostrId = trust().trustedNostrGroupId ?: return null
-        val group = groupManager.getGroup(nostrId) ?: return null
-        val current = AppDataDictionary.fromExtensionsOrEmpty(group.view().extensions)[NostrRoutingV1.COMPONENT_ID]?.let { NostrRoutingV1.decode(it) } ?: return null
-        val wanted =
-            relays
-                .filter { runCatching { NostrRoutingV1.requireValidRelayUrl(it) }.isSuccess }
-                .distinct()
-                .sorted()
-                .take(NostrRoutingV1.MAX_RELAYS)
-        if (wanted.isEmpty() || wanted == current.relays) return null
-        val routing = NostrRoutingV1(current.nostrGroupId, wanted)
-        val staged =
-            groupManager.stageOwn(nostrId) { clone ->
-                clone.proposeAppDataUpdate(NostrRoutingV1.COMPONENT_ID, routing.encode())
-                clone.commit()
-            }
-        return Staged(nostrId, staged)
-    }
+    suspend fun stageRelays(relays: Collection<String>): Staged? =
+        lock.withLock {
+            val nostrId = trust().trustedNostrGroupId ?: return@withLock null
+            val group = groupManager.getGroup(nostrId) ?: return@withLock null
+            val current = AppDataDictionary.fromExtensionsOrEmpty(group.view().extensions)[NostrRoutingV1.COMPONENT_ID]?.let { NostrRoutingV1.decode(it) } ?: return@withLock null
+            val wanted =
+                relays
+                    .filter { runCatching { NostrRoutingV1.requireValidRelayUrl(it) }.isSuccess }
+                    .distinct()
+                    .sorted()
+                    .take(NostrRoutingV1.MAX_RELAYS)
+            if (wanted.isEmpty() || wanted == current.relays) return@withLock null
+            val routing = NostrRoutingV1(current.nostrGroupId, wanted)
+            val staged =
+                groupManager.stageOwn(nostrId) { clone ->
+                    clone.proposeAppDataUpdate(NostrRoutingV1.COMPONENT_ID, routing.encode())
+                    clone.commit()
+                }
+            return@withLock Staged(nostrId, staged)
+        }
 
     /**
      * `The removal Commit`: the sibling's tagged leaf out, `remove_device`, then a `removed` record with
@@ -758,38 +784,41 @@ class MarmotDeviceGroupManager internal constructor(
     suspend fun stageRemoveDevice(
         slot: HexKey,
         now: Long,
-    ): Staged {
-        check(slot != ownSlot) { "A device never removes itself: it signs out" }
-        val nostrId = checkNotNull(trust().trustedNostrGroupId)
-        val roster = checkNotNull(roster())
-        val entry = checkNotNull(roster.device(slot)) { "The roster does not list that device" }
-        val tagKey = checkNotNull(entry.tagSignatureKey) { "A device whose link may still fail is not removed" }
-        val t = trust()
-        val decidedAt = t.removalDecisions.firstOrNull { it.slot == slot }?.time ?: now
-        saveTrust(t.copy(removalDecisions = t.removalDecisions.filterNot { it.slot == slot } + DeviceGroupTrust.SlotTime(slot, decidedAt)))
-        val leaf = leafClaims(nostrId).firstOrNull { it.second == DeviceTagV1.Claim.Device(slot) }?.first
-        return stageRosterUpdate(
-            listOfNotNull(leaf),
-            listOf(RosterOperationV1.RemoveDevice(slot), RosterOperationV1.SetRejectedSlot(RejectedSlotV1(slot, RejectionReasonV1.REMOVED, decidedAt, tagKey))),
-        )
-    }
+    ): Staged =
+        lock.withLock {
+            check(slot != ownSlot) { "A device never removes itself: it signs out" }
+            val nostrId = checkNotNull(trust().trustedNostrGroupId)
+            val roster = checkNotNull(roster())
+            val entry = checkNotNull(roster.device(slot)) { "The roster does not list that device" }
+            val tagKey = checkNotNull(entry.tagSignatureKey) { "A device whose link may still fail is not removed" }
+            val t = trust()
+            val decidedAt = t.removalDecisions.firstOrNull { it.slot == slot }?.time ?: now
+            saveTrust(t.copy(removalDecisions = t.removalDecisions.filterNot { it.slot == slot } + DeviceGroupTrust.SlotTime(slot, decidedAt)))
+            val leaf = leafClaims(nostrId).firstOrNull { it.second == DeviceTagV1.Claim.Device(slot) }?.first
+            return@withLock stageRosterUpdate(
+                listOfNotNull(leaf),
+                listOf(RosterOperationV1.RemoveDevice(slot), RosterOperationV1.SetRejectedSlot(RejectedSlotV1(slot, RejectionReasonV1.REMOVED, decidedAt, tagKey))),
+            )
+        }
 
     /**
      * `device-roster-v1.md` "State": a `removed` record goes once 30 days have passed since its
      * `rejected_at`. The Commit that drops every such record, or null when none is due.
      */
-    suspend fun expireRemovedRecords(now: Long): Staged? {
-        val due = roster()?.rejectedSlots.orEmpty().filter { it.reason == RejectionReasonV1.REMOVED && now >= it.rejectedAt + REMOVED_RECORD_SECS }
-        if (due.isEmpty()) return null
-        return stageRosterUpdate(emptyList(), due.map { RosterOperationV1.RemoveRejectedSlot(it.slot) })
-    }
+    suspend fun expireRemovedRecords(now: Long): Staged? =
+        lock.withLock {
+            val due = roster()?.rejectedSlots.orEmpty().filter { it.reason == RejectionReasonV1.REMOVED && now >= it.rejectedAt + REMOVED_RECORD_SECS }
+            if (due.isEmpty()) return@withLock null
+            return@withLock stageRosterUpdate(emptyList(), due.map { RosterOperationV1.RemoveRejectedSlot(it.slot) })
+        }
 
     /** `Signing out` through siblings: this device's own entry set to `leaving`. Publish, then [applyStaged]. */
-    suspend fun stageSignOut(): Staged {
-        val entry = checkNotNull(roster()?.device(ownSlot)) { "The roster does not list this device" }
-        checkNotNull(entry.tagSignatureKey) { "A device without its tag key signs out on its own" }
-        return stageRosterUpdate(emptyList(), listOf(RosterOperationV1.SetDevice(entry.copy(status = DeviceStatusV1.LEAVING))))
-    }
+    suspend fun stageSignOut(): Staged =
+        lock.withLock {
+            val entry = checkNotNull(roster()?.device(ownSlot)) { "The roster does not list this device" }
+            checkNotNull(entry.tagSignatureKey) { "A device without its tag key signs out on its own" }
+            return@withLock stageRosterUpdate(emptyList(), listOf(RosterOperationV1.SetDevice(entry.copy(status = DeviceStatusV1.LEAVING))))
+        }
 
     /** Siblings the roster lists as `leaving` with their key: each is removed as if the user decided to. */
     suspend fun pendingDepartures(): List<HexKey> =
@@ -860,12 +889,18 @@ class MarmotDeviceGroupManager internal constructor(
      * [stageInactivity], …) are the front end's maintenance tick to stage, publish and [applyStaged].
      */
     suspend fun refresh() {
-        if (cached == null) start()
-        recordEpochClaims()
-        afterRosterChange()
-        checkMove()
-        // A delivery read before its chat's Welcome imports once the chat is held.
-        if (keptDeliveries.isNotEmpty()) importKeptHistory(TimeUtils.now(), fetch = false)
+        lock.withLock {
+            if (cached == null) start()
+            val group = deviceGroup()
+            val at = group?.let { "${cached?.trustedNostrGroupId}:${it.epoch}:${it.epochAuthenticator.toHexKey()}" }
+            val moved = at == null || at != refreshedAt
+            if (moved) recordEpochClaims()
+            afterRosterChange(rosterMoved = moved)
+            refreshedAt = at
+            checkMove()
+            // A delivery read before its chat's Welcome imports once the chat is held.
+            if (keptDeliveries.isNotEmpty()) importKeptHistory(TimeUtils.now(), fetch = false)
+        }
     }
 
     private suspend fun recordEpochClaims() {
@@ -882,7 +917,7 @@ class MarmotDeviceGroupManager internal constructor(
         while (epochClaims.size > EPOCH_CLAIMS_KEPT) epochClaims.remove(epochClaims.keys.first())
     }
 
-    private suspend fun afterRosterChange() {
+    private suspend fun afterRosterChange(rosterMoved: Boolean = true) {
         val t = trust()
         val nostrId = t.trustedNostrGroupId ?: return
         val group = groupManager.getGroup(nostrId) ?: return
@@ -904,7 +939,7 @@ class MarmotDeviceGroupManager internal constructor(
         val rejections = t.ownRejections.filter { roster.device(it.slot) == null }
         val next = t.copy(approvals = approvals, removedSlots = removed.values.sortedBy { it.slot }, removalDecisions = decisions, ownRejections = rejections)
         if (next != t) saveTrust(next)
-        dropKeyPackagesOfGoneSlots(roster)
+        if (rosterMoved) dropKeyPackagesOfGoneSlots(roster)
     }
 
     /**
@@ -1002,58 +1037,60 @@ class MarmotDeviceGroupManager internal constructor(
      * `moved` stands there, or that group no longer lists this device, its copy is discarded. Null
      * when nothing is due now.
      */
-    suspend fun stageMoveFollowUp(): Staged? {
-        val t = trust()
-        val m = manager
-        val nostrId = t.trustedNostrGroupId
-        if (t.carriedRejections.isNotEmpty() && nostrId != null && !t.unlinked) {
-            val roster = roster() ?: return null
-            if (m == null || m.lifecycle(nostrId) == GroupLifecycleState.STABLE) {
-                t.carriedRejections.filter { roster.device(it.slot) != null }.forEach {
-                    Log.d(TAG) { "a confirmed link overrode the old rejection of ${it.slot.take(8)}" }
+    suspend fun stageMoveFollowUp(): Staged? =
+        lock.withLock {
+            val t = trust()
+            val m = manager
+            val nostrId = t.trustedNostrGroupId
+            if (t.carriedRejections.isNotEmpty() && nostrId != null && !t.unlinked) {
+                val roster = roster() ?: return@withLock null
+                if (m == null || m.lifecycle(nostrId) == GroupLifecycleState.STABLE) {
+                    t.carriedRejections.filter { roster.device(it.slot) != null }.forEach {
+                        Log.d(TAG) { "a confirmed link overrode the old rejection of ${it.slot.take(8)}" }
+                    }
+                    val ops =
+                        t.carriedRejections
+                            .filter { it.slot != t.ownSlot && roster.device(it.slot) == null && roster.rejectedSlot(it.slot) == null }
+                            .map { RosterOperationV1.SetRejectedSlot(RejectedSlotV1(it.slot, RejectionReasonV1.of(it.reason), it.rejectedAt, it.tagSignatureKey)) }
+                    if (ops.isNotEmpty()) return@withLock stageRosterUpdate(emptyList(), ops)
+                    saveTrust(t.copy(carriedRejections = emptyList()))
                 }
-                val ops =
-                    t.carriedRejections
-                        .filter { it.slot != t.ownSlot && roster.device(it.slot) == null && roster.rejectedSlot(it.slot) == null }
-                        .map { RosterOperationV1.SetRejectedSlot(RejectedSlotV1(it.slot, RejectionReasonV1.of(it.reason), it.rejectedAt, it.tagSignatureKey)) }
-                if (ops.isNotEmpty()) return stageRosterUpdate(emptyList(), ops)
-                saveTrust(t.copy(carriedRejections = emptyList()))
             }
+            val from = trust().movedFrom ?: return@withLock null
+            val old = groupManager.getGroup(from.nostrGroupId)
+            val entry = old?.takeIf { it.isLocalMember() }?.let { DeviceRosterRules.rosterOf(it.view().extensions) }?.device(t.ownSlot)
+            if (old == null || entry == null) {
+                // The old group's selected branch no longer includes this device: nothing is left to say there.
+                if (old != null) discard(from.nostrGroupId)
+                saveTrust(trust().copy(movedFrom = null))
+                return@withLock null
+            }
+            if (m != null && m.lifecycle(from.nostrGroupId) != GroupLifecycleState.STABLE) return@withLock null
+            if (entry.status == DeviceStatusV1.MOVED) {
+                discard(from.nostrGroupId)
+                saveTrust(trust().copy(movedFrom = null))
+                Log.d(TAG) { "left the old device group ${from.nostrGroupId.take(8)}" }
+                return@withLock null
+            }
+            // Its own inline Commit, every other field (rename_id included) kept; the old leaf keeps its key and tag.
+            return@withLock stageRosterUpdate(emptyList(), listOf(RosterOperationV1.SetDevice(entry.copy(status = DeviceStatusV1.MOVED))), from.nostrGroupId)
         }
-        val from = trust().movedFrom ?: return null
-        val old = groupManager.getGroup(from.nostrGroupId)
-        val entry = old?.takeIf { it.isLocalMember() }?.let { DeviceRosterRules.rosterOf(it.view().extensions) }?.device(t.ownSlot)
-        if (old == null || entry == null) {
-            // The old group's selected branch no longer includes this device: nothing is left to say there.
-            if (old != null) discard(from.nostrGroupId)
-            saveTrust(trust().copy(movedFrom = null))
-            return null
-        }
-        if (m != null && m.lifecycle(from.nostrGroupId) != GroupLifecycleState.STABLE) return null
-        if (entry.status == DeviceStatusV1.MOVED) {
-            discard(from.nostrGroupId)
-            saveTrust(trust().copy(movedFrom = null))
-            Log.d(TAG) { "left the old device group ${from.nostrGroupId.take(8)}" }
-            return null
-        }
-        // Its own inline Commit, every other field (rename_id included) kept; the old leaf keeps its key and tag.
-        return stageRosterUpdate(emptyList(), listOf(RosterOperationV1.SetDevice(entry.copy(status = DeviceStatusV1.MOVED))), from.nostrGroupId)
-    }
 
     /**
      * An old sibling's side of a move: a device the roster lists as `moved` goes, its leaf and its
      * entry in one Commit, with no rejection recorded, no chat leaf removed and no slot deleted.
      * Null when no sibling moved, or while the device group is not `Stable`.
      */
-    suspend fun stageMovedCleanup(): Staged? {
-        val nostrId = trust().trustedNostrGroupId ?: return null
-        val roster = roster() ?: return null
-        val moved = roster.devices.firstOrNull { it.slot != ownSlot && it.status == DeviceStatusV1.MOVED } ?: return null
-        val m = manager
-        if (m != null && m.lifecycle(nostrId) != GroupLifecycleState.STABLE) return null
-        val leaf = leafClaims(nostrId).firstOrNull { it.second == DeviceTagV1.Claim.Device(moved.slot) }?.first
-        return stageRosterUpdate(listOfNotNull(leaf), listOf(RosterOperationV1.RemoveDevice(moved.slot)))
-    }
+    suspend fun stageMovedCleanup(): Staged? =
+        lock.withLock {
+            val nostrId = trust().trustedNostrGroupId ?: return@withLock null
+            val roster = roster() ?: return@withLock null
+            val moved = roster.devices.firstOrNull { it.slot != ownSlot && it.status == DeviceStatusV1.MOVED } ?: return@withLock null
+            val m = manager
+            if (m != null && m.lifecycle(nostrId) != GroupLifecycleState.STABLE) return@withLock null
+            val leaf = leafClaims(nostrId).firstOrNull { it.second == DeviceTagV1.Claim.Device(moved.slot) }?.first
+            return@withLock stageRosterUpdate(listOfNotNull(leaf), listOf(RosterOperationV1.RemoveDevice(moved.slot)))
+        }
 
     /**
      * `Explicit local reset`: discards this device's copy of its device group and the link-bound state,
@@ -1134,35 +1171,37 @@ class MarmotDeviceGroupManager internal constructor(
         epoch: Long,
         now: Long = TimeUtils.now(),
     ) {
-        if (!isTrustedDeviceGroup(nostrGroupId)) return
-        val event = Event.fromJsonOrNull(innerEventJson) ?: return
-        val group = groupManager.getGroup(nostrGroupId) ?: return
-        val roster = DeviceRosterRules.rosterOf(group.view().extensions) ?: return
-        // The sending leaf as it was in the epoch the message was sent in (`Receiving`): the current
-        // tree for the current epoch, the claims recorded while an older epoch was current otherwise.
-        // A heartbeat counts only from the epoch the device holds (`Heartbeats`).
-        val sender =
-            if (epoch == group.epoch) {
-                val leaf = group.view().leafNode(senderLeafIndex) ?: return
-                (DeviceTagV1.read(leaf, roster) as? DeviceTagV1.Claim.Device)?.slot ?: return
-            } else {
-                if (event.kind == MarmotDeviceGroupKinds.HEARTBEAT) return
-                epochClaims[epoch]?.get(senderLeafIndex) ?: return
+        lock.withLock {
+            if (!isTrustedDeviceGroup(nostrGroupId)) return@withLock
+            val event = Event.fromJsonOrNull(innerEventJson) ?: return@withLock
+            val group = groupManager.getGroup(nostrGroupId) ?: return@withLock
+            val roster = DeviceRosterRules.rosterOf(group.view().extensions) ?: return@withLock
+            // The sending leaf as it was in the epoch the message was sent in (`Receiving`): the current
+            // tree for the current epoch, the claims recorded while an older epoch was current otherwise.
+            // A heartbeat counts only from the epoch the device holds (`Heartbeats`).
+            val sender =
+                if (epoch == group.epoch) {
+                    val leaf = group.view().leafNode(senderLeafIndex) ?: return@withLock
+                    (DeviceTagV1.read(leaf, roster) as? DeviceTagV1.Claim.Device)?.slot ?: return@withLock
+                } else {
+                    if (event.kind == MarmotDeviceGroupKinds.HEARTBEAT) return@withLock
+                    epochClaims[epoch]?.get(senderLeafIndex) ?: return@withLock
+                }
+            if (sender == ownSlot) return@withLock
+            // A sender the current roster no longer lists as a device is dropped whatever its old tag said.
+            if (roster.device(sender) == null) return@withLock
+            when (event.kind) {
+                MarmotDeviceGroupKinds.HEARTBEAT -> onHeartbeat(sender, roster, event.createdAt, now)
+                MarmotDeviceGroupKinds.GAP_FILL_CLAIM -> onClaim(sender, event, now)
+                MarmotDeviceGroupKinds.PRIVATE_KEY_PACKAGE_REQUEST -> onKeyPackageRequest(sender, event, now)
+                MarmotDeviceGroupKinds.PRIVATE_KEY_PACKAGE_HAND_OFF -> onHandOff(sender, event, now)
+                MarmotDeviceGroupKinds.SIBLING_WELCOME -> onSiblingWelcome(sender, event)
+                MarmotDeviceGroupKinds.LINK_CHAT_INVENTORY -> onInventory(sender, roster, event, now)
+                SmallStateMessages.UPDATE_KIND -> onSmallStateUpdate(event)
+                SmallStateMessages.BROADCAST_REQUEST_KIND -> onBroadcastRequest(now)
+                HistoryDelivery.KIND -> onHistoryDelivery(sender, event, now)
+                else -> {}
             }
-        if (sender == ownSlot) return
-        // A sender the current roster no longer lists as a device is dropped whatever its old tag said.
-        if (roster.device(sender) == null) return
-        when (event.kind) {
-            MarmotDeviceGroupKinds.HEARTBEAT -> onHeartbeat(sender, roster, event.createdAt, now)
-            MarmotDeviceGroupKinds.GAP_FILL_CLAIM -> onClaim(sender, event, now)
-            MarmotDeviceGroupKinds.PRIVATE_KEY_PACKAGE_REQUEST -> onKeyPackageRequest(sender, event, now)
-            MarmotDeviceGroupKinds.PRIVATE_KEY_PACKAGE_HAND_OFF -> onHandOff(sender, event, now)
-            MarmotDeviceGroupKinds.SIBLING_WELCOME -> onSiblingWelcome(sender, event)
-            MarmotDeviceGroupKinds.LINK_CHAT_INVENTORY -> onInventory(sender, roster, event, now)
-            SmallStateMessages.UPDATE_KIND -> onSmallStateUpdate(event)
-            SmallStateMessages.BROADCAST_REQUEST_KIND -> onBroadcastRequest(now)
-            HistoryDelivery.KIND -> onHistoryDelivery(sender, event, now)
-            else -> {}
         }
     }
 
@@ -1526,28 +1565,29 @@ class MarmotDeviceGroupManager internal constructor(
      * (no decision kept, its slot not deleted). This device sets its own entry back to `active` once
      * its leaf is tagged and it has sent a heartbeat. Null when nothing is due.
      */
-    suspend fun stageInactivity(now: Long): Staged? {
-        val roster = roster() ?: return null
-        val t = trust()
-        roster.device(ownSlot)?.let { own ->
-            if (own.status == DeviceStatusV1.INACTIVE && t.lastHeartbeatSent > 0 && ownLeafTagged()) {
-                return stageRosterUpdate(emptyList(), listOf(RosterOperationV1.SetDevice(own.copy(status = DeviceStatusV1.ACTIVE))))
+    suspend fun stageInactivity(now: Long): Staged? =
+        lock.withLock {
+            val roster = roster() ?: return@withLock null
+            val t = trust()
+            roster.device(ownSlot)?.let { own ->
+                if (own.status == DeviceStatusV1.INACTIVE && t.lastHeartbeatSent > 0 && ownLeafTagged()) {
+                    return@withLock stageRosterUpdate(emptyList(), listOf(RosterOperationV1.SetDevice(own.copy(status = DeviceStatusV1.ACTIVE))))
+                }
             }
+            for (d in roster.devices) {
+                if (d.slot == ownSlot || d.tagSignatureKey == null) continue
+                val since = maxOf(d.linkedAt, lastActivity(d.slot) ?: 0)
+                if (d.status == DeviceStatusV1.ACTIVE && now - since >= INACTIVE_AFTER_SECS) {
+                    return@withLock stageRosterUpdate(emptyList(), listOf(RosterOperationV1.SetDevice(d.copy(status = DeviceStatusV1.INACTIVE))))
+                }
+                if (d.status == DeviceStatusV1.INACTIVE && !d.keepWhileInactive && now - since >= REMOVE_INACTIVE_AFTER_SECS) {
+                    val nostrId = checkNotNull(t.trustedNostrGroupId)
+                    val leaf = leafClaims(nostrId).firstOrNull { it.second == DeviceTagV1.Claim.Device(d.slot) }?.first
+                    return@withLock stageRosterUpdate(listOfNotNull(leaf), listOf(RosterOperationV1.RemoveDevice(d.slot), RosterOperationV1.SetRejectedSlot(RejectedSlotV1(d.slot, RejectionReasonV1.REMOVED, now, d.tagSignatureKey))))
+                }
+            }
+            return@withLock null
         }
-        for (d in roster.devices) {
-            if (d.slot == ownSlot || d.tagSignatureKey == null) continue
-            val since = maxOf(d.linkedAt, lastActivity(d.slot) ?: 0)
-            if (d.status == DeviceStatusV1.ACTIVE && now - since >= INACTIVE_AFTER_SECS) {
-                return stageRosterUpdate(emptyList(), listOf(RosterOperationV1.SetDevice(d.copy(status = DeviceStatusV1.INACTIVE))))
-            }
-            if (d.status == DeviceStatusV1.INACTIVE && !d.keepWhileInactive && now - since >= REMOVE_INACTIVE_AFTER_SECS) {
-                val nostrId = checkNotNull(t.trustedNostrGroupId)
-                val leaf = leafClaims(nostrId).firstOrNull { it.second == DeviceTagV1.Claim.Device(d.slot) }?.first
-                return stageRosterUpdate(listOfNotNull(leaf), listOf(RosterOperationV1.RemoveDevice(d.slot), RosterOperationV1.SetRejectedSlot(RejectedSlotV1(d.slot, RejectionReasonV1.REMOVED, now, d.tagSignatureKey))))
-            }
-        }
-        return null
-    }
 
     private suspend fun onSiblingWelcome(
         sender: HexKey,
@@ -1875,25 +1915,37 @@ class MarmotDeviceGroupManager internal constructor(
     /** (chat Nostr id, ciphertext_sha256) to the `file_key` an imported history brought. Persisted. */
     private val attachmentKeys = LinkedHashMap<Pair<HexKey, HexKey>, HexKey>()
 
+    @Volatile
     private var workLoaded = false
+    private val workLoadLock = Mutex()
 
+    /**
+     * Loads the persisted work once. Marked loaded only after the load: marked before it, a second
+     * caller arriving while the first was suspended in the store read went on with the empty lists
+     * and could save them over the record.
+     */
     private suspend fun loadWork() {
         if (workLoaded) return
-        workLoaded = true
-        val work =
-            try {
-                workStore.load()
-            } catch (e: Exception) {
-                if (e is CancellationException) throw e
-                Log.w(TAG, "unreadable device-group work; starting without it", e)
-                null
-            } ?: return
-        owedHistories.addAll(work.owed)
-        work.kept.forEach { k ->
-            HistoryDelivery.parse(k.content)?.let { keptDeliveries.add(KeptDelivery(it, k.content, k.key, k.hash, k.readAt, it.bundle)) }
+        workLoadLock.withLock {
+            if (workLoaded) return
+            val work =
+                try {
+                    workStore.load()
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                    Log.w(TAG, "unreadable device-group work; starting without it", e)
+                    null
+                }
+            if (work != null) {
+                owedHistories.addAll(work.owed)
+                work.kept.forEach { k ->
+                    HistoryDelivery.parse(k.content)?.let { keptDeliveries.add(KeptDelivery(it, k.content, k.key, k.hash, k.readAt, it.bundle)) }
+                }
+                edits.addAll(work.edits)
+                work.attachmentKeys.forEach { attachmentKeys[it.chat to it.ciphertextSha256] = it.fileKey }
+            }
+            workLoaded = true
         }
-        edits.addAll(work.edits)
-        work.attachmentKeys.forEach { attachmentKeys[it.chat to it.ciphertextSha256] = it.fileKey }
     }
 
     private suspend fun saveWork() {
@@ -2276,13 +2328,14 @@ class MarmotDeviceGroupManager internal constructor(
     suspend fun rejectSignIn(
         slot: HexKey,
         now: Long,
-    ): Staged? {
-        val t = trust()
-        if (t.ownRejections.none { it.slot == slot }) saveTrust(t.copy(ownRejections = t.ownRejections + DeviceGroupTrust.SlotTime(slot, now)))
-        val roster = roster() ?: return null
-        if (roster.device(slot) != null || roster.rejectedSlot(slot) != null) return null
-        return stageRosterUpdate(emptyList(), listOf(RosterOperationV1.SetRejectedSlot(RejectedSlotV1(slot, RejectionReasonV1.NOT_ME, now))))
-    }
+    ): Staged? =
+        lock.withLock {
+            val t = trust()
+            if (t.ownRejections.none { it.slot == slot }) saveTrust(t.copy(ownRejections = t.ownRejections + DeviceGroupTrust.SlotTime(slot, now)))
+            val roster = roster() ?: return@withLock null
+            if (roster.device(slot) != null || roster.rejectedSlot(slot) != null) return@withLock null
+            return@withLock stageRosterUpdate(emptyList(), listOf(RosterOperationV1.SetRejectedSlot(RejectedSlotV1(slot, RejectionReasonV1.NOT_ME, now))))
+        }
 
     // =================================================================================================
 

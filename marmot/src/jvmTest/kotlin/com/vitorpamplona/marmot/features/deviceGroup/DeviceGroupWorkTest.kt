@@ -45,7 +45,11 @@ import com.vitorpamplona.quartz.nip01Core.core.toHexKey
 import com.vitorpamplona.quartz.nip01Core.crypto.KeyPair
 import com.vitorpamplona.quartz.nip01Core.signers.NostrSignerInternal
 import com.vitorpamplona.quartz.utils.TimeUtils
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.yield
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
 import kotlin.test.Test
@@ -82,6 +86,7 @@ class DeviceGroupWorkTest {
     private inner class Device(
         val stores: Stores,
         deviceGroups: Boolean = true,
+        workStore: DeviceGroupWorkStore = stores.work,
     ) {
         constructor(keys: KeyPair, deviceGroups: Boolean = true) : this(Stores(keys), deviceGroups)
 
@@ -95,7 +100,7 @@ class DeviceGroupWorkTest {
                 publisher = ACCEPTING_RELAY,
                 deviceGroupConfig =
                     if (deviceGroups) {
-                        MarmotDeviceGroupConfig(stores.trust, stores.privateKeyPackages, relays, workStore = stores.work)
+                        MarmotDeviceGroupConfig(stores.trust, stores.privateKeyPackages, relays, workStore = workStore)
                     } else {
                         null
                     },
@@ -208,6 +213,57 @@ class DeviceGroupWorkTest {
         c.manager.ingest(add.result.event!!.signedEvent)
         return add.deviceGroupEvents
     }
+
+    /** A work store whose reads wait for [open], as a slow disk does. */
+    private class SlowWorkStore(
+        private val inner: DeviceGroupWorkStore,
+    ) : DeviceGroupWorkStore {
+        val open = CompletableDeferred<Unit>()
+
+        override suspend fun load(): DeviceGroupWork? {
+            open.await()
+            return inner.load()
+        }
+
+        override suspend fun save(work: DeviceGroupWork) = inner.save(work)
+    }
+
+    /**
+     * A call that needs the work while its first load is still reading the store waits for it.
+     * The load used to mark the work loaded before reading it, so a rename made meanwhile ran on
+     * the empty lists and saved them over the record: the edit kept from before the restart was
+     * gone.
+     */
+    @Test
+    fun aRenameDuringTheFirstLoadOfTheWorkKeepsWhatWasStored() =
+        runBlocking<Unit> {
+            val keys = KeyPair()
+            val a = Device(keys)
+            val b = Device(keys)
+            link(a, b)
+            assertNotNull(a.groups.stageRename(b.slot(), "Phone"))
+
+            val slow = SlowWorkStore(a.stores.work)
+            val restarted = Device(a.stores, workStore = slow)
+            restarted.manager.restoreAll()
+            val starting = launch { restarted.groups.start() }
+            yield()
+            val renaming = async { restarted.groups.stageRename(a.slot(), "Laptop") }
+            yield()
+            slow.open.complete(Unit)
+            starting.join()
+            assertNotNull(renaming.await())
+
+            assertEquals(setOf(b.slot() to "Phone", a.slot() to "Laptop"), restarted.groups.keptEdits().toSet())
+            assertEquals(2, restarted.groups.keptEdits().size)
+            assertEquals(
+                2,
+                a.stores.work
+                    .load()
+                    ?.edits
+                    ?.size,
+            )
+        }
 
     // ---- 4: renames that lose a fork ------------------------------------------------------------
 
